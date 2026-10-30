@@ -10,7 +10,7 @@ function export_receiver_config(cfg, fileName)
 %   whenever cfg changes, before starting the C receiver. Default file:
 %   radar_receiver/config/radar_config.bin.
 %
-%   File format (little-endian): 8 bytes 'RADRXCFG', uint32 version (1),
+%   File format (little-endian): 8 bytes 'RADRXCFG', uint32 version (2),
 %   uint32 number of records, then per record: char name[32] (zero padded),
 %   uint32 type (0 = real, 1 = complex), uint32 rows, uint32 cols, and
 %   rows*cols doubles in column-major order (complex: re, im pairs).
@@ -78,7 +78,7 @@ r{end+1} = {'guardDoppler', sys.cfar.guardDoppler};
 r{end+1} = {'trainDoppler', sys.cfar.trainDoppler};
 r{end+1} = {'nTrain', sys.cfar.nTrain};
 r{end+1} = {'alpha', sys.cfar.alpha};
-r{end+1} = {'nLooks', sys.dop.nLooks};               % optional in the receiver (Pfa of the threshold)
+r{end+1} = {'nLooks', sys.dop.nLooks};               % Pfa of the threshold
 r{end+1} = {'sidelobeMargin_dB', cfg.prune.sidelobeMargin_dB};
 r{end+1} = {'minHits', max(1, ceil(cfg.extract.minExtent_deg / ...
                        (sys.ant.rate_dps * mean(sys.pri) * cfg.proc.updateEvery)))};
@@ -107,7 +107,7 @@ if ~isempty(folder) && ~exist(folder, 'dir'), mkdir(folder); end
 fid = fopen(fileName, 'w', 'ieee-le');
 if fid < 0, error('Cannot write %s', fileName); end
 fwrite(fid, 'RADRXCFG', 'char');
-fwrite(fid, [1 numel(r)], 'uint32');
+fwrite(fid, [2 numel(r)], 'uint32');
 for i = 1:numel(r)
     name = r{i}{1};
     value = double(r{i}{2});

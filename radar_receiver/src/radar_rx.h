@@ -51,13 +51,13 @@ typedef struct {
     double *delay_s;       /* delay axis [nRange]                                     */
     double  lambda_m;      /* wavelength used for the radial velocity                 */
     int     testFirst;     /* range cells tested by the CFAR: testFirst ... testFirst+testCount-1 */
-    int     testCount;     /* (the others are only training cells; default: all)      */
-    int     waveform;      /* WAVE_LFM or WAVE_PHASE_CODE (information; default LFM)   */
+    int     testCount;     /* (the others are only training cells)                     */
+    int     waveform;      /* WAVE_LFM or WAVE_PHASE_CODE (information)                */
     int     compression;   /* COMPRESSION_MATCHED or COMPRESSION_MISMATCH (information)  */
     int     nChips;        /* phase code: chips (0 for LFM)                           */
     int     mfShift;       /* samples by which the mismatch filter peaks earlier (0; < 0: later) */
-    int     nPulse;        /* the transmitted pulse at the DDC rate (for tests; 0 if   */
-    float  *pulseRe, *pulseIm;   /* the file does not have it)                       */
+    int     nPulse;        /* the transmitted pulse at the DDC rate (for the tests)    */
+    float  *pulseRe, *pulseIm;
 } PulseConfig;
 
 typedef struct {
@@ -97,8 +97,7 @@ typedef struct {
     int     cfarMethod;    /* CFAR_2D, CFAR_RANGE or CFAR_DOPPLER: the window below   */
     int     guardRange, trainRange, guardDoppler, trainDoppler, nTrain;
     double  alpha;         /* CA-CFAR threshold factor (design value from cfg.cfar.pfa) */
-    double  nLooks;        /* looks of the noise power in a cell (for cfar_pfa; 0 if the
-                              file is older and does not have it)                     */
+    double  nLooks;        /* looks of the noise power in a cell (for cfar_pfa)       */
     double  sidelobeMargin_dB;
     int     minHits, maxMiss, updateEvery;
     double  minExtent_deg;  /* azimuth extent of a plot (minHits = this / azimuth step per update) */

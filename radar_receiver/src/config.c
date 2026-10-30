@@ -45,23 +45,6 @@ static const Record *find(RecordSet *rs, const char *name)
     return NULL;
 }
 
-/* A record that older files may not have: NULL if it is missing. */
-static const Record *find_optional(const RecordSet *rs, const char *name)
-{
-    for (int i = 0; i < rs->n; i++)
-        if (strcmp(rs->rec[i].name, name) == 0) return &rs->rec[i];
-    return NULL;
-}
-
-/* A scalar that older files may not have: 'fallback' if it is missing. */
-static double get_optional(RecordSet *rs, const char *name, double fallback)
-{
-    for (int i = 0; i < rs->n; i++)
-        if (strcmp(rs->rec[i].name, name) == 0)
-            return rs->rec[i].rows * rs->rec[i].cols >= 1 ? rs->rec[i].data[0] : fallback;
-    return fallback;
-}
-
 static double get_scalar(RecordSet *rs, const char *name)
 {
     const Record *r = find(rs, name);
@@ -137,8 +120,8 @@ static int read_records(FILE *f, RecordSet *rs)
         return -1;
     }
     if (fread(magic, 1, 8, f) != 8 || memcmp(magic, "RADRXCFG", 8) != 0 ||
-        fread(head, sizeof(uint32_t), 2, f) != 2 || head[0] != 1) {
-        set_error(rs, "not a receiver configuration file (version 1)");
+        fread(head, sizeof(uint32_t), 2, f) != 2 || head[0] != 2) {
+        set_error(rs, "not a receiver configuration file of version 2: export it again with export_receiver_config.m");
         return -1;
     }
     if (head[1] > 10000) {
@@ -221,17 +204,17 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             snprintf(key, sizeof key, "%s_range_m", names[p]);  pc->range_m = get_doubles(&rs, key, pc->nRange, NULL);
             snprintf(key, sizeof key, "%s_delay_s", names[p]);  pc->delay_s = get_doubles(&rs, key, pc->nRange, NULL);
             snprintf(key, sizeof key, "%s_lambda_m", names[p]); pc->lambda_m = get_scalar(&rs, key);
-            snprintf(key, sizeof key, "%s_testFirst", names[p]); pc->testFirst = (int)get_optional(&rs, key, 0);
+            snprintf(key, sizeof key, "%s_testFirst", names[p]); pc->testFirst = get_int(&rs, key);
             snprintf(key, sizeof key, "%s_testCount", names[p]);
-            pc->testCount = (int)get_optional(&rs, key, pc->nRange);
-            /* pulse compression (older files: LFM, matched filter) */
-            snprintf(key, sizeof key, "%s_waveform", names[p]);    pc->waveform = (int)get_optional(&rs, key, WAVE_LFM);
+            pc->testCount = get_int(&rs, key);
+            /* pulse compression */
+            snprintf(key, sizeof key, "%s_waveform", names[p]);    pc->waveform = get_int(&rs, key);
             snprintf(key, sizeof key, "%s_compression", names[p]);
-            pc->compression = (int)get_optional(&rs, key, COMPRESSION_MATCHED);
-            snprintf(key, sizeof key, "%s_nChips", names[p]);      pc->nChips = (int)get_optional(&rs, key, 0);
-            snprintf(key, sizeof key, "%s_mfShift", names[p]);     pc->mfShift = (int)get_optional(&rs, key, 0);
+            pc->compression = get_int(&rs, key);
+            snprintf(key, sizeof key, "%s_nChips", names[p]);      pc->nChips = get_int(&rs, key);
+            snprintf(key, sizeof key, "%s_mfShift", names[p]);     pc->mfShift = get_int(&rs, key);
             snprintf(key, sizeof key, "%s_pulse", names[p]);
-            const Record *pulse = find_optional(&rs, key);
+            const Record *pulse = find(&rs, key);
             if (pulse) {
                 pc->nPulse = (int)(pulse->rows * pulse->cols);
                 get_complex(&rs, key, 1, pc->nPulse, 0, &pc->pulseRe, &pc->pulseIm);
@@ -241,9 +224,8 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
                                (pc->compression == COMPRESSION_MISMATCH && pc->waveform != WAVE_PHASE_CODE) ||
                                pc->mfShift <= -pc->nTaps || pc->mfShift >= pc->nTaps))
                 set_error(&rs, "invalid pulse compression of the %s pulse", names[p]);
-            /* receive interval (older files: the pulse compression input) */
-            snprintf(key, sizeof key, "%s_rxFirst", names[p]);  pc->rxFirst = (int)get_optional(&rs, key, pc->ddcFirst);
-            snprintf(key, sizeof key, "%s_rxCount", names[p]);  pc->rxCount = (int)get_optional(&rs, key, pc->ddcCount);
+            snprintf(key, sizeof key, "%s_rxFirst", names[p]);  pc->rxFirst = get_int(&rs, key);
+            snprintf(key, sizeof key, "%s_rxCount", names[p]);  pc->rxCount = get_int(&rs, key);
             if (!rs.failed && (pc->ddcCount != pc->nRange + pc->nTaps - 1 || pc->rxCount < 1 ||
                                pc->rxFirst < 0 || pc->rxFirst + pc->rxCount > cfg->nDdc ||
                                pc->ddcFirst + pc->ddcCount <= pc->rxFirst ||
@@ -279,16 +261,16 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         cfg->guardDoppler = get_int(&rs, "guardDoppler");
         cfg->trainDoppler = get_int(&rs, "trainDoppler");
         cfg->nTrain       = get_int(&rs, "nTrain");
-        cfg->cfarMethod   = (int)get_optional(&rs, "cfarMethod", CFAR_2D);
+        cfg->cfarMethod   = get_int(&rs, "cfarMethod");
         cfg->alpha        = get_scalar(&rs, "alpha");
-        cfg->nLooks       = get_optional(&rs, "nLooks", 0.0);
+        cfg->nLooks       = get_scalar(&rs, "nLooks");
         cfg->sidelobeMargin_dB = get_scalar(&rs, "sidelobeMargin_dB");
         cfg->minHits      = get_int(&rs, "minHits");
         cfg->maxMiss      = get_int(&rs, "maxMiss");
         cfg->updateEvery  = get_int(&rs, "updateEvery");
         cfg->minExtent_deg = get_scalar(&rs, "minExtent_deg");
         cfg->meanPri_s    = get_scalar(&rs, "meanPri_s");
-        cfg->trackEnable  = (int)get_optional(&rs, "trackEnable", 0);
+        cfg->trackEnable  = get_int(&rs, "trackEnable");
         if (cfg->trackEnable) {
             cfg->trackDim = get_int(&rs, "trackDim");
             double *v = get_doubles(&rs, "trackSigma", 3, NULL);
@@ -298,11 +280,10 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             free(v);
             free(q);
             cfg->trackSigmaV0 = get_scalar(&rs, "trackSigmaV0");
-            /* older files: constant velocity, the batch associated at the next PRI */
-            cfg->trackModel = (int)get_optional(&rs, "trackModel", TRACK_CV);
-            cfg->trackSigmaA0 = get_optional(&rs, "trackSigmaA0", 0.0);
-            cfg->trackBatchGap_s = get_optional(&rs, "trackBatchGap_s", 0.0);
-            cfg->trackBatchMax_s = get_optional(&rs, "trackBatchMax_s", 0.0);
+            cfg->trackModel = get_int(&rs, "trackModel");
+            cfg->trackSigmaA0 = get_scalar(&rs, "trackSigmaA0");
+            cfg->trackBatchGap_s = get_scalar(&rs, "trackBatchGap_s");
+            cfg->trackBatchMax_s = get_scalar(&rs, "trackBatchMax_s");
             cfg->trackGate = get_scalar(&rs, "trackGate");
             cfg->trackConfirmHits = get_int(&rs, "trackConfirmHits");
             cfg->trackMaxMissTentative = get_int(&rs, "trackMaxMissTentative");
