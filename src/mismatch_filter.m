@@ -1,7 +1,8 @@
 function h = mismatch_filter(Y, pad, mainHalf, nIter)
 %MISMATCH_FILTER  Mismatch filter with the smallest peak range sidelobe.
 %   h = MISMATCH_FILTER(Y, pad) designs a filter of size(Y,1) + 2*pad
-%   coefficients for the sampled pulse Y (a phase code with one sample per
+%   coefficients (pad = [before after]: size(Y,1) + before + after, any
+%   length not shorter than the pulse) for the sampled pulse Y (a phase code with one sample per
 %   chip, or the pulse after the DDC from ddc_pulse.m, one column per
 %   sampling phase). The output conv(Y(:,k), h) is 1 at the main peak of
 %   the first column (the peak of its matched filter, in the middle of the
@@ -15,15 +16,17 @@ function h = mismatch_filter(Y, pad, mainHalf, nIter)
 %     h = mismatch_filter(ddc_pulse(sys, sys.wave.long, 0:0.25:0.75), 10, 3);
 if nargin < 3, mainHalf = 0; end
 if nargin < 4, nIter = 300; end
+if isscalar(pad), pad = [pad pad]; end
+if any(pad < 0), error('mismatch_filter: the filter must not be shorter than the pulse (pad = %s).', mat2str(pad)); end
 [N, nCol] = size(Y);
-K = N + 2*pad;
+K = N + sum(pad);
 As = [];
 for col = 1:nCol
     A = zeros(N+K-1, K);                             % conv(Y(:,col), h) = A*h
     for j = 1:K
         A(j:j+N-1, j) = Y(:, col);
     end
-    [~, c] = max(abs(A * conj(flipud([zeros(pad, 1); Y(:, col); zeros(pad, 1)]))));
+    [~, c] = max(abs(A * conj(flipud([zeros(pad(1), 1); Y(:, col); zeros(pad(2), 1)]))));
     side = true(N+K-1, 1);
     side(max(1, c-mainHalf):min(end, c+mainHalf)) = false;
     As = [As; A(side, :)]; %#ok<AGROW>

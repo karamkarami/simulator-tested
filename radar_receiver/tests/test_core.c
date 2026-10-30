@@ -187,10 +187,10 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
     pri.nCh = cfg.nCh;
     pri.nSamples = cfg.nDdc;
     pri.ddcFs_Hz = (float)cfg.fsOut_Hz;
-    pri.shortIdx[0] = (uint32_t)cfg.pulse[PULSE_SHORT].ddcFirst + 1;
-    pri.shortIdx[1] = (uint32_t)(cfg.pulse[PULSE_SHORT].ddcFirst + cfg.pulse[PULSE_SHORT].ddcCount);
-    pri.longIdx[0] = (uint32_t)cfg.pulse[PULSE_LONG].ddcFirst + 1;
-    pri.longIdx[1] = (uint32_t)(cfg.pulse[PULSE_LONG].ddcFirst + cfg.pulse[PULSE_LONG].ddcCount);
+    pri.shortIdx[0] = (uint32_t)cfg.pulse[PULSE_SHORT].rxFirst + 1;
+    pri.shortIdx[1] = (uint32_t)(cfg.pulse[PULSE_SHORT].rxFirst + cfg.pulse[PULSE_SHORT].rxCount);
+    pri.longIdx[0] = (uint32_t)cfg.pulse[PULSE_LONG].rxFirst + 1;
+    pri.longIdx[1] = (uint32_t)(cfg.pulse[PULSE_LONG].rxFirst + cfg.pulse[PULSE_LONG].rxCount);
     pri.iq = malloc(sizeof(int16_t) * 2 * (size_t)cfg.nCh * cfg.nDdc);
     double *steerRe = malloc(sizeof(double) * cfg.nCh), *steerIm = malloc(sizeof(double) * cfg.nCh);
     for (int ch = 0; ch < cfg.nCh; ch++) {               /* matched to the beam weights */

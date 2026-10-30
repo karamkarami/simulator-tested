@@ -155,7 +155,7 @@ for k = 1:sched.nPulses
     for i = 1:2
         p  = names{i};
         wv = sys.wave.(p);
-        seg = bb(wv.ddcIdx, :);                         % DDC samples of this sub-pulse
+        seg = ddc_segment(bb, wv);                      % DDC samples of this sub-pulse
         tb = tic;
         if sys.dbf.enabled
             bm = digital_beamforming(seg, sys.dbf.W);   % [nBeams x nSamples]

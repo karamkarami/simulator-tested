@@ -116,17 +116,18 @@ end
 
 %% 5) Phase codes (P4) and their mismatch filters
 % shortCode, longCode [nChips x 1]: complex chip values, the first chip is
-% sent first. shortMismatch, longMismatch [nChips + 2*pad x 1]: mismatch
-% filter with one coefficient per chip, as a convolution filter
-% (output = conv(code, filter)); its main peak is in the middle of the full
-% convolution. pad = min(5, nChips/2) chips on each side keeps the range
-% handover between the sub-pulses (with a longer filter the short pulse
-% ends before the long pulse starts) and the receive window of the
-% staggered PRF; more padding gives little here (25 chips: PSL -25.9 dB with
-% 5, -26.0 dB with 10). The filter minimises the peak sidelobe for a unit
-% main peak (mismatch_filter.m). A filter with
-% another sample rate (e.g. designed at the DDC output rate on the received
-% pulse) can be given with <pulse>MismatchRate_Hz (setup_radar.m).
+% sent first. shortMismatch, longMismatch [K x 1]: mismatch filter with one
+% coefficient per chip, as a convolution filter (output = conv(code,
+% filter)); its main peak is in the middle of the full convolution. Length
+% K = cfg.wave.<pulse>.mismatchLength (any K >= nChips, e.g. 3*nChips; the
+% extra coefficients are split between both ends), by default nChips + 2*pad
+% with pad = min(5, nChips/2): more padding gives little here (25 chips: PSL
+% -25.9 dB with 5, -26.0 dB with 10). Any length works with the rest of the
+% chain: the range cells and the receive window do not depend on it
+% (setup_radar.m). The filter minimises the peak sidelobe for a unit main
+% peak (mismatch_filter.m). A filter with another sample rate (e.g. designed
+% at the DDC output rate on the received pulse) can be given with
+% <pulse>MismatchRate_Hz (setup_radar.m).
 if doAll || strcmpi(which, 'phaseCode')
     names = {'short', 'long'};
     madeFor = struct();
@@ -135,10 +136,17 @@ if doAll || strcmpi(which, 'phaseCode')
         N = round(wv.width_s / wv.chip_s);
         m = (0:N-1)';
         code = exp(1j*(pi*m.^2/N - pi*m));            % P4 polyphase code
-        pad = min(5, floor(N/2));
+        K = mismatch_length(wv);
+        if isempty(K), K = N + 2*min(5, floor(N/2)); end
+        if K < N || K ~= round(K)
+            error('cfg.wave.%s.mismatchLength = %g: a whole number of coefficients, at least the %d chips of the code.', ...
+                  names{i}, K, N);
+        end
+        pad = [floor((K - N)/2), K - N - floor((K - N)/2)];
         out.([names{i} 'Code']) = code;
         out.([names{i} 'Mismatch']) = mismatch_filter(code, pad);
         madeFor.([names{i} 'Chips']) = N;
+        madeFor.([names{i} 'MismatchLength']) = mismatch_length(wv);
     end
     out.madeFor = madeFor;
     save(cfg.files.phaseCode, '-struct', 'out', '-v7');
@@ -157,4 +165,10 @@ k = (0:nTaps-1)';
 blackman = 0.42 - 0.5*cos(2*pi*k/(nTaps-1)) + 0.08*cos(4*pi*k/(nTaps-1));
 h = s .* blackman;
 h = h / sum(h);
+end
+
+function K = mismatch_length(wv)
+% cfg.wave.<pulse>.mismatchLength ([] = default length; also for a cfg without the field).
+K = [];
+if isfield(wv, 'mismatchLength'), K = wv.mismatchLength; end
 end

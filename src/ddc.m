@@ -10,8 +10,9 @@ function [I, Q] = ddc(adcData, sys)
 %   The filter coefficients are signed 16-bit integers with 13 fractional bits.
 %   The accumulator of every stage is shifted right by cfg.ddc.shift bits
 %   (13 = unit gain), rounded and saturated to signed 16 bit.
-%   The time of every output sample is sys.tDdc; the samples of the short and
-%   of the long sub-pulse are sys.wave.short.ddcIdx and sys.wave.long.ddcIdx.
+%   The time of every output sample is sys.tDdc; the receive intervals of the
+%   short and of the long sub-pulse are sys.wave.short.rxIdx and
+%   sys.wave.long.rxIdx (ddc_segment.m: input of the pulse compression).
 fixedPoint = sys.cfg.ddc.fixedPoint;
 x  = double(adcData);                              % integer arithmetic is exact in double
 xI = x .* sys.ddc.cos;                             % real (I) line

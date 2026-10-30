@@ -239,10 +239,15 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             if (!rs.failed && ((pc->waveform != WAVE_LFM && pc->waveform != WAVE_PHASE_CODE) ||
                                (pc->compression != COMPRESSION_MATCHED && pc->compression != COMPRESSION_MISMATCH) ||
                                (pc->compression == COMPRESSION_MISMATCH && pc->waveform != WAVE_PHASE_CODE) ||
-                               pc->mfShift < 0 || pc->mfShift >= pc->nTaps))
+                               pc->mfShift <= -pc->nTaps || pc->mfShift >= pc->nTaps))
                 set_error(&rs, "invalid pulse compression of the %s pulse", names[p]);
-            if (!rs.failed && (pc->ddcCount != pc->nRange + pc->nTaps - 1 ||
-                               pc->ddcFirst < 0 || pc->ddcFirst + pc->ddcCount > cfg->nDdc))
+            /* receive interval (older files: the pulse compression input) */
+            snprintf(key, sizeof key, "%s_rxFirst", names[p]);  pc->rxFirst = (int)get_optional(&rs, key, pc->ddcFirst);
+            snprintf(key, sizeof key, "%s_rxCount", names[p]);  pc->rxCount = (int)get_optional(&rs, key, pc->ddcCount);
+            if (!rs.failed && (pc->ddcCount != pc->nRange + pc->nTaps - 1 || pc->rxCount < 1 ||
+                               pc->rxFirst < 0 || pc->rxFirst + pc->rxCount > cfg->nDdc ||
+                               pc->ddcFirst + pc->ddcCount <= pc->rxFirst ||
+                               pc->ddcFirst >= pc->rxFirst + pc->rxCount))
                 set_error(&rs, "inconsistent DDC segment of the %s pulse", names[p]);
         }
 

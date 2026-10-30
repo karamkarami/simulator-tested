@@ -35,8 +35,12 @@ enum { COMPRESSION_MATCHED = 0, COMPRESSION_MISMATCH = 1 };
 const char *cfar_method_name(int method);   /* "2-D", "1-D range", "1-D Doppler" */
 
 typedef struct {
-    int     ddcFirst;      /* first DDC sample of this sub-pulse (0-based)            */
-    int     ddcCount;      /* DDC samples of this sub-pulse (= nRange + nTaps - 1)    */
+    int     rxFirst;       /* receive interval of this sub-pulse: DDC samples rxFirst ... */
+    int     rxCount;       /* rxFirst+rxCount-1 (0-based; the PRI header holds it 1-based) */
+    int     ddcFirst;      /* first DDC sample of the pulse compression input (0-based); the
+                              input may start before or end after the receive interval:
+                              those samples are zero (a filter longer than the pulse)  */
+    int     ddcCount;      /* samples of the pulse compression input (= nRange + nTaps - 1) */
     int     nTaps;         /* pulse compression filter length                         */
     int     nRange;        /* range cells                                             */
     float  *tapsRe;        /* compression filter taps [nTaps]: y[r] = sum_j h[j]*x[r+nTaps-1-j]
@@ -51,7 +55,7 @@ typedef struct {
     int     waveform;      /* WAVE_LFM or WAVE_PHASE_CODE (information; default LFM)   */
     int     compression;   /* COMPRESSION_MATCHED or COMPRESSION_MISMATCH (information)  */
     int     nChips;        /* phase code: chips (0 for LFM)                           */
-    int     mfShift;       /* samples by which the mismatch filter peaks earlier (0)   */
+    int     mfShift;       /* samples by which the mismatch filter peaks earlier (0; < 0: later) */
     int     nPulse;        /* the transmitted pulse at the DDC rate (for tests; 0 if   */
     float  *pulseRe, *pulseIm;   /* the file does not have it)                       */
 } PulseConfig;

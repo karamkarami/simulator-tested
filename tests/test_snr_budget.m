@@ -68,7 +68,7 @@ sysS = sys;  sysS.cfg = cfgS;
 tau = 2*R0/c;
 inEcho = @(t) t >= wv.tTx_s + tau + 0.25*wv.width_s & t <= wv.tTx_s + tau + 0.75*wv.width_s;
 
-tSeg = sys.tDdc(wv.ddcIdx);                          % times of the DDC samples of this sub-pulse
+tSeg = sys.tDdc(1) + (wv.ddcIdx - 1) / sys.fsOut;   % times of the DDC samples of this sub-pulse
 rxNow = sys.tAdc >= sys.wave.short.tTx_s + sys.wave.short.width_s & ...     % receiving, not transmitting
         (sys.tAdc < sys.wave.long.tTx_s | sys.tAdc >= sys.wave.long.tTx_s + sys.wave.long.width_s + 1e-6);
 m.adc = mean(double(xS.adc(inEcho(sys.tAdc), 1)).^2) / var(double(xN.adc(rxNow, 1)));
@@ -127,14 +127,15 @@ for k = 1:n
     [I, Q] = ddc(x, sys);
     bb = complex(single(I), single(Q));
     if sys.dbf.enabled
-        bm = digital_beamforming(bb(wv.ddcIdx, :), sys.dbf.W);
+        bm = digital_beamforming(ddc_segment(bb, wv), sys.dbf.W);
     else
-        bm = bb(wv.ddcIdx, :).';
+        bm = ddc_segment(bb, wv).';
     end
     rp = matched_filter(bm, wv);
     rpCpi(:, :, k) = rp;
-    noise.ddc = noise.ddc + mean(abs(bb(wv.ddcIdx, 1)).^2) / n;
-    noise.dbf = noise.dbf + mean(abs(bm).^2, 2) / n;
+    noise.ddc = noise.ddc + mean(abs(bb(wv.rxIdx, 1)).^2) / n;
+    inRx = wv.ddcIdx >= wv.rxIdx(1) & wv.ddcIdx <= wv.rxIdx(end);   % (not the zeros around it)
+    noise.dbf = noise.dbf + mean(abs(bm(:, inRx)).^2, 2) / n;
     if k == k0                                       % keep the centre pulse of every block
         last.adc = x;  last.ddc = bb;  last.dbf = bm;  last.mf = rp;
     end

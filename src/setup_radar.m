@@ -103,7 +103,9 @@ names = {'short', 'long'};
 codes = [];                                                   % phase codes and mismatch filters
 if any(strcmpi({cfg.wave.short.type, cfg.wave.long.type}, 'phasecode'))
     nChips = [round(cfg.wave.short.width_s / cfg.wave.short.chip_s), round(cfg.wave.long.width_s / cfg.wave.long.chip_s)];
-    codes = load_input(cfg, 'phaseCode', struct('shortChips', nChips(1), 'longChips', nChips(2)));
+    codes = load_input(cfg, 'phaseCode', struct('shortChips', nChips(1), 'shortMismatchLength', ...
+                       mismatch_length(cfg.wave.short), 'longChips', nChips(2), 'longMismatchLength', ...
+                       mismatch_length(cfg.wave.long)));
 end
 for i = 1:2
     wv = cfg.wave.(names{i});
@@ -137,10 +139,11 @@ end
 filterSpan    = (L1-1)/fs + (L2-1)/fs1;                       % input span of one DDC output sample
 sys.rxStart_s = 0;                                            % the record starts with the PRI
 % (the CFAR tests the range cells up to the end of the window: its range
-% window is shifted inwards at the edges, so no extra cells are needed)
-% a mismatch filter also needs the samples after the end of the echo
-mfTail = max(0, numel(wl.mfTaps) - round(wl.width_s*sys.fsOut) - wl.mfShift) / sys.fsOut;
-rxEnd = wl.tTx_s + wl.width_s + 2*cfg.rx.maxRange_m/c + mfTail + filterSpan + 2/sys.fsOut;
+% window is shifted inwards at the edges, so no extra cells are needed). The
+% record, and so the DDC output, depends only on the timing, the DDC filters
+% and the decimation: not on the pulse compression filters or the CFAR (a
+% filter longer than the pulse sees zeros after the end of the record).
+rxEnd = wl.tTx_s + wl.width_s + 2*cfg.rx.maxRange_m/c + filterSpan + 2/sys.fsOut;
 if rxEnd > min(sys.pri)
     error(['Receive window (%.1f us) does not fit in the shortest PRI (%.1f us): reduce ', ...
            'cfg.rx.maxRange_m or start the long pulse earlier.'], rxEnd*1e6, min(sys.pri)*1e6);
@@ -163,33 +166,47 @@ firstAdc = k*D2*D1 + 1;
 lastAdc  = (k*D2 + L2 - 1)*D1 + L1;
 
 %% Receive interval, DDC segment and delay / range axes of every sub-pulse
+% rxIdx : DDC samples whose whole input window lies inside the receive
+%         interval of the sub-pulse (sent in the PRI header). They depend only
+%         on the timing, the DDC filters and the decimation.
+% ddcIdx: input of the pulse compression (valid convolution), nRange + L - 1
+%         samples. Output k belongs to the echo starting at rxIdx(k), for
+%         every echo that lies entirely inside the receive interval, whatever
+%         the length of the compression filter: a filter longer than the
+%         pulse (mismatch filter) needs samples before and after the interval,
+%         which are taken as zeros (ddc_segment.m), so its range cells are the
+%         same as those of the matched filter.
 rxInterval.short = [ws.tTx_s + ws.width_s, wl.tTx_s];         % [start end) of the receive interval
 rxInterval.long  = [wl.tTx_s + wl.width_s, inf];
 for i = 1:2
     wv = sys.wave.(names{i});
-    % DDC samples whose whole input window lies inside the receive interval of this sub-pulse
     iv = rxInterval.(names{i});
-    wv.ddcIdx = find(sys.tAdc(firstAdc) >= iv(1) & sys.tAdc(lastAdc) < iv(2)).';
-    L = numel(wv.mfTaps);                                     % compression filter length [samples]
-    if numel(wv.ddcIdx) < L + 2*(sys.cfar.guardRange + sys.cfar.trainRange) + 1
-        error(['The %s-pulse receive interval is too short for its compression filter and the CFAR ', ...
+    wv.rxIdx = find(sys.tAdc(firstAdc) >= iv(1) & sys.tAdc(lastAdc) < iv(2)).';
+    Lp = round(wv.width_s * sys.fsOut);                       % pulse length [samples]
+    L  = numel(wv.mfTaps);                                    % compression filter length [samples]
+    wv.nRange = numel(wv.rxIdx) - Lp + 1;
+    if wv.nRange < 2*(sys.cfar.guardRange + sys.cfar.trainRange) + 1
+        error(['The %s-pulse receive interval is too short for its pulse and the CFAR ', ...
                'window: move the long pulse later or increase cfg.rx.maxRange_m.'], wv.name);
     end
     % Output k of the valid convolution of the matched filter correlates the
     % reference with the segment starting at sample k. The reference holds
     % the pulse at the mid-sample times, so output k peaks for an echo that
-    % starts half a sample before tDdc(k). The peak of a mismatch filter
-    % comes mfShift samples earlier: output k belongs to the echo starting at
-    % sample k + mfShift.
-    wv.nRange  = numel(wv.ddcIdx) - L + 1;
-    wv.delay_s = sys.tDdc(wv.ddcIdx((1:wv.nRange) + wv.mfShift)).' - 0.5/sys.fsOut - wv.tTx_s;   % delay axis [s]
+    % starts half a sample before tDdc of that sample. The peak of a mismatch
+    % filter comes mfShift samples earlier: output k belongs to the echo
+    % starting at segment sample k + mfShift, so the segment starts mfShift
+    % samples before the receive interval.
+    wv.ddcIdx  = wv.rxIdx(1) - wv.mfShift + (0:wv.nRange + L - 2);
+    wv.delay_s = sys.tDdc(wv.rxIdx(1:wv.nRange)).' - 0.5/sys.fsOut - wv.tTx_s;   % delay axis [s]
     wv.range_m = c * wv.delay_s / 2;                              % range axis [m]
     sys.wave.(names{i}) = wv;
 end
 % Handover: the short pulse is tested up to where the long pulse starts (its
 % first range cell, tested thanks to the shifted CFAR window), so a target is
 % not reported twice. The short pulse keeps oR more cells as training cells
-% (and at least one whole CFAR range window).
+% (and at least one whole CFAR range window). Only its processing is
+% shortened (ddcIdx, range cells): its receive interval rxIdx, and so the PRI
+% header, stays the same for every CFAR method.
 oR = sys.cfar.guardRange + sys.cfar.trainRange;
 handover_m = sys.wave.long.range_m(1);
 ws = sys.wave.short;
@@ -199,9 +216,8 @@ if ws.range_m(end) + abs(diff(ws.range_m(1:2))) < handover_m
 end
 nKeep = max(find(ws.range_m < handover_m, 1, 'last') + oR, 2*oR + 1);   % + cells only used as CFAR training
 if nKeep < ws.nRange
-    Lp = numel(ws.mfTaps);
     ws.nRange  = nKeep;
-    ws.ddcIdx  = ws.ddcIdx(1:nKeep + Lp - 1);                 % the compression filter then gives nKeep cells
+    ws.ddcIdx  = ws.ddcIdx(1:nKeep + numel(ws.mfTaps) - 1);   % the compression filter then gives nKeep cells
     ws.delay_s = ws.delay_s(1:nKeep);
     ws.range_m = ws.range_m(1:nKeep);
     sys.wave.short = ws;
@@ -389,6 +405,12 @@ switch wv.compression
         error('cfg.wave.%s.compression must be ''matched'' or ''mismatch''.', wv.name);
 end
 taps = (h / norm(h)).';
+end
+
+function K = mismatch_length(wv)
+% cfg.wave.<pulse>.mismatchLength ([] = default length of make_input_files; also for a cfg without the field).
+K = [];
+if isfield(wv, 'mismatchLength'), K = wv.mismatchLength; end
 end
 
 function q = peak_position(y)

@@ -9,6 +9,12 @@ function ok = test_setup()
 %      the short pulse: the short pulse keeps one whole CFAR range window, so
 %      cfar_detect and the C receiver (export_receiver_config) can use it, and
 %      the CFAR tests its cells before the handover.
+%   4. The DDC output (samples per PRI) and the PRI header (receive interval
+%      of each sub-pulse) are the same for every CFAR method and every pulse
+%      compression filter (LFM, phase code with its matched filter, mismatch
+%      filters of the default length and of 3x the code), so a receiver set
+%      up with another CFAR method or filter accepts the PRIs; the exported
+%      receiver configuration holds the same receive intervals.
 
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
@@ -70,6 +76,42 @@ if exist(bin, 'file')                                  % the C receiver accepts 
     if status ~= 0, fprintf('%s', out); end
 end
 delete(fc);
+
+%% 4) DDC output and PRI header independent of the CFAR method and of the compression filter
+ref = [];
+good = true;
+txt = {};
+for comp = {'lfm', 'matched', 'mismatch', 'mismatch3x'}
+    for method = {'2d', 'range', 'doppler'}
+        c = cfg;
+        c.cfar.method = method{1};
+        for p = {'short', 'long'}
+            if ~strcmp(comp{1}, 'lfm')
+                c.wave.(p{1}).type = 'phasecode';
+                c.wave.(p{1}).compression = strrep(comp{1}, '3x', '');
+            end
+            if strcmp(comp{1}, 'mismatch3x')
+                c.wave.(p{1}).mismatchLength = 3 * round(c.wave.(p{1}).width_s / c.wave.(p{1}).chip_s);
+                c.files.phaseCode = fullfile(tempdir(), 'test_setup_phase_code_3x.mat');
+            end
+        end
+        s = setup_radar(c);
+        hdr = pulse_header(s, struct('scan', 0, 'time_s', 0, 'az_deg', 0, 'pri_s', s.pri(1), 'staggerIdx', 1), 1);
+        lay = [s.nDdc, hdr.shortDdcIdx, hdr.longDdcIdx];
+        if isempty(ref), ref = lay; end
+        good = good && isequal(lay, ref) && isequal(s.wave.long.range_m(1:2), sys.wave.long.range_m(1:2));
+        fc = [tempname() '.bin'];
+        evalc('export_receiver_config(c, fc)');
+        rx = read_receiver_records(fc, {'short_rxFirst', 'short_rxCount', 'long_rxFirst', 'long_rxCount'});
+        delete(fc);
+        good = good && isequal(rx, [ref(2) - 1, ref(3) - ref(2) + 1, ref(4) - 1, ref(5) - ref(4) + 1]);
+    end
+    txt{end+1} = sprintf('%s %d taps', comp{1}, numel(s.wave.long.mfTaps)); %#ok<AGROW>
+end
+f3 = fullfile(tempdir(), 'test_setup_phase_code_3x.mat');
+if exist(f3, 'file'), delete(f3); end
+ok = report(sprintf('DDC output %d samples, short [%d %d], long [%d %d] for every CFAR method and filter (long: %s)', ...
+                    ref, strjoin(txt, ', ')), good) && ok;
 fprintf('Configuration edge cases: %s\n', ternary(ok, 'PASS', 'FAIL'));
 end
 
@@ -79,4 +121,21 @@ end
 
 function s = ternary(c, a, b)
 if c, s = a; else, s = b; end
+end
+
+function v = read_receiver_records(fileName, names)
+% Scalar records of a receiver configuration file (export_receiver_config.m), in the order of names.
+fid = fopen(fileName, 'r', 'ieee-le');
+fread(fid, 8, 'char');
+hd = fread(fid, 2, 'uint32');
+v = nan(1, numel(names));
+for i = 1:hd(2)
+    name = deblank(char(fread(fid, 32, 'uint8').'));
+    name = name(name ~= 0);
+    t = fread(fid, 3, 'uint32');
+    data = fread(fid, (1 + t(1)) * t(2) * t(3), 'double');
+    k = find(strcmp(names, name));
+    if ~isempty(k), v(k) = data(1); end
+end
+fclose(fid);
 end

@@ -348,17 +348,25 @@ void processor_timing(const Processor *p, ProcessorTiming *t)
 /* Fast time: DBF and matched filter                                        */
 /* ------------------------------------------------------------------------ */
 
-/* DDC samples of the sub-pulse, as float [ch][n]. */
+/* DDC samples of the sub-pulse, as float [ch][n]; the samples outside its
+ * receive interval (transmission, other sub-pulse, end of the record) are zero. */
 static void load_segment(const RadarConfig *cfg, const PulseConfig *pc, const PriData *pri, PulseState *s)
 {
     const int n = pc->ddcCount;
+    const int k0 = pc->rxFirst > pc->ddcFirst ? pc->rxFirst - pc->ddcFirst : 0;      /* first inside   */
+    const int rxEnd = pc->rxFirst + pc->rxCount - pc->ddcFirst;
+    const int k1 = rxEnd < n ? rxEnd : n;                                            /* first after it */
     for (int ch = 0; ch < cfg->nCh; ch++) {
-        const int16_t *src = pri->iq + 2 * ((size_t)ch * pri->nSamples + pc->ddcFirst);
+        const int16_t *src = pri->iq + 2 * ((size_t)ch * pri->nSamples + pc->ddcFirst + k0);   /* sample k0 */
         float *re = s->segRe + (size_t)ch * n, *im = s->segIm + (size_t)ch * n;
-        for (int k = 0; k < n; k++) {
-            re[k] = src[2 * k];
-            im[k] = src[2 * k + 1];
+        memset(re, 0, sizeof(float) * k0);
+        memset(im, 0, sizeof(float) * k0);
+        for (int k = k0; k < k1; k++) {
+            re[k] = src[2 * (k - k0)];
+            im[k] = src[2 * (k - k0) + 1];
         }
+        memset(re + k1, 0, sizeof(float) * (n - k1));
+        memset(im + k1, 0, sizeof(float) * (n - k1));
     }
 }
 
@@ -965,15 +973,16 @@ static void run_tracker(Processor *p, double t_s, int flush, const ProcessorCall
     free(r.list);
 }
 
-/* The PRI has the layout of the configuration: channels, DDC samples, the DDC
- * samples of both sub-pulses (header, 1-based) and the DDC rate. */
+/* The PRI has the layout of the configuration: channels, DDC samples, the
+ * receive intervals of both sub-pulses (header, 1-based) and the DDC rate.
+ * (None of them depends on the CFAR or on the pulse compression filters.) */
 static int pri_matches_config(const RadarConfig *cfg, const PriData *pri)
 {
     if (pri->nCh != cfg->nCh || pri->nSamples != cfg->nDdc || !pri->iq) return 0;
     const uint32_t *idx[N_PULSES] = { pri->shortIdx, pri->longIdx };
     for (int i = 0; i < N_PULSES; i++) {
         const PulseConfig *pc = &cfg->pulse[i];
-        if (idx[i][0] != (uint32_t)pc->ddcFirst + 1 || idx[i][1] != (uint32_t)(pc->ddcFirst + pc->ddcCount))
+        if (idx[i][0] != (uint32_t)pc->rxFirst + 1 || idx[i][1] != (uint32_t)(pc->rxFirst + pc->rxCount))
             return 0;
     }
     return fabs(pri->ddcFs_Hz - cfg->fsOut_Hz) <= 1e-3 * cfg->fsOut_Hz;

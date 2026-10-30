@@ -36,11 +36,15 @@ therefore always use the same values.
 'phasecode'`, `cfg.wave.<pulse>.compression = 'matched' | 'mismatch'`,
 codes and filters in `../inputs/phase_code.mat`): the exported taps are the
 matched or the mismatch filter at the DDC rate, and the exported range axis
-already holds the earlier peak of the longer mismatch filter. The receiver
-filters with whatever taps the file has (direct or FFT, as for LFM), so it
-needs no setting of its own; it prints the waveform and the filter of each
-sub-pulse at the start, e.g. `long pulse: phase code of 150 chips, mismatch
-filter of 320 taps (23.65 ... 80.61 km)`. The file also holds the pulse
+already holds the earlier peak of the longer mismatch filter. The filter may
+have any length: the pulse compression input of each sub-pulse
+(`<pulse>_ddcFirst`, `<pulse>_ddcCount`) then starts before and ends after
+its receive interval (`<pulse>_rxFirst`, `<pulse>_rxCount`), and those samples
+are zero, so the range cells are the same as with the matched filter. The
+receiver filters with whatever taps the file has (direct or FFT, as for
+LFM), so it needs no setting of its own; it prints the waveform and the
+filter of each sub-pulse at the start, e.g. `long pulse: phase code of 150
+chips, mismatch filter of 320 taps (22.90 ... 80.61 km)`. The file also holds the pulse
 itself at the DDC rate (`<pulse>_pulse`), which `test_core` uses as the
 echo. `config/radar_config_phasecode.bin` is such a configuration (both
 sub-pulses with mismatch filters) for the `core_phasecode` test.
@@ -142,8 +146,11 @@ packets (counted as incomplete), and follows the sender when it restarts.
 A jump in the pulse numbers (a PRI lost, or a skipped azimuth sector)
 restarts the CPI buffers and closes the open plots, as the MATLAB simulator
 does between simulated sectors. A PRI whose layout (channels, DDC samples,
-samples of each sub-pulse, DDC rate) differs from the configuration is
-ignored and counted: export the configuration again.
+receive interval of each sub-pulse, DDC rate) differs from the configuration
+is ignored and counted: export the configuration again. The layout depends
+only on the pulse timing, the instrumented range, the DDC filters and the
+decimation, so the CFAR method and the pulse compression filters of the
+receiver may differ from those of the sender.
 
 The datagrams are read in a thread of their own, which puts the complete
 PRIs into a queue (`--queue`). The socket is therefore emptied also while a

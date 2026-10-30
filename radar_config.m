@@ -70,14 +70,16 @@ cfg.adc.fIF_Hz           = 30e6;   % IF carrier of the received signal (receiver
 % Pulse compression: LFM with the Taylor-windowed matched filter; a phase
 % code (chips from cfg.files.phaseCode, default P4) with its matched filter
 % or with the mismatch filter of the same file (lower range sidelobes for a
-% small SNR loss; the filter is longer than the pulse, so the first and last
-% range cells of each receive interval move inwards and the receive window
-% gets longer).
+% small SNR loss). The mismatch filter may have any length (not shorter than
+% the code): it sees zeros outside the receive interval, so the range cells,
+% the receive window and the DDC output are the same as with the matched filter.
 cfg.wave.short.type         = 'lfm';    % 'lfm' or 'phasecode' (code from cfg.files.phaseCode)
 cfg.wave.short.width_s      = 25e-6;    % pulse width [s]
 cfg.wave.short.bandwidth_Hz = 1e6;      % LFM sweep bandwidth [Hz]
 cfg.wave.short.chip_s       = 1e-6;     % phase-code chip length [s] (width_s/chip_s chips)
 cfg.wave.short.compression  = 'matched'; % phase code: 'matched' or 'mismatch' filter (LFM: 'matched')
+cfg.wave.short.mismatchLength = [];     % coefficients (one per chip) of the mismatch filter in the default
+                                        % phase-code file, e.g. 3*25 ([] = chips + 10, at most 2x the chips)
 cfg.wave.short.tTx_s        = 0;        % transmit time inside the PRI [s]
 
 cfg.wave.long.type          = 'lfm';
@@ -85,6 +87,7 @@ cfg.wave.long.width_s       = 150e-6;
 cfg.wave.long.bandwidth_Hz  = 1e6;
 cfg.wave.long.chip_s        = 1e-6;
 cfg.wave.long.compression   = 'matched';
+cfg.wave.long.mismatchLength = [];
 cfg.wave.long.tTx_s         = 200e-6;
 
 %% PRF
