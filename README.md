@@ -670,9 +670,27 @@ budget.
 | `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA: one confirmed track per target, close to it, no false track; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |
 | `test_c_receiver(mode, ..., cfarMethod)` | the six-target scenario streamed over UDP to the C receiver (`radar_receiver/`): its plots and track updates must match MATLAB; the recorded stream is replayed to check repeatability and speed |
 
-Latest results (Octave 8.4 on a 4-vCPU VM, every test of `run_all_tests`
-passed): the SNR budget checks agree within 0.45 dB (ADC, DDC and DBF within
-0.25 dB). The six-target tests find all 6 targets with no false plot, for
+Latest results at 170 MHz (Octave 8.4 on a 4-vCPU VM, every test of
+`run_all_tests` passed): the SNR budget checks agree within 0.21 dB in every
+block (the budget includes the ADC noise and the 16-bit DDC rounding). The
+six-target test with the fixed PRF finds all 6 targets with no false plot
+(range within 40 m, azimuth and elevation within 0.1 deg, radial velocity
+within one Doppler bin and unambiguous, SNR within 1 dB of the budget); with
+the staggered PRF it finds the 4 targets that are not at a blind speed (T1,
+T6 are, as predicted) with no false plot. In `test_c_receiver` the C
+receiver gives exactly the plots (no difference in range, azimuth,
+elevation, velocity, SNR, hits) and track updates of MATLAB for the fixed
+and the staggered PRF and with the 1-D range CFAR (one more plot, the
+clutter residue at 4.2 km described under CFAR, in both programs).
+`test_multi_scan` (three scans, C receiver): 17 plots, none false, 6 tracks
+(one per target), confirmed on T1 - T5 (T6 flies out of the 50 km of the
+test in the third scan), no false track. With only `cfg.fc` changed in the
+3 GHz configuration (60 dB receiver gain, no eclipse blanking) the same
+three scans gave 72 plots (45 false) and 40 tracks. `test_vhf_challenges`
+passes all its cases.
+
+At 3 GHz (before the change of carrier; every test passed): the SNR budget
+checks agreed within 0.45 dB (ADC, DDC and DBF within 0.25 dB). The six-target tests find all 6 targets with no false plot, for
 both the fixed and the staggered PRF. In `test_c_receiver` the C receiver
 gives the same 6 plots as MATLAB (same cells, range, azimuth, elevation,
 velocity, SNR and number of detections) and the same track updates for both
@@ -694,7 +712,7 @@ confirmed: speed within 4 m/s, heading within 0.3 deg, height within 25 m of
 the truth.
 
 `tests/run_all_tests.m` runs all of them for the fixed and the staggered
-PRF (about 3 hours in Octave on a 4-vCPU VM). The six-target test simulates
+PRF (about 4 hours in Octave on a 4-vCPU VM). The six-target test simulates
 only the azimuth sectors around the targets, about 2400 PRIs. Its raw files
 are about 18 GB per PRF mode; `run_all_tests` deletes them after checking
 them. Octave without a display (`octave-cli` has no graphics toolkit) runs

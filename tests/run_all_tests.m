@@ -4,7 +4,9 @@
 %   checks it and deletes it again (call test_six_targets(mode, true) to keep
 %   the files). When the C receiver is built (radar_receiver/build/radar_receiver,
 %   Linux or macOS), test_c_receiver compares it with the MATLAB processing
-%   (about 40 minutes per PRF mode). All tests together take about 3 hours.
+%   (about 20 minutes per run: fixed and staggered PRF, 1-D range and Doppler
+%   CFAR), and test_multi_scan sends three scans through it (about 40 minutes).
+%   All tests together take about 4 hours.
 %   The PPI tests need graphics: in Octave without a display run
 %   xvfb-run octave --no-gui --eval run_all_tests (octave-cli has no
 %   graphics toolkit: the interactive PPI test is skipped, the other tests

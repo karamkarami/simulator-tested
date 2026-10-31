@@ -9,8 +9,10 @@ function [ok, out] = test_multi_scan(prfMode, nScans, buildDir, replayOnly)
 %   records the datagrams, and then processes the recording (--replay, every
 %   PRI, independent of the speed of the computer). It checks:
 %     - every PRI of the schedule is in the recording, complete
-%     - every target that is not at a blind speed (snr_budget.m) has a
-%       confirmed track at the end, within 300 m of the target
+%     - every target that is not at a blind speed (snr_budget.m) and lies in
+%       the instrumented range on enough looks to be confirmed (T6 flies out
+%       of the 50 km of this test in the third scan) has a confirmed track at
+%       the end, within 300 m of the target
 %     - no confirmed track is more than 1 km from every target
 %     - at most 2 false plots per scan (more than 1 km / 3 deg from every target)
 %   The live run is reported as well: when the computer is busy the receiver
@@ -95,10 +97,18 @@ out.msPerPri = ms;
 T = read_csv(files.tracks);                          % id confirmed deleted time x y z vx vy vz ...
 P = read_csv(files.plots);
 h = cfg.ant.height_m;
-blind = false(1, numel(cfg.targets));
+% a target needs a confirmed track when it is not at a blind speed and lies
+% inside the instrumented range on at least confirmHits looks, the last one
+% included (a target can fly out of it during the scans)
+blind = false(1, numel(cfg.targets));  inRange = false(1, numel(cfg.targets));
+rCover = [sys.wave.short.range_m(1), sys.wave.long.range_m(end)];
 for k = 1:numel(cfg.targets)
-    b = snr_budget(sys, cfg.targets(k), illumination_time(sys, cfg.targets(k)));
+    t1 = illumination_time(sys, cfg.targets(k));
+    b = snr_budget(sys, cfg.targets(k), t1);
     blind(k) = b.blind;
+    R = arrayfun(@(s) target_geometry(cfg.targets(k), t1 + s*sys.track.scanTime_s, cfg.ant.height_m), 0:nScans-1);
+    in = R >= rCover(1) & R <= rCover(2);
+    inRange(k) = sum(in) >= sys.track.confirmHits && in(end);
 end
 ids = unique(T(:, 1)).';
 tEnd = max(T(:, 4));
@@ -122,11 +132,11 @@ for id = ids
         covered(k) = true;                           % on its target in the last scan
     end
 end
-expected = ~blind;
+expected = ~blind & inRange;
 good = all(covered(expected)) && nFalse == 0;
-ok = report(sprintf(['%d tracks, %d confirmed: on %d of the %d targets that are not at a blind speed (%s), ', ...
-                     '%d false confirmed track(s)%s'], numel(ids), nConf, sum(covered & expected), sum(expected), ...
-                    strjoin({cfg.targets(expected).name}, ' '), nFalse, txt), good) && ok;
+ok = report(sprintf(['%d tracks, %d confirmed: on %d of the %d targets not at a blind speed and in range ', ...
+                     'for %d looks (%s), %d false confirmed track(s)%s'], numel(ids), nConf, sum(covered & expected), ...
+                    sum(expected), sys.track.confirmHits, strjoin({cfg.targets(expected).name}, ' '), nFalse, txt), good) && ok;
 out.nTracks = numel(ids);  out.nConfirmed = nConf;  out.nFalseConfirmed = nFalse;
 
 % false plots: plots more than 1 km / 3 deg from every target

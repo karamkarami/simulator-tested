@@ -60,8 +60,9 @@ rawFolder = cfg.io.rawFolder;
 saveRaw   = cfg.io.saveRaw;
 matFormat = cfg.io.matFormat;
 seed      = cfg.sim.seed;
-if ~exist(ddcFolder, 'dir'), mkdir(ddcFolder); end
-if saveRaw && ~exist(rawFolder, 'dir'), mkdir(rawFolder); end
+% (with outputs mkdir does not stop when another session creates the folder at the same time)
+if ~exist(ddcFolder, 'dir'), [~, ~] = mkdir(ddcFolder); end
+if saveRaw && ~exist(rawFolder, 'dir'), [~, ~] = mkdir(rawFolder); end
 
 pulses = find(sched.active);
 nPulses = numel(pulses);
