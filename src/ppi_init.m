@@ -195,7 +195,7 @@ S.home = rMax*[-1.05 1.05 -1.05 1.05];
 S.opt = opt;
 S.sys = sys;
 S.data = struct('az_deg', 0, 't_s', 0, 'scan', 1, 'plots', [], 'dets', zeros(0, 10), ...
-                'tracks', [], 'timing_us', []);
+                'tracks', [], 'timing_us', [], 'timingPris', []);
 S.vis = struct('x', [], 'y', [], 'idx', []);               % visible plots (for picking)
 S.visDet = struct('x', [], 'y', [], 'idx', []);            % visible detections
 S.visTrk = struct('x', [], 'y', [], 'idx', []);            % visible tracks

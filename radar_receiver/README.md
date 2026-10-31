@@ -110,8 +110,14 @@ needs every value that `export_receiver_config.m` writes.
 **Pruning:** as in MATLAB (`prune_peaks.m`): local peaks in beam x range x
 Doppler; range, elevation and Doppler sidelobes more than
 `sidelobeMargin_dB` below a stronger peak are dropped (only the peaks that
-much stronger are compared, sorted by power, so thousands of detections
-cost n log n).
+much stronger are compared, sorted by power, binary search). When those
+comparisons would cost more than about 20 passes over the map (a low CFAR
+threshold with many strong peaks, e.g. clutter residue), `blank_dense()`
+takes the largest peak power of each sidelobe neighbourhood over the whole
+map instead (running maxima, van Herk / Gil-Werman along range): the same
+result, in a time bounded by the map size, so lowering the threshold no
+longer makes the CFAR block slower and slower (`test_cfar`: 392 000
+detections with 3000 strong cells in about 50 ms, 107 ms before).
 `tests/test_c_receiver.m` does all of this automatically and compares the
 plots of both programs.
 
@@ -223,15 +229,20 @@ The panel on the right of the window has:
   on and reports it back (also printed on the console); *Default* returns to
   the value of the configuration.
 * **Mean time per PRI [us]** (bottom right, above the help): the mean
-  time per PRI since the start of every block of the processing thread:
+  time per PRI over the PRIs since the previous panel update (at least 100;
+  the last line says how many), so a change such as a lower CFAR threshold
+  shows at once instead of creeping into a mean since the start, of every
+  block of the processing thread:
   DBF, matched filter, MTI (clutter filter), Doppler (FFT and non-coherent
   integration), CFAR of the configured method with the pruning, plot
   extractor, tracking, the console output (printing the plots, track
   confirmations and messages; 0 with `--quiet`) and the display calls
   (handing the antenna, plots, detections, tracks and times to the PPI),
-  and their total. Then *PPI drawing (GUI)*: the time the GUI thread spends
-  taking the data and drawing the PPI, per PRI; it runs on another core at
-  the same time, so it is not in the total. The worker posts its
+  and their total: the time the processing thread spends per PRI, display
+  calls included. Then *PPI drawing (GUI)*: the time the GUI thread spends
+  taking the data and drawing the PPI, per PRI; it runs on another thread
+  (core) at the same time as the processing, so it does not lengthen the
+  PRI processing and is not in the total. The worker posts its
   accumulated times 4 times a second; the console and display times are
   also printed at the end (`Output per PRI`).
 

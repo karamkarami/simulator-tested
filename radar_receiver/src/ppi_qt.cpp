@@ -1285,7 +1285,7 @@ public:
         mono.setPixelSize(11);
         timing_->setFont(mono);
         timing_->setStyleSheet(QStringLiteral("background: #101010; padding: 4px;"));
-        timing_->setMinimumHeight(QFontMetrics(mono).lineSpacing() * 12 + 12);  /* 12 rows, stable layout */
+        timing_->setMinimumHeight(QFontMetrics(mono).lineSpacing() * 14 + 12);  /* 14 rows, stable layout */
         timing_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
         v->addWidget(timing_);
         QLabel *help = new QLabel(QStringLiteral("Wheel: zoom   Drag: pan\nDouble click: reset\nHover: data tip   "
@@ -1367,19 +1367,29 @@ public:
             trk = s.trackName;
         }
         if (serial == timingSerial_ || t.pris == 0) return;
+        /* the mean over the PRIs since the last shown values (at least 100),
+         * not since the start: a change (e.g. a lower CFAR threshold) shows
+         * at once instead of creeping into a long-term mean */
+        if (t.pris < timingPrev_.pris) timingPrev_ = ProcessorTiming{}, guiPrev_ = 0.0;   /* new run */
+        const uint64_t nPri = t.pris - timingPrev_.pris;
+        if (nPri < 100 && timingPrev_.pris > 0) return;
         timingSerial_ = serial;
         const bool newName = detName_ != QString::fromStdString(det);
         detName_ = QString::fromStdString(det);
         if (newName) cfarSerial_ = 0;                          /* rewrite the CFAR line with the name */
-        const double k = 1e3 / (double)t.pris;                 /* ms in total -> us per PRI */
+        const ProcessorTiming &o = timingPrev_;
+        const double k = 1e3 / (double)nPri;                   /* ms in the interval -> us per PRI */
         /* processing thread: the blocks, the console output and the data handed
-         * to the PPI; the drawing runs in the GUI thread, at the same time */
+         * to the PPI (all within the PRI: Total); the drawing runs in the GUI
+         * thread, in parallel with the processing, so it is not part of Total */
         const std::pair<QString, double> rows[] = {
-            { QStringLiteral("DBF"), t.dbf_ms }, { QStringLiteral("Matched filter"), t.mf_ms },
-            { QStringLiteral("MTI (clutter)"), t.mti_ms }, { QStringLiteral("Doppler FFT+NCI"), t.doppler_ms },
-            { detName_, t.cfar_ms }, { QStringLiteral("Plot extractor"), t.extract_ms },
-            { QString::fromStdString(trk), t.track_ms }, { QStringLiteral("Console output"), t.console_ms },
-            { QStringLiteral("Display (post)"), t.display_ms } };
+            { QStringLiteral("DBF"), t.dbf_ms - o.dbf_ms }, { QStringLiteral("Matched filter"), t.mf_ms - o.mf_ms },
+            { QStringLiteral("MTI (clutter)"), t.mti_ms - o.mti_ms },
+            { QStringLiteral("Doppler FFT+NCI"), t.doppler_ms - o.doppler_ms },
+            { detName_, t.cfar_ms - o.cfar_ms }, { QStringLiteral("Plot extractor"), t.extract_ms - o.extract_ms },
+            { QString::fromStdString(trk), t.track_ms - o.track_ms },
+            { QStringLiteral("Console output"), t.console_ms - o.console_ms },
+            { QStringLiteral("Display (post)"), t.display_ms - o.display_ms } };
         QStringList lines;
         double sum = 0.0;
         for (const auto &r : rows) {
@@ -1387,8 +1397,13 @@ public:
             sum += r.second * k;
         }
         lines << QStringLiteral("%1%2").arg(QStringLiteral("Total"), -17).arg(sum, 9, 'f', 1);
-        lines << QStringLiteral("%1%2").arg(QStringLiteral("PPI drawing (GUI)"), -17).arg(ppi_->guiMs() * k, 9, 'f', 1);
-        lines << QStringLiteral("%1 PRIs").arg((qulonglong)t.pris);
+        lines << QStringLiteral("%1%2").arg(QStringLiteral("PPI drawing (GUI)"), -17)
+                                         .arg((ppi_->guiMs() - guiPrev_) * k, 9, 'f', 1);
+        lines << QStringLiteral(" (GUI thread, in parallel:");
+        lines << QStringLiteral("  not part of Total)");
+        lines << QStringLiteral("last %1 of %2 PRIs").arg((qulonglong)nPri).arg((qulonglong)t.pris);
+        timingPrev_ = t;
+        guiPrev_ = ppi_->guiMs();
         timing_->setText(lines.join(QChar('\n')));
     }
 
@@ -1420,6 +1435,8 @@ private:
     QCheckBox             *tracks_;
     QLabel                *timing_;
     uint64_t               timingSerial_ = 0;
+    ProcessorTiming        timingPrev_ = {};    /* accumulated times at the start of the shown interval */
+    double                 guiPrev_ = 0.0;
     QString                detName_ = QStringLiteral("CFAR");
     QPushButton           *save_, *apply_, *default_;
     QLabel                *saved_, *cfarInfo_;

@@ -387,12 +387,17 @@ names = {'DBF', 'Matched filter', 'MTI (clutter)', 'Doppler FFT+NCI', ['CFAR ' S
          'Console output', 'Display (PPI)'};
 if ~S.sys.track.enable, names{7} = 'Tracking (off)'; end
 n = min(numel(us), numel(names));
-rows = cell(1, n + 2);
+rows = cell(1, n + 3);
 rows{1} = 'Mean time per PRI [us]';
 for i = 1:n
     rows{i+1} = sprintf('%-17s%9.1f', names{i}, us(i));
 end
-rows{n+2} = sprintf('%-17s%9.1f', 'Total', sum(us(1:n)));
+rows{n+2} = sprintf('%-17s%9.1f', 'Total', sum(us(1:n)));       % incl. console and display
+if isfield(S.data, 'timingPris') && ~isempty(S.data.timingPris)
+    rows{n+3} = sprintf('over the last %d PRIs', S.data.timingPris);
+else
+    rows{n+3} = 'over the whole run';
+end
 set(S.h.timing, 'String', rows);
 end
 

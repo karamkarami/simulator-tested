@@ -68,6 +68,8 @@ typedef struct {
     float *P;                   /* power map [bin][cell]                          */
     unsigned char *det;         /* CFAR detections [bin][cell]                    */
     double *cntInv;             /* CFAR: 1 / training cells of every range cell (more at the edges) */
+    float *pkM, *pkA;           /* dense sidelobe blanking: peak map, its maxima [bin][cell] */
+    float *pkE, *pkD, *pkT;     /* maxima over the beams [bin][r], over Doppler [beam][r], temp */
     Detection *reports;         /* pruned detections of the latest CPI           */
     int nReports, capReports;
     Extractor ext;
@@ -264,6 +266,7 @@ void processor_destroy(Processor *p)
         free(s->cpiRe); free(s->cpiIm); free(s->mtiRe); free(s->mtiIm);
         free(s->staggerIdx); free(s->az); free(s->time);
         free(s->P); free(s->det); free(s->cntInv);
+        free(s->pkM); free(s->pkA); free(s->pkE); free(s->pkD); free(s->pkT);
         free(s->reports);
         if (s->mfFft) fft_plan_free(&s->mfPlan);
         free(s->mfHre); free(s->mfHim); free(s->mfWork);
@@ -792,6 +795,130 @@ static void add_report(PulseState *s, const Detection *d)
     s->reports[s->nReports++] = *d;
 }
 
+/* y[j] = max of x over j-L ... j+L (zero outside the row; x >= 0): van Herk /
+ * Gil-Werman, blocks of the window length with prefix and suffix maxima, so
+ * the cost does not depend on L. buf: 2 * (n + 4L + 2) floats. */
+static void range_max_row(const float *x, float *y, int n, int L, float *buf)
+{
+    if (L <= 0) { memcpy(y, x, sizeof(float) * n); return; }
+    const int w = 2 * L + 1, nb = (n + 2 * L + w - 1) / w, len = nb * w;
+    float *g = buf, *h = buf + len;
+    for (int k = 0; k < nb; k++) {
+        const int q0 = k * w;
+        float m = 0.0f;
+        for (int q = q0; q < q0 + w; q++) {
+            const float v = (q >= L && q < L + n) ? x[q - L] : 0.0f;
+            if (v > m) m = v;
+            g[q] = m;
+        }
+        m = 0.0f;
+        for (int q = q0 + w - 1; q >= q0; q--) {
+            const float v = (q >= L && q < L + n) ? x[q - L] : 0.0f;
+            if (v > m) m = v;
+            h[q] = m;
+        }
+    }
+    for (int j = 0; j < n; j++) y[j] = h[j] > g[j + w - 1] ? h[j] : g[j + w - 1];
+}
+
+/* Sidelobe blanking with maxima over the whole map (as prune_peaks.m with many
+ * peaks): a peak is blanked when the largest peak power of one of its three
+ * neighbourhoods is more than the margin above it. The cost depends on the
+ * map size, not on the number of peaks. keep[] gets 0 for the blanked peaks. */
+static void blank_dense(const Processor *p, PulseState *s, const Cell *cells, int n, int pulseCells,
+                        double ratio, unsigned char *keep)
+{
+    const RadarConfig *cfg = p->cfg;
+    const int nfft = cfg->nfft, nB = cfg->nBeams, nR = s->nR;
+    const size_t nCells = (size_t)s->nCells, map = (size_t)nfft * nCells;
+    const int rows = nfft > nB ? nfft : nB;
+    if (!s->pkM) {
+        s->pkM = xcalloc(map, sizeof(float));
+        s->pkA = xcalloc(map, sizeof(float));
+        s->pkE = xcalloc((size_t)nfft * nR, sizeof(float));
+        s->pkD = xcalloc((size_t)nB * nR, sizeof(float));
+        s->pkT = xcalloc((size_t)rows * nR, sizeof(float));
+    }
+    float *M = s->pkM, *A = s->pkA, *E = s->pkE, *D = s->pkD, *T = s->pkT;
+    memset(M, 0, sizeof(float) * map);
+    for (int i = 0; i < n; i++) M[(size_t)cells[i].d * nCells + (size_t)cells[i].b * nR + cells[i].r] = cells[i].pw;
+    const size_t bufLen = 2 * ((size_t)nR + 4 * (size_t)pulseCells + 2) + 8;
+
+    /* range sidelobes: beam +-1, Doppler +-1 (circular), range +-pulseCells */
+    #pragma omp parallel num_threads(team_size(p->nThreads, nfft)) if(nfft > 1)
+    {
+        float *row = xcalloc(nR, sizeof(float)), *buf = xcalloc(bufLen, sizeof(float));
+        #pragma omp for schedule(static)
+        for (int d = 0; d < nfft; d++) {
+            for (int b = 0; b < nB; b++) {
+                for (int r = 0; r < nR; r++) row[r] = 0.0f;
+                for (int dd = -1; dd <= 1; dd++) {
+                    const float *Md = M + (size_t)((d + dd + nfft) % nfft) * nCells;
+                    for (int bb = b - 1; bb <= b + 1; bb++) {
+                        if (bb < 0 || bb >= nB) continue;
+                        const float *x = Md + (size_t)bb * nR;
+                        for (int r = 0; r < nR; r++) if (x[r] > row[r]) row[r] = x[r];
+                    }
+                }
+                range_max_row(row, A + (size_t)d * nCells + (size_t)b * nR, nR, pulseCells, buf);
+            }
+        }
+        free(row); free(buf);
+    }
+    float *buf = xcalloc(bufLen, sizeof(float));
+    /* elevation sidelobes: any beam, Doppler +-1, range +-1 */
+    for (int d = 0; d < nfft; d++) {
+        float *t = T + (size_t)d * nR;
+        for (int r = 0; r < nR; r++) t[r] = 0.0f;
+        for (int b = 0; b < nB; b++) {
+            const float *x = M + (size_t)d * nCells + (size_t)b * nR;
+            for (int r = 0; r < nR; r++) if (x[r] > t[r]) t[r] = x[r];
+        }
+    }
+    for (int d = 0; d < nfft; d++) {
+        float *e = E + (size_t)d * nR;
+        const float *t0 = T + (size_t)((d + nfft - 1) % nfft) * nR, *t1 = T + (size_t)d * nR,
+                    *t2 = T + (size_t)((d + 1) % nfft) * nR;
+        for (int r = 0; r < nR; r++) {
+            float m = t0[r] > t1[r] ? t0[r] : t1[r];
+            e[r] = m > t2[r] ? m : t2[r];
+        }
+    }
+    for (int d = 0; d < nfft; d++) {                                /* range +-1 */
+        memcpy(T + (size_t)d * nR, E + (size_t)d * nR, sizeof(float) * nR);
+        range_max_row(T + (size_t)d * nR, E + (size_t)d * nR, nR, 1, buf);
+    }
+    /* Doppler sidelobes: any Doppler bin, beam +-1, range +-1 */
+    for (int b = 0; b < nB; b++) {
+        float *t = T + (size_t)b * nR;
+        for (int r = 0; r < nR; r++) t[r] = 0.0f;
+        for (int d = 0; d < nfft; d++) {
+            const float *x = M + (size_t)d * nCells + (size_t)b * nR;
+            for (int r = 0; r < nR; r++) if (x[r] > t[r]) t[r] = x[r];
+        }
+    }
+    for (int b = 0; b < nB; b++) {
+        float *dst = D + (size_t)b * nR;
+        for (int r = 0; r < nR; r++) {
+            float m = T[(size_t)b * nR + r];
+            if (b > 0 && T[(size_t)(b - 1) * nR + r] > m) m = T[(size_t)(b - 1) * nR + r];
+            if (b < nB - 1 && T[(size_t)(b + 1) * nR + r] > m) m = T[(size_t)(b + 1) * nR + r];
+            dst[r] = m;
+        }
+    }
+    for (int b = 0; b < nB; b++) {                                  /* range +-1 */
+        memcpy(T + (size_t)b * nR, D + (size_t)b * nR, sizeof(float) * nR);
+        range_max_row(T + (size_t)b * nR, D + (size_t)b * nR, nR, 1, buf);
+    }
+    free(buf);
+    for (int i = 0; i < n; i++) {
+        const Cell *c = &cells[i];
+        const double x = ratio * c->pw;
+        keep[i] = !((double)A[(size_t)c->d * nCells + (size_t)c->b * nR + c->r] > x ||
+                    (double)E[(size_t)c->d * nR + c->r] > x || (double)D[(size_t)c->b * nR + c->r] > x);
+    }
+}
+
 /* Keeps the detections that are local peaks (3x3x3 beam x range x Doppler) and
  * not sidelobes of a much stronger peak, and converts them to reports. */
 static void prune_and_report(const Processor *p, int pulse, PulseState *s)
@@ -835,31 +962,45 @@ static void prune_and_report(const Processor *p, int pulse, PulseState *s)
 
     /* 2) sidelobe blanking (range, elevation and Doppler sidelobes). Only the
      *    peaks more than the margin stronger can blank a peak: with the peaks
-     *    sorted by power they are the first k (binary search), so a crowd of
-     *    similar peaks (clutter residue) costs n log n instead of n^2. */
+     *    sorted by power they are the first lo[i] (binary search). When these
+     *    comparisons would cost more than the passes over the map (a low CFAR
+     *    threshold: many weak peaks, many strong ones), the map maxima are
+     *    used instead (blank_dense, same result), so the time is bounded by
+     *    the map size and hardly depends on the number of detections. */
     const double ratio = pow(10.0, cfg->sidelobeMargin_dB / 10.0);
     const int pulseCells = pc->nTaps;
-    unsigned char *keep = xcalloc(n, 1);
+    unsigned char *keep = xcalloc(n > 0 ? n : 1, 1);
     Ranked *rank = xcalloc(n > 0 ? n : 1, sizeof(Ranked));
+    int *loK = xcalloc(n > 0 ? n : 1, sizeof(int));
     for (int i = 0; i < n; i++) rank[i] = (Ranked){ cells[i].pw, i };
     if (n > 1) qsort(rank, n, sizeof(Ranked), ranked_desc);
+    double work = 0.0;
     for (int i = 0; i < n; i++) {
-        keep[i] = 1;
         const double x = ratio * cells[i].pw;
         int lo = 0, hi = n;                                  /* rank[0..lo) > x, rank[hi..n) <= x */
         while (lo < hi) {
             const int mid = (lo + hi) / 2;
             if (rank[mid].pw > x) lo = mid + 1; else hi = mid;
         }
-        for (int k = 0; k < lo && keep[i]; k++) {
-            const int j = rank[k].i;
-            int dDop = abs(cells[i].d - cells[j].d);
-            if (nfft - dDop < dDop) dDop = nfft - dDop;
-            const int sameD = dDop <= 1, sameB = abs(cells[i].b - cells[j].b) <= 1;
-            const int dR = abs(cells[i].r - cells[j].r), sameR = dR <= 1;
-            if ((sameB && sameD && dR <= pulseCells) || (sameR && sameD) || (sameR && sameB)) keep[i] = 0;
+        loK[i] = lo;
+        work += lo;
+    }
+    if (work > 20.0 * nfft * s->nCells) {                  /* a dense pass: ~20 operations per map cell */
+        blank_dense(p, s, cells, n, pulseCells, ratio, keep);
+    } else {
+        for (int i = 0; i < n; i++) {
+            keep[i] = 1;
+            for (int k = 0; k < loK[i] && keep[i]; k++) {
+                const int j = rank[k].i;
+                int dDop = abs(cells[i].d - cells[j].d);
+                if (nfft - dDop < dDop) dDop = nfft - dDop;
+                const int sameD = dDop <= 1, sameB = abs(cells[i].b - cells[j].b) <= 1;
+                const int dR = abs(cells[i].r - cells[j].r), sameR = dR <= 1;
+                if ((sameB && sameD && dR <= pulseCells) || (sameR && sameD) || (sameR && sameB)) keep[i] = 0;
+            }
         }
     }
+    free(loK);
 
     free(rank);
 

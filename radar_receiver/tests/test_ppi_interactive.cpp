@@ -261,11 +261,15 @@ int main(int argc, char **argv)
     check(timing.contains(row("Console output", 30.0)) && timing.contains(row("Display (post)", 50.0)) &&
           timing.contains("PPI drawing (GUI)"), "console, display and GUI drawing times in the panel");
     win.grab();                                          /* draws the PPI in the GUI thread */
+    tm.pris = 1200;  tm.cfar_ms += 400.0;                /* 200 more PRIs, the CFAR block slower */
     ppi_post_timing(&tm, "CFAR 1-D range", "Tracking 3-D CV");
     win.refresh();
     const QString timing2 = win.timingText();
     const int iGui = timing2.indexOf("PPI drawing (GUI)");
     check(iGui >= 0 && timing2.mid(iGui + 17, 9).trimmed().toDouble() > 0.0, "the drawing time of the GUI is counted");
+    check(timing2.contains(row("CFAR 1-D range", 2000.0)) && timing2.contains(row("Total", 2000.0)) &&
+          timing2.contains("last 200 of 1200 PRIs") && timing2.contains("not part of Total"),
+          "the times are the means over the PRIs since the last update (GUI drawing not in Total)");
     check(win.cfarInfo().contains("CFAR 1-D range: 17.50 dB"), "the CFAR line names the method");
 
     /* tracks: hollow triangles around their plot, checkbox, deletion */

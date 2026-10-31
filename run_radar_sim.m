@@ -109,6 +109,7 @@ flushOpt = extractOpt;
 flushOpt.flush = true;
 
 clipSum = 0;  clipMax = 0;  clipWarned = false;     % ADC overload (adc_overload.m)
+timingPrev = struct('us', zeros(1, 9), 'n', 0);      % block times at the previous display update
 priTime = nan(1, sched.nPulses);                    % time of every simulated PRI (= the UDP send period)
 
 %% Pulse loop
@@ -203,8 +204,10 @@ for k = 1:sched.nPulses
             dets = prune_peaks(isDet, rd, noise, sys, wv);
             reports = detection_reports(dets, rd, sys, wv, info);
             blockUs(5) = blockUs(5) + 1e6*toc(tb);
-            if ~isempty(detLog)
+            if ~isempty(detLog)                         % (for the PPI: counted as display time)
+                tb = tic;
                 detLog = detection_log_add(detLog, reports);
+                blockUs(9) = blockUs(9) + 1e6*toc(tb);
             end
             tb = tic;
             [ext.(p), newPlots] = plot_extractor(ext.(p), reports, extractOpt);
@@ -225,8 +228,13 @@ for k = 1:sched.nPulses
     % 11) Display
     if ~isempty(ppi) && mod(nProcessed, cfg.display.updateEvery) == 0
         tb = tic;
+        % block times: mean over the PRIs since the previous display update (a
+        % change, e.g. a lower CFAR threshold, shows at once, not diluted in
+        % the mean since the start)
+        nInt = nProcessed - timingPrev.n;
         sys = ppi_update(ppi, sys, az, t, sched.scan(k), plots, detLog.M(1:detLog.n, :), ...
-                         track_report(tracker), blockUs / nProcessed);   % may set a new CFAR threshold
+                         track_report(tracker), (blockUs - timingPrev.us) / nInt, nInt);   % may set a new CFAR threshold
+        timingPrev = struct('us', blockUs, 'n', nProcessed);
         blockUs(9) = blockUs(9) + 1e6*toc(tb);
     end
     if cfg.console.enable && mod(nProcessed, 500) == 0

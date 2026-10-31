@@ -82,8 +82,11 @@ static void check_window(RadarConfig cfg, const char *name, int gR, int tR, int 
 /* Pruning under load: a long-pulse map with a strong target (range
  * sidelobes along its line) and a low threshold gives thousands of CFAR
  * detections; prune_and_report() must keep exactly the cells of the direct
- * rules (local peak, sidelobe blanking pair by pair), in about n log n time. */
-static void check_pruning(RadarConfig cfg)
+ * rules (local peak, sidelobe blanking pair by pair). nStrong more strong
+ * cells (like clutter residue) make the pairwise comparisons expensive: the
+ * pruning then takes the map maxima (blank_dense), with the same result and
+ * a time bounded by the map size. */
+static void check_pruning(RadarConfig cfg, const char *name, int nStrong, double alpha)
 {
     Processor *p = processor_create(&cfg, 0);
     PulseState *s = &p->ps[PULSE_LONG];
@@ -95,7 +98,10 @@ static void check_pruning(RadarConfig cfg)
     for (int r = tr - 80; r <= tr + 80; r++)                              /* sidelobes of the target */
         if (r >= 0 && r < nR) s->P[(size_t)td * s->nCells + (size_t)tb * nR + r] += 1e4f * (float)(rand() + 1) / RAND_MAX;
     s->P[(size_t)td * s->nCells + (size_t)tb * nR + tr] = 1e7f;
-    processor_set_cfar_alpha(p, 2.5);
+    for (int k = 0; k < nStrong; k++)                                     /* strong scattered cells */
+        s->P[(size_t)(rand() % nfft) * s->nCells + (size_t)(rand() % nB) * nR + rand() % nR] =
+            1e3f + 1e5f * (float)rand() / RAND_MAX;
+    processor_set_cfar_alpha(p, alpha);
     PulseConfig all = *pc;
     all.testFirst = 0;  all.testCount = nR;
     cfar(p, s, &all);
@@ -138,9 +144,9 @@ static void check_pruning(RadarConfig cfg)
     }
     if (wrong || k != s->nReports || dt > 0.5) {
         failures++;
-        printf("FAIL pruning: %d reports, %d expected, %d different, %.3f s\n", s->nReports, nKeep, wrong, dt);
+        printf("FAIL pruning (%s): %d reports, %d expected, %d different, %.3f s\n", name, s->nReports, nKeep, wrong, dt);
     }
-    printf("pruning: %d CFAR detections, %d peaks, %d kept (the direct rules: %d) in %.1f ms: %s\n", nDet, n,
+    printf("pruning (%s): %d CFAR detections, %d peaks, %d kept (the direct rules: %d) in %.1f ms: %s\n", name, nDet, n,
            s->nReports, nKeep, dt * 1e3, wrong || k != s->nReports || dt > 0.5 ? "FAIL" : "ok");
     free(c);
     processor_destroy(p);
@@ -162,7 +168,8 @@ int main(int argc, char **argv)
     check_window(cfg, "1-D range", 3, 16, 0, 0);
     check_window(cfg, "1-D Doppler", 0, 0, 2, 8);
     check_window(cfg, "configured", cfg.guardRange, cfg.trainRange, cfg.guardDoppler, cfg.trainDoppler);
-    check_pruning(cfg);
+    check_pruning(cfg, "strong target, low threshold", 0, 2.5);
+    check_pruning(cfg, "3000 strong cells, very low threshold", 3000, 1.2);
     radar_config_free(&cfg);
     if (failures) printf("%d FAILURE(S)\n", failures);
     else printf("all CFAR and pruning tests passed\n");

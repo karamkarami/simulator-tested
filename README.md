@@ -120,8 +120,10 @@ take it into account:
   matrix are the same as before. The internal clutter motion (0.1 m/s) is
   0.1 Hz; the clutter spectrum is set by the scan modulation, as before.
 * **Processing time.** False detections (clutter residue, sidelobes of
-  very strong targets) no longer slow the processing down: the pruning is
-  n log n in both programs (165 000 CFAR detections in 41 ms in C). The
+  very strong targets, a CFAR threshold lowered in the PPI) do not slow the
+  processing down: the CA-CFAR costs the same at any threshold, and the
+  pruning takes maxima over the whole map when there are many detections,
+  so its time is bounded by the map size (see Pruning below). The
   simulator sends the DDC output of one PRI per loop, so its UDP rate is the
   loop rate: `results.priTime_s` is the time of every PRI.
 * **Console output.** With a low CFAR threshold printing every plot and
@@ -131,9 +133,10 @@ take it into account:
   configuration file as its default (`--quiet` / `--print-plots` override
   it).
 
-Six targets, one scan, 170 MHz: fixed PRF 6 plots (all targets, no false
-plot), staggered PRF 4 plots (T1 and T6 at blind speeds, no false plot). The
-3 GHz configuration with only `cfg.fc` changed (60 dB) gave 25 plots for
+Six targets, one scan, 170 MHz, 60 dB with STC: fixed PRF 6 plots (all
+targets, no false plot, no ADC sample clipped), staggered PRF 4 plots (T1
+and T6 at blind speeds, no false plot). The 3 GHz configuration with only
+`cfg.fc` changed (60 dB, no STC) gave 25 plots for
 the 6 targets (14 eclipsed echoes, 3 clutter residues, 2 clipping
 products); its false plots come back every scan and become confirmed false
 tracks (see Tests: `test_multi_scan`).
@@ -445,11 +448,13 @@ there, at the same beam and Doppler, behind very strong far targets.
   The 2-D window adapts best to clutter residue (its Doppler extent sees the
   residue around the notch). A 1-D range window at the start of the
   short-pulse window, where the near-range clutter falls off steeply, only
-  sees weaker clutter farther out: in the six-target test the `'range'`
-  method gave one false plot at 4.2 km, the first short-pulse cell (clutter
-  residue in the lowest beam, 4 Doppler bins from zero at 170 MHz), that
-  the `'2d'` and `'doppler'` methods do not give. Raise `cfg.cfar.short.minRange_m` (e.g.
-  to 5 km) or the threshold there.
+  sees weaker clutter farther out: in the six-target test without STC (at
+  30 dB) the `'range'` method gave one false plot at 4.2 km, the first
+  short-pulse cell (clutter residue in the lowest beam, 4 Doppler bins from
+  zero at 170 MHz), that the `'2d'` and `'doppler'` methods do not give.
+  The STC attenuates the near clutter (not the noise), so this residue is
+  gone with it; otherwise raise `cfg.cfar.short.minRange_m` (e.g. to 5 km)
+  or the threshold there.
   The 1-D Doppler window has no range extent. The long pulse of a strong
   target inside its blind range (22.5 km) is still received in part
   (eclipsed) at the start of the long-pulse window, where its compressed
@@ -459,7 +464,17 @@ there, at the same beam and Doppler, behind very strong far targets.
   threshold at 170 MHz with every method (14 false long-pulse plots of T1,
   T2 and T5 in the six-target scenario). The long-window STC
   (`cfg.rx.stc.curveLong`, see "170 MHz") attenuates this eclipsed echo
-  before the receiver, so no detection has to be removed afterwards.
+  before the receiver, so no detection has to be removed afterwards: with
+  the 2-D and the 1-D range window no such false plot remains (six-target
+  tests, `test_vhf_challenges`). The 1-D Doppler window does not see the
+  range spread of this echo (its training cells are the other Doppler bins
+  of the same range cell), so what the STC leaves of it still reaches the
+  threshold: in the six-target scenario 15 false long-pulse plots behind
+  T1 (12 km) and T2 (21 km), SNR 16 - 18 dB, in their Doppler bins. A
+  stronger long-window STC removes those of T1, but not those of targets
+  near the blind range (20 - 22 km): their eclipsed echo is nearly the
+  whole pulse and arrives where the STC must already be small. At 170 MHz
+  use the 2-D (default) or the range window.
 * **Tracking (optional, `cfg.track`):** an extended Kalman filter on the
   plots. State relative to the antenna (East, North, up), `cfg.track.model`:
   `'cv'` (default) position and velocity, nearly constant velocity with
@@ -516,9 +531,19 @@ there, at the same beam and Doppler, behind very strong far targets.
   radial velocity is unambiguous within +-441 m/s with the fixed PRF (6.9 m/s
   per Doppler bin) and +-112 m/s with the default stagger.
   The pruning compares a peak only with the peaks more than the margin
-  stronger (sorted by power, binary search), so thousands of detections
-  (clutter residue, a strong target's sidelobes) cost n log n instead of n^2,
-  in MATLAB and in C (`test_vhf_challenges`, `test_cfar`).
+  stronger (sorted by power, binary search). With many detections (a low
+  CFAR threshold, clutter residue, a strong target's sidelobes) that would
+  still grow with (weak peaks) x (strong peaks); then both steps use maxima
+  over the whole map instead: the 3x3x3 maximum for the local peaks, and
+  for the sidelobes the largest peak power in beam +-1 / Doppler +-1 /
+  range +-pulse length (van Herk / Gil-Werman running maximum, independent
+  of the pulse length), in range +-1 / Doppler +-1 over all beams and in
+  range +-1 / beam +-1 over all Doppler bins. A peak is blanked when one of
+  them is more than the margin above it: exactly the same result, in a
+  time bounded by the map size (MATLAB: about 50 ms for the long pulse at
+  any threshold, from 0.2 to 0.9 s before at Pfa 1e-2 to 1e-1; C: 49 ms
+  instead of 107 ms with 3000 strong peaks, and it no longer grows), in
+  MATLAB and in C (`test_vhf_challenges`, `test_cfar`).
 
 ## Interactive PPI
 
@@ -565,12 +590,16 @@ The panel on the right has:
   (PNG)**, which saves the window as it is now (file dialog, default name
   `ppi_<date>_<time>.png`).
 * **Mean time per PRI [us]** (bottom right, above the help): the mean
-  time per PRI of every block since the start: DBF, matched filter, MTI
-  (clutter filter, with the CPI buffer), Doppler (FFT and non-coherent
-  integration), CFAR of the selected method with the pruning, plot
-  extractor and tracking, then the console output (progress lines) and the
-  display (the PPI updates, every `cfg.display.updateEvery` PRIs, averaged
-  over all PRIs), and their total (`results.timing_us`).
+  time per PRI of every block over the PRIs since the previous display
+  update (the last line says over how many; a change such as a lower CFAR
+  threshold shows at once instead of creeping into a mean since the start):
+  DBF, matched filter, MTI (clutter filter, with the CPI buffer), Doppler
+  (FFT and non-coherent integration), CFAR of the selected method with the
+  pruning and the detection reports, plot extractor and tracking, then the
+  console output (progress lines) and the display (the PPI updates and the
+  detection log they show), and their total, display included: in MATLAB
+  everything runs in one thread, inside the PRI loop. `results.timing_us`
+  holds the means over the whole run.
 
 The cursor position (range, azimuth, east/north) is shown under the buttons. In MATLAB the zoom, pan and data tip tools of the axes
 toolbar work as well; their data tips also list the plot values.
@@ -733,28 +762,32 @@ budget.
 | `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA, with and without the radial velocity: one confirmed track per target, close to it, no false track; the radial velocity lowers the velocity error after two scans; staggered PRF (folded plot velocities): the track radial velocity is unfolded; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |
 | `test_c_receiver(mode, ..., cfarMethod)` | the six-target scenario streamed over UDP to the C receiver (`radar_receiver/`): its plots and track updates must match MATLAB; the recorded stream is replayed to check repeatability and speed |
 
-Latest results at 170 MHz (Octave 8.4 on a 4-vCPU VM, every test of
-`run_all_tests` passed): the SNR budget checks agree within 0.21 dB in every
-block (the budget includes the ADC noise and the 16-bit DDC rounding). The
-six-target test with the fixed PRF finds all 6 targets with no false plot
-(range within 40 m, azimuth and elevation within 0.1 deg, radial velocity
-within one Doppler bin and unambiguous, SNR within 1 dB of the budget); with
-the staggered PRF it finds the 4 targets that are not at a blind speed (T1,
-T6 are, as predicted) with no false plot. In `test_c_receiver` the C
-receiver gives exactly the plots (no difference in range, azimuth,
-elevation, velocity, SNR, hits) and track updates of MATLAB for the fixed
-and the staggered PRF and with the 1-D Doppler CFAR (the 6 targets, no false
-plot) and the 1-D range CFAR (one more plot, the clutter residue at 4.2 km
-described under CFAR, in both programs).
-`test_multi_scan` (three scans, C receiver): 17 plots, none false, 6 tracks
-(one per target), confirmed on T1 - T5 (T6 flies out of the 50 km of the
-test in the third scan), no false track. With only `cfg.fc` changed in the
-3 GHz configuration (60 dB receiver gain, no eclipse blanking) the same
-three scans gave 72 plots (45 false) and 40 tracks. One whole scan (360
-deg, the default configuration with 80 km and clutter all around, through
-the C receiver): 6 plots, the 6 targets, no false plot; at most 0.25% of the
-receive samples of a PRI clipped; 5.3 ms per PRI in the C receiver.
-`test_vhf_challenges` passes all its cases.
+Latest results at 170 MHz with the receiver gain of 60 dB and the STC
+(Octave 8.4 on a 4-vCPU VM): every SNR budget check passes (fixed and
+staggered PRF, both sub-pulses, P4 with matched and mismatch filter, one
+element, 4 MHz DDC). The six-target test with the fixed PRF finds all 6
+targets with no false plot and no clipped ADC sample (range within 40 m,
+azimuth and elevation within 0.1 deg, radial velocity within one Doppler
+bin and unambiguous, SNR within 1 dB of the budget); with the staggered PRF
+it finds the 4 targets that are not at a blind speed (T1, T6 are, as
+predicted) with no false plot. In `test_c_receiver` the C receiver gives
+exactly the plots (no difference in range, azimuth, elevation, velocity,
+SNR, hits) and track updates of MATLAB for the fixed and the staggered PRF,
+the 1-D range CFAR (the 6 targets, no false plot: the clutter residue at
+4.2 km of the 30 dB design is gone with the STC) and the 1-D Doppler CFAR
+(21 plots in both programs: the 6 targets and 15 eclipse ghosts, see CFAR).
+MULTISCAN
+`test_vhf_challenges`, `test_tracker` (with the radial velocity: velocity
+error after two scans 22 instead of 89 m/s), `test_phase_code`, `test_cfar`,
+`test_setup`, `test_short_pulse_ghost`, `test_udp_stream`,
+`test_ddc_replay`, `test_generate_ddc`, the interactive PPI test and the C
+tests (`ctest`, with and without Qt) pass.
+
+Before (30 dB, no STC, eclipse blanking): the same six-target results, the
+1-D range CFAR with one clutter-residue plot at 4.2 km; `test_multi_scan`
+17 plots, none false, 6 tracks, no false track. With only `cfg.fc` changed
+in the 3 GHz configuration (60 dB receiver gain, no STC) the same three
+scans gave 72 plots (45 false) and 40 tracks.
 
 At 3 GHz (before the change of carrier; every test passed): the SNR budget
 checks agreed within 0.45 dB (ADC, DDC and DBF within 0.25 dB). The six-target tests find all 6 targets with no false plot, for
