@@ -156,9 +156,11 @@ fprintf('Phase codes, matched and mismatch filters: %s\n', ternary(ok, 'PASS', '
 end
 
 function out = compress_target(cfg, R)
-% A target at R.short and R.long without noise: range profile of each sub-pulse.
+% A target at R.short and R.long without noise: range profile of each sub-pulse
+% (the pulse compression alone: no STC, which tapers the echoes of targets
+% near the start of a receive window, see README "170 MHz").
 cfg.rx.addThermalNoise = false;  cfg.rx.addLeakage = false;  cfg.adc.addAdcNoise = false;
-cfg.adc.quantize = false;        cfg.ddc.fixedPoint = false;
+cfg.adc.quantize = false;        cfg.ddc.fixedPoint = false;  cfg.rx.stc.enable = false;
 sys = setup_radar(cfg);
 for p = {'short', 'long'}
     wv = sys.wave.(p{1});

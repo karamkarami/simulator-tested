@@ -65,7 +65,9 @@ cfg.rx.stc.curve  = [    0 40;  1000 40;  2000 32;  4000 25;  6000 22;  8000 16;
 % long-pulse echo of every target nearer than the long-pulse blind range
 % (22.5 km), whose compressed response would give false plots up to 22.5 km
 % behind the target; the curve goes on to there. It costs the long-pulse
-% targets at 23 - 40 km up to 13 dB of SNR (1 m^2 at 23 km: 57 dB).
+% targets at 23 - 40 km up to 13 dB of SNR (1 m^2 at 23 km: 57 dB) and
+% tapers their echo: range sidelobes -26 dB with the LFM pulse (pruned), but
+% -11 ... -24 dB with phase codes (see README "170 MHz").
 cfg.rx.stc.curveLong = [0 60;  3000 60;  6000 45;  9000 30;  12000 18;  15000 10;  18000 5;  22500 0];
 cfg.rx.maxRange_m      = 80e3;   % instrumented range of the long pulse: sets the receive window [m]
 cfg.rx.addThermalNoise = true;   % false only for debugging / SNR measurements

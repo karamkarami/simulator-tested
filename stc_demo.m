@@ -104,10 +104,10 @@ for k = 1:2
     plot(s2.tAdc*1e6, x{k}, 'k-');  hold on;
     plot(s2.tAdc([1 end])*1e6, s2.adc.fullScale*[1 1], 'r--', s2.tAdc([1 end])*1e6, -s2.adc.fullScale*[1 1], 'r--');
     grid on;  ylim(1.1*s2.adc.fullScale*[-1 1]);  ylabel('ADC [LSB]');
-    title(sprintf('one element, azimuth 30 deg, %g dB gain, %s: %.2f%% of the receive samples at full scale', ...
+    title(sprintf('%g dB gain, %s: %.2f%% of the receive samples clipped', ...
                   cfg.rx.gain_dB, labels{k}, 100*adc_overload(int16(x{k}), s2)));
 end
-xlabel('time in the PRI [\mus]');
+xlabel('time in the PRI [\mus] (one element, azimuth 30 deg; saturated while transmitting)');
 print(f2, fullfile(folder, 'adc_pri.png'), '-dpng');
 
 %% 3) clipped receive samples for 24 azimuths
@@ -130,7 +130,8 @@ out.clipped = clip;  out.clipCases = cases;
 f3 = figure('Visible', visible, 'Name', 'Clipping');
 semilogy(az, max(100*clip, 1e-4).', 'o-', 'LineWidth', 1.2);
 grid on;  xlabel('antenna azimuth [deg]');  ylabel('receive samples at full scale [%] (1e-4 = none)');
-title('ADC clipping in the receive windows');  legend(names, 'Location', 'east');
+ylim([1e-4 1e3]);
+title('ADC clipping in the receive windows');  legend(names, 'Location', 'northeast');
 print(f3, fullfile(folder, 'clipping.png'), '-dpng');
 
 %% 4) expected SNR of a 1 m^2 target against range

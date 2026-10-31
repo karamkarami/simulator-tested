@@ -80,7 +80,18 @@ take it into account:
   10 m^2). It costs the long-pulse targets at 23 - 40 km up to 13 dB of SNR
   (a 1 m^2 target at 23 km still has 57 dB after the Doppler processing,
   22 dB are needed; from 40 km on nothing); `snr_budget.m` includes the
-  STC. This replaces the
+  STC. The STC also tapers the echo of such a target (its first part
+  arrives while the attenuation is still high), which raises its range
+  sidelobes: with the default LFM pulse from -36 dB to -26 dB (23 km) and
+  -32 dB (26 - 30 km), still more than the sidelobe margin (20 dB) below the
+  peak, so the pruning removes them. Phase codes are much more sensitive to
+  the taper: with the P4 code and its mismatch filter -11 dB at 23 km,
+  -18 dB at 30 km and -24 dB at 40 km (-33 dB without STC), so a strong
+  long-pulse target there can give range-sidelobe plots. With
+  `cfg.rx.stc.curveLong = []` (the clutter curve, which the eclipsed clutter
+  at the start of the long-pulse window needs anyway) it is -15 to -19 dB at
+  23 - 28 km and -33 dB from 33 km on, but strong near targets give eclipse
+  ghosts again: with phase codes choose between the two. This replaces the
   eclipse blanking of the previous version (which removed such detections
   after the CFAR, and with them possibly a real target behind a near one).
   `stc_demo.m` shows the curves, the ADC samples of a PRI, the clipping,
