@@ -687,8 +687,11 @@ described under CFAR, in both programs).
 (one per target), confirmed on T1 - T5 (T6 flies out of the 50 km of the
 test in the third scan), no false track. With only `cfg.fc` changed in the
 3 GHz configuration (60 dB receiver gain, no eclipse blanking) the same
-three scans gave 72 plots (45 false) and 40 tracks. `test_vhf_challenges`
-passes all its cases.
+three scans gave 72 plots (45 false) and 40 tracks. One whole scan (360
+deg, the default configuration with 80 km and clutter all around, through
+the C receiver): 6 plots, the 6 targets, no false plot; at most 0.25% of the
+receive samples of a PRI clipped; 5.3 ms per PRI in the C receiver.
+`test_vhf_challenges` passes all its cases.
 
 At 3 GHz (before the change of carrier; every test passed): the SNR budget
 checks agreed within 0.45 dB (ADC, DDC and DBF within 0.25 dB). The six-target tests find all 6 targets with no false plot, for
