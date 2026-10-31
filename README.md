@@ -396,9 +396,10 @@ there, at the same beam and Doppler, behind very strong far targets.
   residue around the notch). A 1-D range window at the start of the
   short-pulse window, where the near-range clutter falls off steeply, only
   sees weaker clutter farther out: in the six-target test the `'range'`
-  method gave one false plot at 4.2 km (clutter residue at -2.3 m/s) that
-  the `'2d'` and `'doppler'` methods do not give. Raise
-  `cfg.cfar.short.minRange_m` (e.g. to 5 km) or the threshold there.
+  method gave one false plot at 4.2 km, the first short-pulse cell (clutter
+  residue in the lowest beam, 4 Doppler bins from zero at 170 MHz), that
+  the `'2d'` method does not give. Raise `cfg.cfar.short.minRange_m` (e.g.
+  to 5 km) or the threshold there.
   The 1-D Doppler window has no range extent. The long pulse of a strong
   target inside its blind range (22.5 km) is still received in part
   (eclipsed) at the start of the long-pulse window, where its compressed
