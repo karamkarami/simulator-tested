@@ -20,7 +20,7 @@ function ok = test_vhf_challenges()
 %      flags it and it is not detected; a target at 150 m/s is (at its
 %      velocity folded into the row interval).
 %   6. Two targets 300 m apart on the same azimuth (other Doppler): two detections.
-%   7. Pruning under load: a map with about 20000 CFAR detections is pruned
+%   7. Pruning under load: a map with about 33000 CFAR detections is pruned
 %      in well under a second, with exactly the result of the direct
 %      pairwise rules.
 
