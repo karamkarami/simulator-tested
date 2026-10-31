@@ -32,7 +32,7 @@ cfg.files.stagger = fullfile(root, 'inputs', 'stagger_prf.mat');     % staggered
 cfg.files.phaseCode = fullfile(root, 'inputs', 'phase_code.mat');    % phase codes + mismatch filters of both sub-pulses
 
 %% Radar site and antenna
-cfg.fc            = 3e9;  % center frequency [Hz]
+cfg.fc            = 170e6; % center frequency [Hz] (VHF; wavelength 1.76 m)
 cfg.ant.nElements = 48;   % receive elements in elevation (1 = single antenna, beamforming disabled)
 cfg.ant.elementSpacing_lambda = 0.66;  % element spacing in elevation [wavelengths]
 % (azimuth: fixed 4.1 deg beam of every element; patterns come from the antenna file)
@@ -45,7 +45,12 @@ cfg.ant.az0_deg   = 0;    % antenna azimuth at t = 0, clockwise from North [deg]
 cfg.tx.peakPower_W     = 20e3;   % peak transmit power [W]
 cfg.rx.noiseFigure_dB  = 4;      % receiver noise figure [dB]
 cfg.rx.losses_dB       = 3;      % system losses not modelled elsewhere (RF, radome, ...) [dB]
-cfg.rx.gain_dB         = 60;     % gain of the receiver path from the antenna to the ADC [dB]
+cfg.rx.gain_dB         = 30;     % gain of the receiver path from the antenna to the ADC [dB]. The echo
+                                 % power grows with the wavelength squared (+24.9 dB from 3 GHz to
+                                 % 170 MHz); 30 dB keeps the near clutter at the start of the receive
+                                 % windows below full scale (0.02% of the samples clipped; 60 dB, the
+                                 % 3 GHz value, clips 10% and clipped echoes give false plots) while the
+                                 % thermal noise (5.7 LSB rms) stays above the ADC noise (1 dB loss)
 cfg.rx.txIsolation_dB  = 40;     % transmitter-to-receiver isolation (leakage while transmitting) [dB]
 cfg.rx.maxRange_m      = 80e3;   % instrumented range of the long pulse: sets the receive window [m]
 cfg.rx.addThermalNoise = true;   % false only for debugging / SNR measurements
@@ -59,6 +64,8 @@ cfg.adc.fullScale_dBm    = 10;     % power of a full-scale sine at the ADC input
 cfg.adc.addAdcNoise      = true;   % false only for debugging / SNR measurements
 cfg.adc.quantize         = true;   % false only for SNR measurements (keeps the analog values)
 cfg.adc.fIF_Hz           = 30e6;   % IF carrier of the received signal (receiver LO = fc - 30 MHz)
+cfg.adc.overloadWarn     = 0.01;   % warn when more than this fraction of the receive samples of a PRI
+                                   % is at full scale (cfg.rx.gain_dB too high for the echoes)
 
 %% Waveforms: every PRI holds a short and a long sub-pulse (short first)
 % PRI timeline: short pulse at its tTx -> receive (near range) -> long pulse

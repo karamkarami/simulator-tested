@@ -9,8 +9,12 @@ function b = snr_budget(sys, tgt, t_s)
 %                and intra-pulse Doppler losses (b.mfLoss)
 %     b.mti      MTI output (gain at the target Doppler)
 %     b.doppler  Doppler filter output incl. Hamming window, Doppler straddle and
-%                the two-way azimuth beam shape over the CPI. With several rows
-%                this is the mean S/N per row before non-coherent integration.
+%                the two-way azimuth beam shape over the CPI, in the best Doppler
+%                bin that the CFAR tests (outside the MTI notch). With several
+%                rows this is the mean S/N per row before non-coherent integration.
+%     b.blind    true when the target Doppler (aliased by the PRF, or by the row
+%                rate of the staggered PRF) falls into the MTI notch: blind speed,
+%                b.doppler is then only what leaks into the tested bins
 %     b.required SNR per row needed for Pd = 0.9 at the CFAR Pfa with the
 %                effective number of independent rows (sys.dop.nLooks)
 %                integrated non-coherently: Swerling 1 (Shnidman) when
@@ -38,7 +42,7 @@ gEl = pattern_gain(sys.ant.elRel_deg, sys.ant.txElGain_dB, asind(u)) ...
     * pattern_gain(sys.ant.elRel_deg, sys.ant.elElemGain_dB, asind(u));
 Pr  = sys.radarConst * tgt.rcs_m2 / R^4 * gEl;                     % per element [W]
 snrAdc = Pr / (sys.N0eff * sys.fs/2);
-snrDdc = Pr / (sys.N0eff * sys.ddc.noiseBw_Hz);
+snrDdc = Pr / (sys.N0ddc * sys.ddc.noiseBw_Hz);                     % incl. the DDC rounding
 if sys.dbf.enabled
     arrayGain = abs(sys.dbf.W * v).^2 ./ sum(abs(sys.dbf.W).^2, 2);
     [gDbf, b.beam] = max(arrayGain);
@@ -68,7 +72,7 @@ for shift = 0:D/6:D-1
 end
 tEff  = peak / (noiseGain * sys.fs);
 b.mfLoss = 10*log10(tEff / wv.width_s);
-snrMf = Pr * gDbf * tEff / sys.N0eff;                               % energy / noise density
+snrMf = Pr * gDbf * tEff / sys.N0ddc;                               % energy / noise density
 
 %% Slow time: one CPI of pulses centred on the target
 n   = sys.cpi.length;
@@ -84,8 +88,12 @@ yN = mti_filter(impulses, sys.mtiCoeffs, st);
 gMti = mean(abs(mti_filter(sigConst, sys.mtiCoeffs, st)).^2) / mean(sum(abs(yN).^2, 2));
 pS = doppler_process(mti_filter(sigScan, sys.mtiCoeffs, st), sys);
 pN = sum(doppler_process(yN, sys), 2);
-[~, k] = max(pS);
+zeroBin = floor(sys.dop.nfft/2) + 1;
+tested = abs((1:sys.dop.nfft).' - zeroBin) > sys.dop.notchBins;
+[~, kAll] = max(pS);
+[~, k] = max(pS(:) .* tested);                                      % best bin the CFAR tests
 gSlow = pS(k) / pN(k);
+b.blind = ~tested(kAll);
 
 b.nRows    = sys.cpi.nRows;
 b.adc      = 10*log10(snrAdc);

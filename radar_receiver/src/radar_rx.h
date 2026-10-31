@@ -99,6 +99,8 @@ typedef struct {
     double  alpha;         /* CA-CFAR threshold factor (design value from cfg.cfar.pfa) */
     double  nLooks;        /* looks of the noise power in a cell (for cfar_pfa)       */
     double  sidelobeMargin_dB;
+    double  eclipseExtent_m;  /* eclipsed long-pulse echo of a nearer target: reaches the long-pulse
+                                 cells up to this far behind it (see eclipse blanking, processor.c) */
     int     minHits, maxMiss, updateEvery;
     double  minExtent_deg;  /* azimuth extent of a plot (minHits = this / azimuth step per update) */
     double  meanPri_s;      /* mean PRI                                               */

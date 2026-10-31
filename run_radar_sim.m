@@ -1,5 +1,5 @@
 function results = run_radar_sim(cfg)
-%RUN_RADAR_SIM  Simulation of a rotating S-band search radar with elevation DBF.
+%RUN_RADAR_SIM  Simulation of a rotating VHF (170 MHz) search radar with elevation DBF.
 %
 %   results = RUN_RADAR_SIM()    runs the simulation with radar_config().
 %   results = RUN_RADAR_SIM(cfg) runs it with a modified configuration.
@@ -22,7 +22,9 @@ function results = run_radar_sim(cfg)
 %                            stagger MTI + de-interleaving + FFT + NCI (staggered PRF)
 %     8. CFAR              : on every range-Doppler map (2-D, 1-D range or 1-D
 %                            Doppler window, cfg.cfar.method)
-%     9. Pruning           : local peaks only, then azimuth peak picking (plots)
+%     9. Pruning           : local peaks only, sidelobes, eclipsed long-pulse echoes
+%                            of nearer targets (eclipse_blanking.m), then azimuth
+%                            peak picking (plots)
 %    10. Tracking          : EKF on the plots, 2-D or 3-D, constant velocity or
 %                            constant acceleration, GNN association (optional, cfg.track)
 %    11. PPI display       : updated while the radar is running: plots and/or the
@@ -37,6 +39,12 @@ function results = run_radar_sim(cfg)
 %   results.timing_us is the mean time per PRI of DBF, matched filter, MTI,
 %   Doppler, detection (CFAR + pruning), plot extractor, tracking, console
 %   output (progress lines) and display (PPI updates) [us].
+%   results.priTime_s is the time of every simulated PRI (simulation,
+%   processing, display): with cfg.udp.enable the DDC output of
+%   one PRI is sent per loop, so this is also the period of the UDP stream.
+%   results.adcClipped holds the fraction of the ADC samples of the receive
+%   intervals at full scale (mean over the PRIs and worst PRI, adc_overload.m);
+%   above cfg.adc.overloadWarn a warning tells to reduce cfg.rx.gain_dB.
 
 if nargin < 1, cfg = radar_config(); end
 root = fileparts(mfilename('fullpath'));
@@ -102,6 +110,9 @@ extractOpt.flush = false;
 flushOpt = extractOpt;
 flushOpt.flush = true;
 
+clipSum = 0;  clipMax = 0;  clipWarned = false;     % ADC overload (adc_overload.m)
+priTime = nan(1, sched.nPulses);                    % time of every simulated PRI (= the UDP send period)
+
 %% Pulse loop
 for k = 1:sched.nPulses
     t  = sched.time_s(k);
@@ -126,6 +137,7 @@ for k = 1:sched.nPulses
         continue
     end
     wasActive = true;
+    tPri = tic;
 
     % 1) Received signal of all elements and ADC
     clutterIf = [];
@@ -133,6 +145,14 @@ for k = 1:sched.nPulses
         clutterIf = clutter_signal(clut, sys, az, t);
     end
     adcData = adc_sample(generate_rx_signal(sys, targets, t, az, clutterIf), sys);
+    clip = adc_overload(adcData, sys);
+    clipSum = clipSum + clip;  clipMax = max(clipMax, clip);
+    if clip > cfg.adc.overloadWarn && ~clipWarned
+        warning(['ADC overload: %.1f%% of the receive samples of PRI %d (az %.1f deg) are at full scale; ', ...
+                 'clipped clutter and targets give false plots. Reduce cfg.rx.gain_dB (%g dB at %g MHz).'], ...
+                100*clip, k, az, cfg.rx.gain_dB, cfg.fc/1e6);
+        clipWarned = true;
+    end
 
     % 2) Raw data recording
     hdr = pulse_header(sys, sched, k);
@@ -152,6 +172,7 @@ for k = 1:sched.nPulses
 
     % 4-9) Processing chain, separately for the short and the long sub-pulse
     priPlots = [];
+    shortDets = [];                                     % short-pulse detections of this PRI's update
     for i = 1:2
         p  = names{i};
         wv = sys.wave.(p);
@@ -182,6 +203,11 @@ for k = 1:sched.nPulses
             tb = tic;
             [isDet, noise] = cfar_detect(rd, sys, wv);
             dets = prune_peaks(isDet, rd, noise, sys, wv);
+            if i == 1
+                shortDets = dets;
+            else
+                dets = eclipse_blanking(dets, shortDets, sys);   % eclipsed echoes of nearer targets
+            end
             reports = detection_reports(dets, rd, sys, wv, info);
             blockUs(5) = blockUs(5) + 1e6*toc(tb);
             if ~isempty(detLog)
@@ -215,6 +241,7 @@ for k = 1:sched.nPulses
         fprintf('  pulse %6d (az %6.1f deg): %d plots so far, %.0f s elapsed\n', k, az, numel(plots), toc(tStart));
         blockUs(8) = blockUs(8) + 1e6*toc(tb);
     end
+    priTime(k) = toc(tPri);
 end
 
 %% Close the remaining plots, associate the last GNN batch
@@ -242,8 +269,12 @@ results.sys        = sys;
 results.targets    = targets;                       % incl. the RCS of every scan (rcsScan)
 results.nProcessed = nProcessed;
 results.runTime_s  = toc(tStart);
+results.adcClipped = struct('mean', clipSum / max(nProcessed, 1), 'max', clipMax);   % fraction of the receive samples
+results.priTime_s  = priTime(sched.active);         % loop time of every simulated PRI (incl. the display)
 if cfg.sim.verbose
     print_plots(plots);
+    fprintf('ADC samples at full scale in the receive intervals: %.3f%% (mean), %.3f%% (worst PRI)\n', ...
+            100*results.adcClipped.mean, 100*results.adcClipped.max);
     if sys.track.enable
         print_tracks(tracker);
     end
@@ -266,11 +297,12 @@ fprintf('PRF mode: %s, mean PRI = %.0f us, %d rpm, azimuth beamwidth %.2f deg\n'
     mean(sys.pri)*1e6, cfg.ant.rpm, sys.ant.azBeamwidth_deg);
 fprintf('ADC record: %.1f ... %.1f us of the PRI, IF %.0f MHz (%d samples, %.1f MB per PRI)\n', ...
     sys.rxStart_s*1e6, sys.tAdc(end)*1e6, sys.fIF/1e6, sys.nAdc, sys.nAdc*sys.nCh*2/2^20);
-noiseDdc = sys.adc.sigmaTh^2 * sum(sys.ddc.hEq.^2) * prod(sys.ddc.gain)^2;   % per complex sample
-fprintf(['Receiver gain %.0f dB: thermal noise at the ADC %.0f LSB rms (%.1f dBFS), ADC noise %.1f LSB, ', ...
-         'Tx leakage %.0f dBm at the ADC, DDC output noise %.1f LSB rms (I or Q)\n'], cfg.rx.gain_dB, ...
+fprintf(['Receiver gain %.0f dB: thermal noise at the ADC %.1f LSB rms (%.1f dBFS), ADC noise %.1f LSB, ', ...
+         'Tx leakage %.0f dBm at the ADC, DDC output noise %.2f LSB rms (I or Q); SNR loss of the ADC noise ', ...
+         '%.2f dB, of the 16-bit DDC output %.2f dB\n'], cfg.rx.gain_dB, ...
     sys.adc.sigmaTh, 20*log10(sys.adc.sigmaTh*sqrt(2)/sys.adc.fullScale), sys.adc.sigmaAdc, ...
-    10*log10(sys.rx.leakAmp^2/2 * sys.rx.voltGain^2 * 1e3), sqrt(noiseDdc/2));
+    10*log10(sys.rx.leakAmp^2/2 * sys.rx.voltGain^2 * 1e3), sys.ddc.noiseLsb, 10*log10(sys.N0eff/sys.N0), ...
+    10*log10(sys.N0ddc/sys.N0eff));
 names = {'short', 'long'};
 for i = 1:2
     wv = sys.wave.(names{i});

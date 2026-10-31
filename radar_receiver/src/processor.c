@@ -714,6 +714,13 @@ static int cell_order(const void *a, const void *b)
     return x->b - y->b;
 }
 
+typedef struct { double pw; int i; } Ranked;
+static int ranked_desc(const void *a, const void *b)
+{
+    const double x = ((const Ranked *)a)->pw, y = ((const Ranked *)b)->pw;
+    return (x < y) - (x > y);
+}
+
 static float P_at(const PulseState *s, int d, int b, int r)
 {
     return s->P[(size_t)d * s->nCells + (size_t)b * s->nR + r];
@@ -826,14 +833,26 @@ static void prune_and_report(const Processor *p, int pulse, PulseState *s)
     }
     if (n > 1) qsort(cells, n, sizeof(Cell), cell_order);
 
-    /* 2) sidelobe blanking (range, elevation and Doppler sidelobes) */
+    /* 2) sidelobe blanking (range, elevation and Doppler sidelobes). Only the
+     *    peaks more than the margin stronger can blank a peak: with the peaks
+     *    sorted by power they are the first k (binary search), so a crowd of
+     *    similar peaks (clutter residue) costs n log n instead of n^2. */
     const double ratio = pow(10.0, cfg->sidelobeMargin_dB / 10.0);
     const int pulseCells = pc->nTaps;
     unsigned char *keep = xcalloc(n, 1);
+    Ranked *rank = xcalloc(n > 0 ? n : 1, sizeof(Ranked));
+    for (int i = 0; i < n; i++) rank[i] = (Ranked){ cells[i].pw, i };
+    if (n > 1) qsort(rank, n, sizeof(Ranked), ranked_desc);
     for (int i = 0; i < n; i++) {
         keep[i] = 1;
-        for (int j = 0; j < n && keep[i]; j++) {
-            if (!((double)cells[j].pw > ratio * cells[i].pw)) continue;
+        const double x = ratio * cells[i].pw;
+        int lo = 0, hi = n;                                  /* rank[0..lo) > x, rank[hi..n) <= x */
+        while (lo < hi) {
+            const int mid = (lo + hi) / 2;
+            if (rank[mid].pw > x) lo = mid + 1; else hi = mid;
+        }
+        for (int k = 0; k < lo && keep[i]; k++) {
+            const int j = rank[k].i;
             int dDop = abs(cells[i].d - cells[j].d);
             if (nfft - dDop < dDop) dDop = nfft - dDop;
             const int sameD = dDop <= 1, sameB = abs(cells[i].b - cells[j].b) <= 1;
@@ -841,6 +860,28 @@ static void prune_and_report(const Processor *p, int pulse, PulseState *s)
             if ((sameB && sameD && dR <= pulseCells) || (sameR && sameD) || (sameR && sameB)) keep[i] = 0;
         }
     }
+
+    /* eclipse blanking (long pulse, as eclipse_blanking.m): the end of the long
+     * pulse echoed by a target nearer than the long-pulse blind range is
+     * spread over the first long-pulse cells, in the Doppler bin of the target
+     * (and in every beam through the DBF sidelobes); a long-pulse peak in the
+     * Doppler bin (+-1) of a short-pulse detection of this update, at most
+     * eclipseExtent_m behind it and more than the sidelobe margin weaker, is dropped */
+    if (pulse == PULSE_LONG) {
+        const PulseState *sh = &p->ps[PULSE_SHORT];
+        for (int i = 0; i < n; i++) {
+            if (!keep[i]) continue;
+            for (int j = 0; j < sh->nReports; j++) {
+                const Detection *q = &sh->reports[j];
+                int dDop = abs(cells[i].d - q->dIdx);
+                if (nfft - dDop < dDop) dDop = nfft - dDop;
+                if (dDop <= 1 && pc->range_m[cells[i].r] <= q->range_m + cfg->eclipseExtent_m &&
+                    q->power > ratio * cells[i].pw) { keep[i] = 0; break; }
+            }
+        }
+    }
+
+    free(rank);
 
     /* 3) reports: range, velocity, elevation, CPI centre azimuth/time, SNR */
     s->nReports = 0;
@@ -1020,6 +1061,7 @@ void processor_process(Processor *p, const PriData *pri, const ProcessorCallback
         const PulseConfig *pc = &cfg->pulse[i];
         PulseState *s = &p->ps[i];
         double t0 = now_seconds();
+        s->nReports = 0;                    /* reports of this PRI only (the long pulse uses the short ones) */
 
         /* fast time into the next CPI slot */
         load_segment(cfg, pc, pri, s);

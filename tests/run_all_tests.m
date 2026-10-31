@@ -38,6 +38,7 @@ tests(end+1, :) = {'CFAR methods (2-D, range, Doppler), edges, range interval', 
 tests(end+1, :) = {'EKF tracker 3-D and 2-D (and the C tracker when built)', @test_tracker};
 tests(end+1, :) = {'Interactive PPI (data tips, zoom, pan, filters)', @test_ppi_interactive};
 tests(end+1, :) = {'No ghost of the short-pulse echo (same IF)', @test_short_pulse_ghost};
+tests(end+1, :) = {'170 MHz challenges (overload, eclipsed echoes, blind speeds, resolution, load)', @test_vhf_challenges};
 for mode = {'fixed', 'staggered'}
     tests(end+1, :) = {sprintf('Six targets with clutter (%s PRF)', mode{1}), ...
                        @() test_six_targets(mode{1}, true, false)}; %#ok<SAGROW>
@@ -49,6 +50,12 @@ if isunix && exist(receiverBin, 'file')
         tests(end+1, :) = {sprintf('C receiver vs MATLAB (%s PRF)', mode{1}), ...
                            @() test_c_receiver(mode{1}, receiverBin)}; %#ok<SAGROW>
     end
+    for method = {'range', 'doppler'}
+        tests(end+1, :) = {sprintf('C receiver vs MATLAB (fixed PRF, %s CFAR)', method{1}), ...
+                           @() test_c_receiver('fixed', receiverBin, [], [], false, method{1})}; %#ok<SAGROW>
+    end
+    tests(end+1, :) = {'Three scans through the C receiver: tracks on the targets only (fixed PRF)', ...
+                       @() test_multi_scan('fixed', 3)};
 else
     fprintf('C receiver not built (%s): test_c_receiver skipped\n', receiverBin);
 end

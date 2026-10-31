@@ -18,7 +18,7 @@ at 921600 baud.
  Doppler: fixed PRF Hamming + FFT 128 | staggered: de-interleave, Hamming, FFT 32, NCI;
           division by the noise gain of every bin
  CA-CFAR (2-D, 1-D range or 1-D Doppler window, tested range interval, shifted range window at the edges)
-   -> pruning (local peaks, sidelobe blanking) -> reports -> plot extraction -> EKF tracking (optional)
+   -> pruning (local peaks, sidelobe and eclipse blanking) -> reports -> plot extraction -> EKF tracking (optional)
         |                                   |                         |                |
         |                                   +-> serial (detections)   +-> CSV, console, Qt PPI,
         |                                                                 serial (plots) +-> CSV, Qt PPI
@@ -103,7 +103,19 @@ radar_receiver/build/radar_receiver --config radar_receiver/config/radar_config.
 
 Then run `run_radar_sim(cfg)` in MATLAB. Export the configuration again
 whenever `cfg` changes: the receiver checks that the PRI layout (number of
-channels and DDC samples) matches and ignores PRIs that do not.
+channels and DDC samples) matches and ignores PRIs that do not. The file
+has a format version (2); the receiver refuses files of another version and
+needs every value that `export_receiver_config.m` writes.
+
+**Pruning:** as in MATLAB (`prune_peaks.m`, `eclipse_blanking.m`): local
+peaks in beam x range x Doppler; range, elevation and Doppler sidelobes more
+than `sidelobeMargin_dB` below a stronger peak are dropped (only the peaks
+that much stronger are compared, sorted by power, so thousands of
+detections cost n log n); then the long pulse drops the eclipsed echo of a
+nearer target: a peak in the Doppler bin (+-1) of a short-pulse detection
+of the same update, at most `eclipseExtent_m` behind it and more than the
+margin weaker. At 170 MHz the eclipsed long-pulse echo of strong near targets
+otherwise gives false long-pulse plots in the first 22 km of the long pulse.
 `tests/test_c_receiver.m` does all of this automatically and compares the
 plots of both programs.
 
@@ -384,9 +396,9 @@ Timing:
 | Test | What it checks |
 |---|---|
 | `tracker` (`tests/test_tracker.c`) | two crossing targets over 6 scans, 3-D and 2-D: two confirmed tracks that stay on their targets; GNN with two targets 200 m apart: each track stays on its own target; with plots, a configuration and the track log from `../tests/test_tracker.m` (CV and CA, 2-D and 3-D), every C track update equals MATLAB's (same plot, state within 1e-6) |
-| `core` (`tests/test_core.c`) | batched FFT against a direct DFT; plot extractor; a moving target through the whole chain with the exported configuration (one plot at the right range, velocity and beam); direct and fast-convolution matched filters give the same plot; the same target with the CFAR threshold raised to 45 dB at run time gives no detection; `cfar_pfa()` against the closed form (one look) and the Pfa 1e-8 of the configured threshold |
+| `core` (`tests/test_core.c`) | batched FFT against a direct DFT; plot extractor; a moving target through the whole chain with the exported configuration (its velocity a quarter of the Doppler axis from zero, for any carrier frequency; one plot at the right range, velocity and beam); direct and fast-convolution matched filters give the same plot; the same target with the CFAR threshold raised to 45 dB at run time gives no detection; `cfar_pfa()` against the closed form (one look) and the Pfa 1e-8 of the configured threshold |
 | `core_phasecode` | the same core test with `config/radar_config_phasecode.bin` (both sub-pulses P4 phase codes with mismatch filters): the echo is the real code, the plot lies on the target cell |
-| `cfar` (`tests/test_cfar.c`) | the CA-CFAR of `processor.c` against direct sums over the training cells: every decision, for the 2-D, 1-D range and 1-D Doppler windows and tested range intervals in the middle, at both range edges (also when the whole interval lies within the cells of the shifted windows) and over all cells |
+| `cfar` (`tests/test_cfar.c`) | the CA-CFAR of `processor.c` against direct sums over the training cells: every decision, for the 2-D, 1-D range and 1-D Doppler windows and tested range intervals in the middle, at both range edges (also when the whole interval lies within the cells of the shifted windows) and over all cells; the pruning of 165 000 CFAR detections (a strong target with sidelobes, eclipse blanking against a short-pulse report) gives exactly the cells of the direct pairwise rules, in about 50 ms |
 | `udp_input` | reassembly with shuffled, duplicate, missing and foreign datagrams; timeouts; record and replay; fuzzing |
 | `ddc_files` (`tests/test_ddc_files.c`) | MAT-file reader with files written as MATLAB writes them (data in smaller storage types, small elements, skipped char field, compressed `-v7` with zlib); folder listing; the datagrams of a DDC file are accepted by `udp_input.c` and give back the same PRI; corrupted, truncated, `-v7.3` and big-endian files are refused |
 | `serial` | frame encoding and CRC; real output to a pseudo-terminal (Linux): exact bytes, 200-detection split, non-blocking drops, close |

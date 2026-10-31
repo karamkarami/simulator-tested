@@ -13,29 +13,30 @@ rep = struct('time_s', {}, 'az_deg', {}, 'range_m', {}, 'el_deg', {}, 'vr_mps', 
 nB = sys.nBeams;
 if isempty(dets.beam), return; end
 noiseFloor = median(reshape(P, nB, []), 2) / sys.dop.medianToMean;   % per beam
-for i = 1:numel(dets.beam)
-    b = dets.beam(i);
-    % Parabolic interpolation of the beam powers (dB) around the strongest beam
-    u = sys.dbf.beamU(b);
-    if b > 1 && b < nB
-        pdB = double(10*log10(P(b-1:b+1, dets.rIdx(i), dets.dIdx(i))));
-        den = pdB(1) - 2*pdB(2) + pdB(3);
-        delta = 0.5*(pdB(1) - pdB(3))/den;
-        if den < 0 && isfinite(delta)                % (a zero power gives -Inf dB)
-            u = interp1(1:nB, sys.dbf.beamU, b + delta);
-        end
+b = dets.beam(:);  rI = dets.rIdx(:);  dI = dets.dIdx(:);
+n = numel(b);
+% Parabolic interpolation of the beam powers (dB) around the strongest beam
+u = sys.dbf.beamU(b);  u = u(:);
+mid = find(b > 1 & b < nB);
+if ~isempty(mid)
+    [nB_, nR_] = size(P(:, :, 1));
+    lin = @(bb) bb + nB_*(rI(mid) - 1) + nB_*nR_*(dI(mid) - 1);
+    p1 = double(10*log10(P(lin(b(mid) - 1))));
+    p2 = double(10*log10(P(lin(b(mid)))));
+    p3 = double(10*log10(P(lin(b(mid) + 1))));
+    den = p1(:) - 2*p2(:) + p3(:);
+    delta = 0.5*(p1(:) - p3(:)) ./ den;
+    ok = den < 0 & isfinite(delta);                  % (a zero power gives -Inf dB)
+    if any(ok)
+        u(mid(ok)) = interp1(1:nB, sys.dbf.beamU, b(mid(ok)) + delta(ok));
     end
-    r.time_s  = info.tCenter_s;
-    r.az_deg  = info.azCenter_deg;
-    r.range_m = wv.range_m(dets.rIdx(i));
-    r.el_deg  = sys.ant.tilt_deg + asind(u);
-    r.vr_mps  = -sys.dop.f_Hz(dets.dIdx(i)) * wv.lambda_m / 2;
-    r.snr_dB  = 10*log10(max(double(dets.power(i)/noiseFloor(b)) - 1, eps));
-    r.power   = double(dets.power(i));
-    r.beam    = b;
-    r.rIdx    = dets.rIdx(i);
-    r.dIdx    = dets.dIdx(i);
-    r.pulse   = wv.name;
-    rep(end+1) = r; %#ok<AGROW>
 end
+snr = 10*log10(max(double(dets.power(:) ./ noiseFloor(b)) - 1, eps));
+rep = struct('time_s', info.tCenter_s, 'az_deg', info.azCenter_deg, ...
+             'range_m', num2cell(reshape(wv.range_m(rI), 1, [])), ...
+             'el_deg', num2cell(sys.ant.tilt_deg + asind(u.')), ...
+             'vr_mps', num2cell(reshape(-sys.dop.f_Hz(dI) * wv.lambda_m / 2, 1, [])), ...
+             'snr_dB', num2cell(snr.'), 'power', num2cell(double(dets.power(:)).'), ...
+             'beam', num2cell(b.'), 'rIdx', num2cell(rI.'), 'dIdx', num2cell(dI.'), 'pulse', wv.name);
+rep = reshape(rep, 1, n);
 end

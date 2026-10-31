@@ -265,6 +265,7 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         cfg->alpha        = get_scalar(&rs, "alpha");
         cfg->nLooks       = get_scalar(&rs, "nLooks");
         cfg->sidelobeMargin_dB = get_scalar(&rs, "sidelobeMargin_dB");
+        cfg->eclipseExtent_m = get_scalar(&rs, "eclipseExtent_m");
         cfg->minHits      = get_int(&rs, "minHits");
         cfg->maxMiss      = get_int(&rs, "maxMiss");
         cfg->updateEvery  = get_int(&rs, "updateEvery");

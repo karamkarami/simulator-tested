@@ -178,7 +178,10 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
     double pulseNorm = 0.0;
     for (int m = 0; m < pc->nPulse; m++) pulseNorm += pc->pulseRe[m] * pc->pulseRe[m] + pc->pulseIm[m] * pc->pulseIm[m];
     pulseNorm = pulseNorm > 0.0 ? sqrt(pulseNorm) : 1.0;
-    const double vr = 7.3;                              /* m/s, inside the unambiguous interval */
+    /* a quarter of the Doppler axis from zero (inside the unambiguous interval,
+     * outside the MTI notch, for any carrier frequency), 0.3 bins off a bin centre */
+    const double dv = fabs(cfg.dopFreq_Hz[1] - cfg.dopFreq_Hz[0]) * pc->lambda_m / 2;   /* Doppler bin [m/s] */
+    const double vr = -(cfg.nfft / 4 + 0.3) * dv;
     const double pri_s = 1e-3, amp = 30.0;              /* amplitude per element (LSB)          */
     const int nPulses = cfg.cpiLength + 60, nWith = cfg.cpiLength + 30;
 
@@ -267,7 +270,7 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
         printf("  plot: %s, range %.1f m (cell %d), vr %.2f m/s, beam %d, el %.2f deg, SNR %.1f dB, hits %d\n",
                p->pulse == PULSE_LONG ? "long" : "short", p->range_m, p->rIdx, p->vr_mps, p->beam,
                p->el_deg, p->snr_dB, p->hits);
-        if (p->pulse == PULSE_LONG && abs(p->rIdx - r0) <= 1 && fabs(p->vr_mps - vr) < 0.5 &&
+        if (p->pulse == PULSE_LONG && abs(p->rIdx - r0) <= 1 && fabs(p->vr_mps - vr) < 0.75 * dv &&
             abs(p->beam - beam) <= 1) {
             found++;
             *plotOut = *p;

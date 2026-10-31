@@ -29,8 +29,10 @@ function info = generate_ddc_files(cfg, nWorkers)
 %   The noise is not the same random numbers as in run_radar_sim (which draws
 %   from one stream in pulse order), only the same statistics.
 %
-%   info holds the number of files, their folder, the run time and the
-%   pulse numbers.
+%   info holds the number of files, their folder, the run time, the
+%   pulse numbers and the fraction of the ADC samples of the receive
+%   intervals at full scale (info.adcClipped.mean / .max, adc_overload.m; a
+%   warning when cfg.rx.gain_dB overloads the ADC).
 %
 %   Example:
 %     cfg = radar_config;  cfg.io.saveRaw = false;
@@ -70,6 +72,7 @@ if cfg.sim.verbose
 end
 
 %% One PRI per iteration, in any order
+clip = zeros(1, nPulses);                            % ADC overload (adc_overload.m)
 parfor (j = 1:nPulses, maxWorkers)
     k = pulses(j);
     seed_pulse(seed, k);
@@ -80,6 +83,7 @@ parfor (j = 1:nPulses, maxWorkers)
         clutterIf = clutter_signal(clut, sys, az, t);
     end
     adcData = adc_sample(generate_rx_signal(sys, targets, t, az, clutterIf), sys);
+    clip(j) = adc_overload(adcData, sys);
     hdr = pulse_header(sys, sched, k);
     if saveRaw
         save_pulse_file(rawFolder, matFormat, hdr, adcData);
@@ -93,6 +97,12 @@ info.folder    = ddcFolder;
 info.pulses    = pulses;
 info.runTime_s = toc(tStart);
 info.sys       = sys;
+info.adcClipped = struct('mean', mean(clip), 'max', max([clip 0]));
+if info.adcClipped.max > cfg.adc.overloadWarn
+    warning(['ADC overload: up to %.1f%% of the receive samples of a PRI are at full scale; clipped ', ...
+             'clutter and targets give false plots. Reduce cfg.rx.gain_dB (%g dB at %g MHz).'], ...
+            100*info.adcClipped.max, cfg.rx.gain_dB, cfg.fc/1e6);
+end
 if cfg.sim.verbose
     fprintf('%d DDC files written in %.1f s (%.1f ms per PRI)\n', nPulses, info.runTime_s, ...
             1e3*info.runTime_s/max(nPulses, 1));

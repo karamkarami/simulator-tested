@@ -15,35 +15,51 @@ function dets = prune_peaks(isDet, P, noise, sys, wv)
 
 [nB, nR, nD] = size(P);
 
-%% 1) Local peaks
+%% 1) Local peaks (compared with the 26 neighbours, Doppler circular)
 idx = find(isDet);
 [b, r, d] = ind2sub([nB nR nD], idx);
-keep = false(size(idx));
-for i = 1:numel(idx)
-    bb = max(b(i)-1, 1):min(b(i)+1, nB);
-    rr = max(r(i)-1, 1):min(r(i)+1, nR);
-    dd = mod(d(i)-2:d(i), nD) + 1;                    % circular Doppler neighbours
-    block = P(bb, rr, dd);
-    keep(i) = P(idx(i)) >= max(block(:));
+v = P(idx);
+keep = true(size(idx));
+for db = -1:1
+    for dr = -1:1
+        for dd = -1:1
+            bb = b + db;  rr = r + dr;
+            in = bb >= 1 & bb <= nB & rr >= 1 & rr <= nR;
+            nb = bb(in) + nB*(rr(in) - 1) + nB*nR*mod(d(in) - 1 + dd, nD);   % linear index of the neighbour
+            keep(in) = keep(in) & v(in) >= P(nb);
+        end
+    end
 end
 idx = idx(keep);  b = b(keep);  r = r(keep);  d = d(keep);
 pw  = double(P(idx));
 
 %% 2) Sidelobe blanking
+% Only the peaks more than the margin stronger can blank a peak: with the
+% powers sorted, they are the first k(i) (binary search for all peaks at once).
 ratio = 10^(sys.cfg.prune.sidelobeMargin_dB/10);
 pulseCells = numel(wv.mfTaps);                       % extent of the range sidelobes
-keep = true(size(idx));
-for i = 1:numel(idx)
-    for j = find(pw > ratio*pw(i)).'
-        dDop  = abs(d(i) - d(j));
-        sameD = min(dDop, nD - dDop) <= 1;
-        sameB = abs(b(i) - b(j)) <= 1;
-        sameR = abs(r(i) - r(j)) <= 1;
-        if (sameB && sameD && abs(r(i) - r(j)) <= pulseCells) || (sameR && sameD) || (sameR && sameB)
-            keep(i) = false;
-            break
-        end
-    end
+n = numel(pw);
+[pws, ord] = sort(pw, 'descend');
+x  = ratio * pw;
+lo = zeros(n, 1);  hi = n * ones(n, 1);              % pws(1:lo) > x, pws(hi+1:end) <= x
+act = lo < hi;
+while any(act)
+    mid = floor((lo(act) + hi(act) + 1) / 2);
+    gt  = pws(mid) > x(act);
+    a   = find(act);
+    lo(a(gt))  = mid(gt);
+    hi(a(~gt)) = mid(~gt) - 1;
+    act = lo < hi;
+end
+keep = true(n, 1);
+for i = find(lo > 0).'
+    j = ord(1:lo(i));
+    dDop  = abs(d(i) - d(j));
+    sameD = min(dDop, nD - dDop) <= 1;
+    sameB = abs(b(i) - b(j)) <= 1;
+    dR    = abs(r(i) - r(j));
+    sameR = dR <= 1;
+    keep(i) = ~any((sameB & sameD & dR <= pulseCells) | (sameR & sameD) | (sameR & sameB));
 end
 idx = idx(keep);
 dets.beam  = b(keep);

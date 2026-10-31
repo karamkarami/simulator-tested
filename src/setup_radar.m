@@ -94,6 +94,14 @@ h2Up = zeros(D1*(L2-1)+1, 1);
 h2Up(1:D1:end) = sys.ddc.h2real;
 sys.ddc.hEq = conv(sys.ddc.h1real, h2Up);
 sys.ddc.noiseBw_Hz = fs * sum(sys.ddc.hEq.^2);                % complex noise bandwidth [Hz]
+% Noise at the DDC output per I or Q component [LSB^2]: receiver and ADC
+% noise through both filters, and the rounding of both stages to 16 bit (the
+% stage-1 rounding filtered by stage 2). When the receiver noise is not well
+% above 1 LSB the rounding costs SNR: sys.N0ddc is N0eff with it.
+adcLevel = (sys.adc.sigmaTh^2 + adcNoise2) * sum(sys.ddc.hEq.^2) * prod(sys.ddc.gain)^2 / 2;
+rounding = cfg.ddc.fixedPoint * (1 + sum(sys.ddc.h2real.^2) * sys.ddc.gain(2)^2) / 12;
+sys.ddc.noiseLsb = sqrt(adcLevel + rounding);                 % rms of I or Q [LSB]
+sys.N0ddc = sys.N0eff * (adcLevel + rounding) / adcLevel;      % noise density after the DDC
 
 %% PRI timeline: short pulse, receive, long pulse, receive
 % One ADC record per PRI runs from the PRI start to the end of the long-pulse
@@ -150,6 +158,8 @@ if rxEnd > min(sys.pri)
 end
 sys.nAdc = round((rxEnd - sys.rxStart_s) * fs);
 sys.tAdc = sys.rxStart_s + (0:sys.nAdc-1)' / fs;             % ADC sample times in the PRI [s]
+sys.adc.rxSamples = find((sys.tAdc >= ws.tTx_s + ws.width_s & sys.tAdc < wl.tTx_s) | ...
+                         sys.tAdc >= wl.tTx_s + wl.width_s);  % receive intervals (adc_overload.m)
 
 % NCO of the DDC: the real line is multiplied by cos(2*pi*fIF*t), the imaginary
 % line by -sin(2*pi*fIF*t). At fIF = fs/4 these are exactly 1, 0, -1, 0, ...
@@ -223,6 +233,11 @@ if nKeep < ws.nRange
     sys.wave.short = ws;
 end
 sys.handover_m = handover_m;
+% Eclipsed long-pulse echo of a target nearer than the long-pulse blind range:
+% its pulse compression output reaches the long-pulse range cells up to this
+% far behind the target (pulse length, earlier peak of a mismatch filter, DDC
+% filters); eclipse_blanking.m drops the detections it gives.
+sys.eclipseExtent_m = c/2 * (wl.width_s + max(wl.mfShift, 0)/sys.fsOut + (numel(sys.ddc.hEq) - 1)/fs);
 
 % Range cells tested by the CFAR (both sub-pulses): cfg.cfar.<pulse>.min/maxRange_m
 % and, for the short pulse, the handover. testIdx = [first last] (1-based).

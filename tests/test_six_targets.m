@@ -5,7 +5,10 @@ function [ok, results] = test_six_targets(prfMode, clutterOn, keepRaw)
 %   with the six targets of six_targets_scenario.m (RCS 0.5 ... 10 m^2,
 %   8 ... 46 km, radial speeds up to 290 m/s) and checks that every target
 %   gives a plot with the right range, azimuth, elevation and (ambiguous)
-%   radial velocity. prfMode is 'fixed' (default) or 'staggered'; clutterOn
+%   radial velocity. A target at a blind speed (its Doppler, folded by the
+%   PRF or, staggered, by the row rate, in the MTI notch; snr_budget.m) may
+%   give no plot: at 170 MHz the staggered rows are blind at multiples of
+%   225 m/s (T1 at -236 m/s and T6 at 210 m/s). prfMode is 'fixed' (default) or 'staggered'; clutterOn
 %   (default true) switches the ground clutter on; keepRaw = false (default
 %   true) deletes the raw files after they have been checked.
 %
@@ -69,8 +72,13 @@ for i = 1:numel(cfg.targets)
         end
     end
     if best == 0
-        ok = false;
-        fprintf('%-4s  no plot found  <-- FAIL\n', tgt.name);
+        b = snr_budget(sys, tgt, illumination_time(sys, tgt));
+        if b.blind                                     % its Doppler is in the MTI notch (snr_budget.m)
+            fprintf('%-4s  no plot: blind speed (%.0f m/s folds into the MTI notch), as expected\n', tgt.name, b.vr_mps);
+        else
+            ok = false;
+            fprintf('%-4s  no plot found  <-- FAIL\n', tgt.name);
+        end
         continue
     end
     p = plots(best);

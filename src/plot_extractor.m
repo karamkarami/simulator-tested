@@ -11,13 +11,18 @@ function [ext, plots] = plot_extractor(ext, reports, opt)
 
 g = ext.groups;
 updated = false(1, numel(g));
+% beam, range cell and Doppler bin of every open group (kept up to date below)
+gb = [g.beam];  gr = [g.rIdx];  gd = [g.dIdx];
 for i = 1:numel(reports)
     rp = reports(i);
-    j = find_group(g, rp, ext.nDop);
+    dDop = abs(gd - rp.dIdx);
+    dDop = min(dDop, ext.nDop - dDop);                 % circular Doppler distance
+    j = find(abs(gb - rp.beam) <= 1 & abs(gr - rp.rIdx) <= 2 & dDop <= 1, 1);   % first matching group
     if isempty(j)
         g(end+1) = struct('beam', rp.beam, 'rIdx', rp.rIdx, 'dIdx', rp.dIdx, ...
                           'hits', 1, 'miss', 0, 'best', rp); %#ok<AGROW>
         updated(end+1) = true; %#ok<AGROW>
+        j = numel(g);
     else
         g(j).beam = rp.beam;  g(j).rIdx = rp.rIdx;  g(j).dIdx = rp.dIdx;
         g(j).hits = g(j).hits + 1;
@@ -27,6 +32,7 @@ for i = 1:numel(reports)
         end
         updated(j) = true;
     end
+    gb(j) = rp.beam;  gr(j) = rp.rIdx;  gd(j) = rp.dIdx;
 end
 
 % Groups without a new detection
@@ -44,17 +50,4 @@ for j = find(closed & [g.hits] >= opt.minHits)
     plots = [plots, p]; %#ok<AGROW>
 end
 ext.groups = g(~closed);
-end
-
-function j = find_group(g, rp, nDop)
-% Index of the open group that matches report rp (empty if none).
-j = [];
-for k = 1:numel(g)
-    dDop = abs(g(k).dIdx - rp.dIdx);
-    dDop = min(dDop, nDop - dDop);                     % circular Doppler distance
-    if abs(g(k).beam - rp.beam) <= 1 && abs(g(k).rIdx - rp.rIdx) <= 2 && dDop <= 1
-        j = k;
-        return
-    end
-end
 end

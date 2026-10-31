@@ -7,7 +7,8 @@
  * and the 1-D Doppler window and for tested range intervals in the middle, at
  * both range edges (shifted windows, also when the whole interval lies within
  * the first or last guard+training cells) and over all cells. The window of
- * the configuration (argv[1]) gives the sizes.
+ * the configuration (argv[1]) gives the sizes. Then the pruning of thousands
+ * of detections (check_pruning) against the direct pairwise rules.
  */
 #include "../src/processor.c"
 
@@ -78,6 +79,85 @@ static void check_window(RadarConfig cfg, const char *name, int gR, int tR, int 
     processor_destroy(p);
 }
 
+/* Pruning under load: a long-pulse map with a strong target (range
+ * sidelobes along its line) and a low threshold gives thousands of CFAR
+ * detections; prune_and_report() must keep exactly the cells of the direct
+ * rules (local peak, sidelobe blanking pair by pair, eclipse blanking against
+ * a short-pulse report on the target line), in about n log n time. */
+static void check_pruning(RadarConfig cfg)
+{
+    Processor *p = processor_create(&cfg, 0);
+    PulseState *s = &p->ps[PULSE_LONG];
+    const PulseConfig *pc = &cfg.pulse[PULSE_LONG];
+    const int nR = s->nR, nB = cfg.nBeams, nfft = cfg.nfft, tb = nB / 2, tr = nR / 3, td = nfft / 4;
+    srand(5);
+    for (size_t i = 0; i < (size_t)nfft * s->nCells; i++)
+        s->P[i] = (float)-log((rand() + 1.0) / (RAND_MAX + 2.0));
+    for (int r = tr - 80; r <= tr + 80; r++)                              /* sidelobes of the target */
+        if (r >= 0 && r < nR) s->P[(size_t)td * s->nCells + (size_t)tb * nR + r] += 1e4f * (float)(rand() + 1) / RAND_MAX;
+    s->P[(size_t)td * s->nCells + (size_t)tb * nR + tr] = 1e7f;
+    /* a short-pulse report on the same beam and Doppler bin: the long-pulse cells
+     * up to eclipseExtent_m behind it and 20 dB weaker are its eclipsed echo */
+    PulseState *sh = &p->ps[PULSE_SHORT];
+    Detection q;
+    memset(&q, 0, sizeof q);
+    q.beam = tb;  q.dIdx = td;  q.range_m = pc->range_m[tr] - cfg.eclipseExtent_m / 2;  q.power = 1e9;
+    sh->nReports = 0;
+    add_report(sh, &q);
+    processor_set_cfar_alpha(p, 2.5);
+    PulseConfig all = *pc;
+    all.testFirst = 0;  all.testCount = nR;
+    cfar(p, s, &all);
+    const double t0 = now_seconds();
+    prune_and_report(p, PULSE_LONG, s);
+    const double dt = now_seconds() - t0;
+
+    /* the direct rules */
+    Cell *c = malloc(sizeof(Cell) * (size_t)nfft * s->nCells);
+    int n = 0, nDet = 0;
+    for (int d = 0; d < nfft; d++)
+        for (int r = 0; r < nR; r++)
+            for (int b = 0; b < nB; b++) {
+                if (!s->det[(size_t)d * s->nCells + (size_t)b * nR + r]) continue;
+                nDet++;
+                const float v = P_at(s, d, b, r);
+                int peak = 1;
+                for (int dd = -1; dd <= 1; dd++)
+                    for (int bb = b - 1; bb <= b + 1; bb++)
+                        for (int rr = r - 1; rr <= r + 1; rr++)
+                            if (bb >= 0 && bb < nB && rr >= 0 && rr < nR && P_at(s, (d + dd + nfft) % nfft, bb, rr) > v) peak = 0;
+                if (peak) c[n++] = (Cell){ b, r, d, v };
+            }
+    const double ratio = pow(10.0, cfg.sidelobeMargin_dB / 10.0);
+    int nKeep = 0, wrong = 0, k = 0;
+    for (int i = 0; i < n; i++) {
+        int keep = 1;
+        for (int j = 0; j < n && keep; j++) {
+            if (!((double)c[j].pw > ratio * c[i].pw)) continue;
+            int dD = abs(c[i].d - c[j].d);  if (nfft - dD < dD) dD = nfft - dD;
+            const int dR = abs(c[i].r - c[j].r);
+            if ((abs(c[i].b - c[j].b) <= 1 && dD <= 1 && dR <= pc->nTaps) || (dR <= 1 && dD <= 1) ||
+                (dR <= 1 && abs(c[i].b - c[j].b) <= 1)) keep = 0;
+        }
+        int dD = abs(c[i].d - q.dIdx);  if (nfft - dD < dD) dD = nfft - dD;
+        if (keep && dD <= 1 && pc->range_m[c[i].r] <= q.range_m + cfg.eclipseExtent_m &&
+            q.power > ratio * c[i].pw) keep = 0;
+        if (!keep) continue;
+        nKeep++;
+        if (k >= s->nReports || s->reports[k].beam != c[i].b || s->reports[k].rIdx != c[i].r || s->reports[k].dIdx != c[i].d)
+            wrong++;
+        k++;
+    }
+    if (wrong || k != s->nReports || dt > 0.5) {
+        failures++;
+        printf("FAIL pruning: %d reports, %d expected, %d different, %.3f s\n", s->nReports, nKeep, wrong, dt);
+    }
+    printf("pruning: %d CFAR detections, %d peaks, %d kept (the direct rules: %d) in %.1f ms: %s\n", nDet, n,
+           s->nReports, nKeep, dt * 1e3, wrong || k != s->nReports || dt > 0.5 ? "FAIL" : "ok");
+    free(c);
+    processor_destroy(p);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -94,8 +174,9 @@ int main(int argc, char **argv)
     check_window(cfg, "1-D range", 3, 16, 0, 0);
     check_window(cfg, "1-D Doppler", 0, 0, 2, 8);
     check_window(cfg, "configured", cfg.guardRange, cfg.trainRange, cfg.guardDoppler, cfg.trainDoppler);
+    check_pruning(cfg);
     radar_config_free(&cfg);
     if (failures) printf("%d FAILURE(S)\n", failures);
-    else printf("all CFAR tests passed\n");
+    else printf("all CFAR and pruning tests passed\n");
     return failures ? 1 : 0;
 }
