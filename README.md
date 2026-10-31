@@ -776,7 +776,15 @@ SNR, hits) and track updates of MATLAB for the fixed and the staggered PRF,
 the 1-D range CFAR (the 6 targets, no false plot: the clutter residue at
 4.2 km of the 30 dB design is gone with the STC) and the 1-D Doppler CFAR
 (21 plots in both programs: the 6 targets and 15 eclipse ghosts, see CFAR).
-MULTISCAN
+`test_multi_scan` (three scans, C receiver, 2-D CFAR): no ADC sample
+clipped, 18 plots, 7 tracks, 5 confirmed (one on each of T1 - T5; T6 flies
+out of the 50 km of the test), no false confirmed track. One plot is false:
+in the second scan T2 is at 21.9 km, just inside the long-pulse blind range,
+and besides its short-pulse plot its almost complete eclipsed long-pulse
+echo gives a plot in the first long-pulse cell (23.0 km, SNR 25 dB). There
+the STC must already be small (it would cost the long-pulse targets at
+23 km as much), so a target between about 21.5 and 22.5 km can show in
+both sub-pulses; it started only a tentative track.
 `test_vhf_challenges`, `test_tracker` (with the radial velocity: velocity
 error after two scans 22 instead of 89 m/s), `test_phase_code`, `test_cfar`,
 `test_setup`, `test_short_pulse_ghost`, `test_udp_stream`,
