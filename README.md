@@ -398,7 +398,7 @@ there, at the same beam and Doppler, behind very strong far targets.
   sees weaker clutter farther out: in the six-target test the `'range'`
   method gave one false plot at 4.2 km, the first short-pulse cell (clutter
   residue in the lowest beam, 4 Doppler bins from zero at 170 MHz), that
-  the `'2d'` method does not give. Raise `cfg.cfar.short.minRange_m` (e.g.
+  the `'2d'` and `'doppler'` methods do not give. Raise `cfg.cfar.short.minRange_m` (e.g.
   to 5 km) or the threshold there.
   The 1-D Doppler window has no range extent. The long pulse of a strong
   target inside its blind range (22.5 km) is still received in part
@@ -680,8 +680,9 @@ the staggered PRF it finds the 4 targets that are not at a blind speed (T1,
 T6 are, as predicted) with no false plot. In `test_c_receiver` the C
 receiver gives exactly the plots (no difference in range, azimuth,
 elevation, velocity, SNR, hits) and track updates of MATLAB for the fixed
-and the staggered PRF and with the 1-D range CFAR (one more plot, the
-clutter residue at 4.2 km described under CFAR, in both programs).
+and the staggered PRF and with the 1-D Doppler CFAR (the 6 targets, no false
+plot) and the 1-D range CFAR (one more plot, the clutter residue at 4.2 km
+described under CFAR, in both programs).
 `test_multi_scan` (three scans, C receiver): 17 plots, none false, 6 tracks
 (one per target), confirmed on T1 - T5 (T6 flies out of the 50 km of the
 test in the third scan), no false track. With only `cfg.fc` changed in the
