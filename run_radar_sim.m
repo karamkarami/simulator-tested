@@ -22,9 +22,7 @@ function results = run_radar_sim(cfg)
 %                            stagger MTI + de-interleaving + FFT + NCI (staggered PRF)
 %     8. CFAR              : on every range-Doppler map (2-D, 1-D range or 1-D
 %                            Doppler window, cfg.cfar.method)
-%     9. Pruning           : local peaks only, sidelobes, eclipsed long-pulse echoes
-%                            of nearer targets (eclipse_blanking.m), then azimuth
-%                            peak picking (plots)
+%     9. Pruning           : local peaks only, then azimuth peak picking (plots)
 %    10. Tracking          : EKF on the plots, 2-D or 3-D, constant velocity or
 %                            constant acceleration, GNN association (optional, cfg.track)
 %    11. PPI display       : updated while the radar is running: plots and/or the
@@ -57,7 +55,7 @@ sys   = setup_radar(cfg);
 sched = pulse_schedule(sys);
 targets = draw_target_rcs(cfg.targets, max(sched.scan) + 1, cfg.sim.swerling);   % RCS of every antenna pass
 names = {'short', 'long'};
-if cfg.sim.verbose
+if cfg.console.enable
     print_summary(sys, sched);
     results.budget = print_snr_budget(sys, cfg.targets);
 end
@@ -149,7 +147,8 @@ for k = 1:sched.nPulses
     clipSum = clipSum + clip;  clipMax = max(clipMax, clip);
     if clip > cfg.adc.overloadWarn && ~clipWarned
         warning(['ADC overload: %.1f%% of the receive samples of PRI %d (az %.1f deg) are at full scale; ', ...
-                 'clipped clutter and targets give false plots. Reduce cfg.rx.gain_dB (%g dB at %g MHz).'], ...
+                 'clipped clutter and targets give false plots. Reduce cfg.rx.gain_dB (%g dB at %g MHz) ', ...
+                 'or raise the STC (cfg.rx.stc).'], ...
                 100*clip, k, az, cfg.rx.gain_dB, cfg.fc/1e6);
         clipWarned = true;
     end
@@ -172,7 +171,6 @@ for k = 1:sched.nPulses
 
     % 4-9) Processing chain, separately for the short and the long sub-pulse
     priPlots = [];
-    shortDets = [];                                     % short-pulse detections of this PRI's update
     for i = 1:2
         p  = names{i};
         wv = sys.wave.(p);
@@ -203,11 +201,6 @@ for k = 1:sched.nPulses
             tb = tic;
             [isDet, noise] = cfar_detect(rd, sys, wv);
             dets = prune_peaks(isDet, rd, noise, sys, wv);
-            if i == 1
-                shortDets = dets;
-            else
-                dets = eclipse_blanking(dets, shortDets, sys);   % eclipsed echoes of nearer targets
-            end
             reports = detection_reports(dets, rd, sys, wv, info);
             blockUs(5) = blockUs(5) + 1e6*toc(tb);
             if ~isempty(detLog)
@@ -236,7 +229,7 @@ for k = 1:sched.nPulses
                          track_report(tracker), blockUs / nProcessed);   % may set a new CFAR threshold
         blockUs(9) = blockUs(9) + 1e6*toc(tb);
     end
-    if cfg.sim.verbose && mod(nProcessed, 500) == 0
+    if cfg.console.enable && mod(nProcessed, 500) == 0
         tb = tic;
         fprintf('  pulse %6d (az %6.1f deg): %d plots so far, %.0f s elapsed\n', k, az, numel(plots), toc(tStart));
         blockUs(8) = blockUs(8) + 1e6*toc(tb);
@@ -271,11 +264,15 @@ results.nProcessed = nProcessed;
 results.runTime_s  = toc(tStart);
 results.adcClipped = struct('mean', clipSum / max(nProcessed, 1), 'max', clipMax);   % fraction of the receive samples
 results.priTime_s  = priTime(sched.active);         % loop time of every simulated PRI (incl. the display)
-if cfg.sim.verbose
-    print_plots(plots);
+if cfg.console.enable
+    if cfg.console.plots
+        print_plots(plots);
+    else
+        fprintf('\nExtracted plots: %d (list switched off: cfg.console.plots)\n', numel(plots));
+    end
     fprintf('ADC samples at full scale in the receive intervals: %.3f%% (mean), %.3f%% (worst PRI)\n', ...
             100*results.adcClipped.mean, 100*results.adcClipped.max);
-    if sys.track.enable
+    if sys.track.enable && cfg.console.plots
         print_tracks(tracker);
     end
     fprintf(['Mean processing time per PRI [us]: DBF %.0f, matched filter %.0f, MTI %.0f, Doppler %.0f, ' ...
@@ -323,13 +320,16 @@ tk = tracker.tracks;
 fprintf('\nTracks at the end (%d-D EKF, %s model, GNN): %d (%d confirmed), %d track updates\n', tracker.p.dim, ...
         upper(tracker.p.model), numel(tk), ...
         sum([tk.confirmed]), size(tracker.log, 1));
-fprintf('%5s %4s %9s %8s %8s %8s %8s %5s\n', 'id', 'conf', 'R[km]', 'az[deg]', 'h[m]', 'v[m/s]', 'hdg[deg]', 'hits');
+fprintf('%5s %4s %9s %8s %8s %8s %8s %8s %5s\n', 'id', 'conf', 'R[km]', 'az[deg]', 'h[m]', 'v[m/s]', 'hdg[deg]', ...
+        'vr[m/s]', 'hits');
 for i = 1:numel(tk)
     x = tk(i).x;  d = tracker.p.dim;
     z = 0;  if d == 3, z = x(3); end
     v = x(d+1:d+2);
-    fprintf('%5d %4d %9.3f %8.2f %8.0f %8.1f %8.1f %5d\n', tk(i).id, tk(i).confirmed, norm(x(1:d))/1e3, ...
-            mod(atan2(x(1), x(2))*180/pi, 360), z + tracker.p.height_m, norm(v), mod(atan2(v(1), v(2))*180/pi, 360), tk(i).hits);
+    vr = x(1:d).' * x(d+1:2*d) / norm(x(1:d));      % radial velocity of the track (unambiguous)
+    fprintf('%5d %4d %9.3f %8.2f %8.0f %8.1f %8.1f %8.1f %5d\n', tk(i).id, tk(i).confirmed, norm(x(1:d))/1e3, ...
+            mod(atan2(x(1), x(2))*180/pi, 360), z + tracker.p.height_m, norm(v), mod(atan2(v(1), v(2))*180/pi, 360), ...
+            vr, tk(i).hits);
 end
 end
 

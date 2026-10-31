@@ -16,7 +16,7 @@ ok = true;
 rng(11);
 for method = {'2d', 'range', 'doppler'}
     cfg = radar_config();
-    cfg.sim.verbose = false;
+    cfg.console.enable = false;
     cfg.cfar.method = method{1};
     sys = setup_radar(cfg);
     sys.dop.notchBins = 0;                             % test every Doppler bin

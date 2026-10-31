@@ -19,7 +19,7 @@ if ~ishandle(ppi.fig), return; end                       % the window was closed
 dB = ppi_callbacks('takeCfar', ppi.fig);
 if ~isempty(dB)
     sys.cfar.alpha = 10^(dB/10);
-    if sys.cfg.sim.verbose
+    if sys.cfg.console.enable
         fprintf('  CFAR threshold set to %.2f dB (Pfa %.1e) at t = %.3f s\n', dB, ...
                 cfar_pfa(sys.cfar.alpha, sys.cfar.nTrain, sys.dop.nLooks), t_s);
     end

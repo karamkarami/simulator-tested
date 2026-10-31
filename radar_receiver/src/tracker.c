@@ -10,7 +10,14 @@
  * Q = q*[dt^5/20 dt^4/8 dt^3/6; dt^4/8 dt^3/3 dt^2/2; dt^3/6 dt^2/2 dt]
  * (white jerk). Measurement of a plot: 2-D [ground range, azimuth] (slant
  * range when the elevation is unknown), 3-D [range, azimuth, elevation];
- * h(x) is linearised at the predicted state.
+ * h(x) is linearised at the predicted state. With useVr the radial velocity
+ * of the plot is one more component, h(x) = p.v/|p| (2-D: ground range rate,
+ * the plot velocity divided by cos(elevation) when known), variance Rvr; the
+ * plot velocity is known modulo vrSpan: used as it is when vrUnambiguous,
+ * else unfolded to the value nearest the predicted range rate and used only
+ * when the track predicts that rate to better than vrSpan/6; the gate is then
+ * gateVr (one degree of freedom more). A new track with an unambiguous radial
+ * velocity starts with it along the line of sight.
  * Association: global nearest neighbour on batches of plots. A batch is
  * complete when the antenna has turned batchGap_s without a new plot, or
  * batchMax_s after its first plot. Cost of a plot-track pair d^2 + ln|S| when
@@ -45,6 +52,11 @@ void tracker_init(Tracker *t, const RadarConfig *cfg)
     t->sigmaV0 = cfg->trackSigmaV0;
     t->sigmaA0 = cfg->trackSigmaA0;
     t->gate = cfg->trackGate;
+    t->useVr = cfg->trackUseVr;
+    t->vrUnambiguous = cfg->trackVrUnambiguous;
+    t->Rvr = cfg->trackSigmaVr * cfg->trackSigmaVr;
+    t->vrSpan = cfg->trackVrSpan;
+    t->gateVr = cfg->trackGateVr;
     t->scanTime_s = cfg->scanTime_s;
     t->batchGap_s = cfg->trackBatchGap_s;
     t->batchMax_s = cfg->trackBatchMax_s;
@@ -87,9 +99,39 @@ static void mul_bt(const double *A, const double *B, double *C, int r, int k, in
         }
 }
 
-/* Inverse and determinant of a symmetric 2x2 or 3x3 matrix. Returns 0 if singular. */
+/* Inverse and determinant of a symmetric 2x2, 3x3 or 4x4 matrix. Returns 0 if singular. */
 static int inv_small(const double *S, int m, double *Si, double *det)
 {
+    if (m == 4) {                                          /* Gauss-Jordan with partial pivoting */
+        double A[16], I[16];
+        memcpy(A, S, sizeof A);
+        memset(I, 0, sizeof I);
+        for (int i = 0; i < 4; i++) I[i * 4 + i] = 1.0;
+        *det = 1.0;
+        for (int c = 0; c < 4; c++) {
+            int piv = c;
+            for (int r = c + 1; r < 4; r++) if (fabs(A[r * 4 + c]) > fabs(A[piv * 4 + c])) piv = r;
+            if (A[piv * 4 + c] == 0.0) return 0;
+            if (piv != c) {
+                for (int k = 0; k < 4; k++) {
+                    double v = A[c * 4 + k]; A[c * 4 + k] = A[piv * 4 + k]; A[piv * 4 + k] = v;
+                    v = I[c * 4 + k]; I[c * 4 + k] = I[piv * 4 + k]; I[piv * 4 + k] = v;
+                }
+                *det = -*det;
+            }
+            const double d = A[c * 4 + c];
+            *det *= d;
+            for (int k = 0; k < 4; k++) { A[c * 4 + k] /= d; I[c * 4 + k] /= d; }
+            for (int r = 0; r < 4; r++) {
+                if (r == c) continue;
+                const double f = A[r * 4 + c];
+                for (int k = 0; k < 4; k++) { A[r * 4 + k] -= f * A[c * 4 + k]; I[r * 4 + k] -= f * I[c * 4 + k]; }
+            }
+        }
+        if (!(*det > 0.0)) return 0;
+        memcpy(Si, I, sizeof I);
+        return 1;
+    }
     if (m == 2) {
         *det = S[0] * S[3] - S[1] * S[2];
         if (!(*det > 0.0)) return 0;
@@ -165,32 +207,72 @@ static void innovation(const Tracker *t, const double *z, const double *x, doubl
     nu[1] -= PI;
 }
 
-/* Track predicted to time tp, innovation, Jacobian and S^-1. Returns 0 if S is singular. */
-static int predict_measure(const Tracker *t, const TrackState *s, const double *z, double tp, double *x, double *P,
-                           double *nu, double *H, double *Si, double *det)
+/* Range rate p.v/|p| of the state and its Jacobian (1 x n). */
+static void radial_velocity(const Tracker *t, const double *x, double *hv, double *Hv)
 {
     const int d = t->dim, n = t->n;
-    double HP[3 * NMAX], S[9];
+    double r2 = 0.0, pv = 0.0;
+    for (int i = 0; i < d; i++) { r2 += x[i] * x[i]; pv += x[i] * x[d + i]; }
+    const double r = sqrt(r2);
+    *hv = pv / r;
+    memset(Hv, 0, sizeof(double) * n);
+    for (int i = 0; i < d; i++) {
+        Hv[i] = (x[d + i] - *hv * x[i] / r) / r;
+        Hv[d + i] = x[i] / r;
+    }
+}
+
+/* Track predicted to time tp, innovation, Jacobian, S^-1, the measurement
+ * dimension *md and noise Rm: with the radial velocity zvr when it can be used
+ * (unambiguous, or unfolded with the predicted range rate). Returns 0 if S is singular. */
+static int predict_measure(const Tracker *t, const TrackState *s, const double *z, double zvr, double tp, double *x,
+                           double *P, double *nu, double *H, double *Si, double *det, int *md, double *Rm)
+{
+    const int d = t->dim, n = t->n;
+    double HP[4 * NMAX], S[16];
+    int m = d;
     memset(x, 0, sizeof(double) * NMAX);
     predict(t, s, tp - s->t, x, P);
     innovation(t, z, x, nu, H);
-    mul(H, P, HP, d, n, n);
-    mul_bt(HP, H, S, d, n, d);
-    for (int i = 0; i < d; i++) S[i * d + i] += t->R[i];
-    return inv_small(S, d, Si, det);
+    for (int i = 0; i < d; i++) Rm[i] = t->R[i];
+    if (t->useVr && isfinite(zvr)) {
+        double hv, Hv[NMAX], HvP[NMAX], sv2 = 0.0, k = 0.0;
+        int use = 1;
+        radial_velocity(t, x, &hv, Hv);
+        if (!t->vrUnambiguous) {
+            mul(Hv, P, HvP, 1, n, n);
+            for (int i = 0; i < n; i++) sv2 += HvP[i] * Hv[i];
+            use = sqrt(sv2 + t->Rvr) < t->vrSpan / 6.0;
+            k = round((hv - zvr) / t->vrSpan);
+        }
+        if (use) {
+            nu[d] = zvr + k * t->vrSpan - hv;
+            memcpy(H + (size_t)d * n, Hv, sizeof(double) * n);
+            Rm[d] = t->Rvr;
+            m = d + 1;
+        }
+    }
+    mul(H, P, HP, m, n, n);
+    mul_bt(HP, H, S, m, n, m);
+    for (int i = 0; i < m; i++) S[i * m + i] += Rm[i];
+    *md = m;
+    return inv_small(S, m, Si, det);
 }
 
-/* Measurement vector of a plot; 0 if it cannot be used (3-D without elevation). */
-static int measurement(const Tracker *t, const PendingPlot *b, double *z)
+/* Measurement vector of a plot and its radial velocity (2-D: of the ground
+ * range when the elevation is known); 0 if it cannot be used (3-D without elevation). */
+static int measurement(const Tracker *t, const PendingPlot *b, double *z, double *zvr)
 {
     const double az = b->az_deg * PI / 180.0, el = b->el_deg * PI / 180.0;
     z[0] = z[1] = z[2] = 0.0;
+    *zvr = b->vr_mps;
     if (t->dim == 3) {
         if (!isfinite(el)) return 0;
         z[0] = b->range_m;  z[1] = az;  z[2] = el;
     } else {
         z[0] = isfinite(el) ? b->range_m * cos(el) : b->range_m;
         z[1] = az;
+        if (isfinite(el)) *zvr /= cos(el);
     }
     return 1;
 }
@@ -285,10 +367,10 @@ static void gnn_assign(const double *cost, int nT, int m, int *trackOf)
 /* ---- tracks ----------------------------------------------------------------- */
 
 static void ekf_update(const Tracker *t, TrackState *s, const double *xb, const double *Pb, const double *nub,
-                       const double *Hb, const double *Sib, double tp)
+                       const double *Hb, const double *Sib, int d, const double *Rm, double tp)
 {
-    const int d = t->dim, n = t->n;
-    double PHt[NMAX * 3], K[NMAX * 3], IKH[NMAX * NMAX], T1[NMAX * NMAX], P1[NMAX * NMAX], KR[NMAX * 3], P2[NMAX * NMAX];
+    const int n = t->n;
+    double PHt[NMAX * 4], K[NMAX * 4], IKH[NMAX * NMAX], T1[NMAX * NMAX], P1[NMAX * NMAX], KR[NMAX * 4], P2[NMAX * NMAX];
     mul_bt(Pb, Hb, PHt, n, n, d);                          /* P H' (n x d) */
     mul(PHt, Sib, K, n, d, d);                             /* K = P H' S^-1 */
     for (int i = 0; i < n; i++) {
@@ -302,7 +384,7 @@ static void ekf_update(const Tracker *t, TrackState *s, const double *xb, const 
     mul(IKH, Pb, T1, n, n, n);
     mul_bt(T1, IKH, P1, n, n, n);
     for (int i = 0; i < n; i++)
-        for (int m = 0; m < d; m++) KR[i * d + m] = K[i * d + m] * t->R[m];
+        for (int m = 0; m < d; m++) KR[i * d + m] = K[i * d + m] * Rm[m];
     mul_bt(KR, K, P2, n, d, n);
     for (int i = 0; i < n; i++)
         for (int j = 0; j < n; j++) s->P[i * n + j] = P1[i * n + j] + P2[i * n + j];
@@ -317,8 +399,9 @@ static void ekf_update(const Tracker *t, TrackState *s, const double *xb, const 
     s->confirmed = s->confirmed || s->hits >= t->confirmHits;
 }
 
-/* New tentative track at the measured position; returns its index or -1. */
-static int new_track(Tracker *t, const double *z, double tp)
+/* New tentative track at the measured position (with an unambiguous radial
+ * velocity zvr: that velocity along the line of sight); returns its index or -1. */
+static int new_track(Tracker *t, const double *z, double zvr, double tp)
 {
     const int d = t->dim, n = t->n;
     if (t->nTracks == t->capacity) {
@@ -352,6 +435,16 @@ static int new_track(Tracker *t, const double *z, double tp)
         for (int m = 0; m < d; m++) s->P[i * n + m] = Ppos[i * d + m];
     for (int i = d; i < 2 * d; i++) s->P[i * n + i] = t->sigmaV0 * t->sigmaV0;
     for (int i = 2 * d; i < n; i++) s->P[i * n + i] = t->sigmaA0 * t->sigmaA0;
+    if (t->useVr && t->vrUnambiguous && isfinite(zvr)) {
+        double r2 = 0.0, u[3];
+        for (int i = 0; i < d; i++) r2 += s->x[i] * s->x[i];
+        for (int i = 0; i < d; i++) u[i] = s->x[i] / sqrt(r2);
+        for (int i = 0; i < d; i++) {
+            s->x[d + i] = zvr * u[i];
+            for (int m = 0; m < d; m++)
+                s->P[(d + i) * n + d + m] = t->sigmaV0 * t->sigmaV0 * ((i == m) - u[i] * u[m]) + t->Rvr * u[i] * u[m];
+        }
+    }
     s->id = t->nextId++;
     s->t = tp;
     s->hits = 1;
@@ -371,19 +464,23 @@ static void report_update(const Tracker *t, int j, int plotIndex, TrackerCallbac
 static void associate(Tracker *t, TrackerCallback callback, void *user)
 {
     const int m = t->nPending, nT = t->nTracks, d = t->dim;
-    double *Z = malloc(sizeof(double) * 3 * (m + 1)), *cost = malloc(sizeof(double) * ((size_t)nT * m + 1));
+    double *Z = malloc(sizeof(double) * 3 * (m + 1)), *Zvr = malloc(sizeof(double) * (m + 1));
+    double *cost = malloc(sizeof(double) * ((size_t)nT * m + 1));
     int *usable = malloc(sizeof(int) * (m + 1)), *trackOf = malloc(sizeof(int) * (m + 1));
-    if (!Z || !cost || !usable || !trackOf) abort();
-    for (int i = 0; i < m; i++) usable[i] = measurement(t, &t->pending[i], Z + 3 * i);
+    if (!Z || !Zvr || !cost || !usable || !trackOf) abort();
+    (void)d;
+    for (int i = 0; i < m; i++) usable[i] = measurement(t, &t->pending[i], Z + 3 * i, Zvr + i);
     for (int j = 0; j < nT; j++)
         for (int i = 0; i < m; i++) {
-            double x[NMAX], P[NMAX * NMAX], nu[3], H[3 * NMAX], Si[9], det, Sinu[3], d2 = 0.0;
+            double x[NMAX], P[NMAX * NMAX], nu[4], H[4 * NMAX], Si[16], det, Sinu[4], Rm[4], d2 = 0.0;
+            int md;
             cost[(size_t)j * m + i] = INFINITY;
-            if (!usable[i] || !predict_measure(t, &t->tracks[j], Z + 3 * i, t->pending[i].time_s, x, P, nu, H, Si, &det))
+            if (!usable[i] || !predict_measure(t, &t->tracks[j], Z + 3 * i, Zvr[i], t->pending[i].time_s, x, P, nu, H,
+                                               Si, &det, &md, Rm))
                 continue;
-            mul(Si, nu, Sinu, d, d, 1);
-            for (int k = 0; k < d; k++) d2 += nu[k] * Sinu[k];
-            if (d2 <= t->gate) cost[(size_t)j * m + i] = d2 + log(det);
+            mul(Si, nu, Sinu, md, md, 1);
+            for (int k = 0; k < md; k++) d2 += nu[k] * Sinu[k];
+            if (d2 <= (md > t->dim ? t->gateVr : t->gate)) cost[(size_t)j * m + i] = d2 + log(det);
         }
     gnn_assign(cost, nT, m, trackOf);
     for (int i = 0; i < m; i++) {
@@ -391,17 +488,18 @@ static void associate(Tracker *t, TrackerCallback callback, void *user)
         const double tp = t->pending[i].time_s;
         int j = trackOf[i];
         if (j >= 0) {                                      /* EKF update */
-            double x[NMAX], P[NMAX * NMAX], nu[3], H[3 * NMAX], Si[9], det;
-            predict_measure(t, &t->tracks[j], Z + 3 * i, tp, x, P, nu, H, Si, &det);
-            ekf_update(t, &t->tracks[j], x, P, nu, H, Si, tp);
+            double x[NMAX], P[NMAX * NMAX], nu[4], H[4 * NMAX], Si[16], det, Rm[4];
+            int md;
+            predict_measure(t, &t->tracks[j], Z + 3 * i, Zvr[i], tp, x, P, nu, H, Si, &det, &md, Rm);
+            ekf_update(t, &t->tracks[j], x, P, nu, H, Si, md, Rm, tp);
         } else {
-            j = new_track(t, Z + 3 * i, tp);
+            j = new_track(t, Z + 3 * i, Zvr[i], tp);
             if (j < 0) continue;
         }
         report_update(t, j, t->pending[i].plotIndex, callback, user);
     }
     t->nPending = 0;
-    free(Z); free(cost); free(usable); free(trackOf);
+    free(Z); free(Zvr); free(cost); free(usable); free(trackOf);
 }
 
 void tracker_update(Tracker *t, const Detection *plots, int n, double t_s, int flush,
@@ -425,6 +523,7 @@ void tracker_update(Tracker *t, const Detection *plots, int n, double t_s, int f
         b->az_deg = plots[k].az_deg;
         b->range_m = plots[k].range_m;
         b->el_deg = plots[k].el_deg;
+        b->vr_mps = plots[k].vr_mps;
         b->plotIndex = ++t->nPlots;
         t->pendingLast = t_s;
     }

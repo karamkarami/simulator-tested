@@ -160,6 +160,7 @@ sys.nAdc = round((rxEnd - sys.rxStart_s) * fs);
 sys.tAdc = sys.rxStart_s + (0:sys.nAdc-1)' / fs;             % ADC sample times in the PRI [s]
 sys.adc.rxSamples = find((sys.tAdc >= ws.tTx_s + ws.width_s & sys.tAdc < wl.tTx_s) | ...
                          sys.tAdc >= wl.tTx_s + wl.width_s);  % receive intervals (adc_overload.m)
+sys.rx.stcGain = single(stc_gain(sys, sys.tAdc));            % STC in front of the receiver (1 = off)
 
 % NCO of the DDC: the real line is multiplied by cos(2*pi*fIF*t), the imaginary
 % line by -sin(2*pi*fIF*t). At fIF = fs/4 these are exactly 1, 0, -1, 0, ...
@@ -233,11 +234,6 @@ if nKeep < ws.nRange
     sys.wave.short = ws;
 end
 sys.handover_m = handover_m;
-% Eclipsed long-pulse echo of a target nearer than the long-pulse blind range:
-% its pulse compression output reaches the long-pulse range cells up to this
-% far behind the target (pulse length, earlier peak of a mismatch filter, DDC
-% filters); eclipse_blanking.m drops the detections it gives.
-sys.eclipseExtent_m = c/2 * (wl.width_s + max(wl.mfShift, 0)/sys.fsOut + (numel(sys.ddc.hEq) - 1)/fs);
 
 % Range cells tested by the CFAR (both sub-pulses): cfg.cfar.<pulse>.min/maxRange_m
 % and, for the short pulse, the handover. testIdx = [first last] (1-based).

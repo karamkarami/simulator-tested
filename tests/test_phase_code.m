@@ -30,7 +30,7 @@ root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
 ok = true;
 cfg = radar_config();
-cfg.sim.verbose = false;
+cfg.console.enable = false;
 cfg.display.enable = false;
 cfg.io.saveRaw = false;
 cfg.ant.nElements = 1;

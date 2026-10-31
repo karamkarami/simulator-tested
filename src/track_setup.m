@@ -6,6 +6,10 @@ function p = track_setup(cfg, sys)
 %   p.model is 'cv' (state [position; velocity], p.nd = 2 values per axis)
 %   or 'ca' ([position; velocity; acceleration], p.nd = 3); p.q holds the
 %   white-acceleration ('cv') or white-jerk ('ca') spectral density per axis.
+%   Radial velocity (cfg.track.useRadialVelocity): p.useVr, its variance
+%   p.Rvr, the span of the Doppler axis p.vrSpan (lambda/(2*row PRI)),
+%   p.vrUnambiguous (maxSpeed below half the span: the plot velocity is the
+%   true one) and the chi-square gate with the radial velocity p.gateVr.
 t = cfg.track;
 p.enable = logical(t.enable);
 switch lower(t.dim)
@@ -37,6 +41,13 @@ p.q = q(1:p.dim);                                  % process noise spectral dens
 p.sigmaV0 = t.maxSpeed_mps / sqrt(3);              % velocity std of a new track (uniform in +-maxSpeed)
 p.sigmaA0 = t.maxAccel_mps2 / sqrt(3);             % acceleration std of a new track ('ca')
 p.gate = 2 * gammaincinv(t.gateProb, p.dim/2);     % chi-square gate with dim degrees of freedom
+p.useVr = logical(t.useRadialVelocity);
+sigmaVr = t.sigmaVr_mps;
+if isempty(sigmaVr), sigmaVr = 0.4 * abs(diff(sys.dop.v_mps(1:2))); end   % 0.4 Doppler bins
+p.Rvr = sigmaVr^2;
+p.vrSpan = sys.lambda / (2 * sys.dop.rowPri_s);   % the plot velocity is known modulo this
+p.vrUnambiguous = t.maxSpeed_mps < p.vrSpan / 2;
+p.gateVr = 2 * gammaincinv(t.gateProb, (p.dim + 1)/2);
 p.confirmHits = t.confirmHits;
 p.maxMissTentative = t.maxMissTentative;
 p.maxMiss = t.maxMiss;

@@ -20,7 +20,7 @@ root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
 ok = true;
 cfg = radar_config();
-cfg.sim.verbose = false;
+cfg.console.enable = false;
 cfg.ant.nElements = 1;                                 % (quick: no DBF matrix)
 sys = setup_radar(cfg);
 

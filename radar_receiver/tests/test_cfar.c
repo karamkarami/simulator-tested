@@ -82,8 +82,7 @@ static void check_window(RadarConfig cfg, const char *name, int gR, int tR, int 
 /* Pruning under load: a long-pulse map with a strong target (range
  * sidelobes along its line) and a low threshold gives thousands of CFAR
  * detections; prune_and_report() must keep exactly the cells of the direct
- * rules (local peak, sidelobe blanking pair by pair, eclipse blanking against
- * a short-pulse report on the target line), in about n log n time. */
+ * rules (local peak, sidelobe blanking pair by pair), in about n log n time. */
 static void check_pruning(RadarConfig cfg)
 {
     Processor *p = processor_create(&cfg, 0);
@@ -96,14 +95,6 @@ static void check_pruning(RadarConfig cfg)
     for (int r = tr - 80; r <= tr + 80; r++)                              /* sidelobes of the target */
         if (r >= 0 && r < nR) s->P[(size_t)td * s->nCells + (size_t)tb * nR + r] += 1e4f * (float)(rand() + 1) / RAND_MAX;
     s->P[(size_t)td * s->nCells + (size_t)tb * nR + tr] = 1e7f;
-    /* a short-pulse report on the same beam and Doppler bin: the long-pulse cells
-     * up to eclipseExtent_m behind it and 20 dB weaker are its eclipsed echo */
-    PulseState *sh = &p->ps[PULSE_SHORT];
-    Detection q;
-    memset(&q, 0, sizeof q);
-    q.beam = tb;  q.dIdx = td;  q.range_m = pc->range_m[tr] - cfg.eclipseExtent_m / 2;  q.power = 1e9;
-    sh->nReports = 0;
-    add_report(sh, &q);
     processor_set_cfar_alpha(p, 2.5);
     PulseConfig all = *pc;
     all.testFirst = 0;  all.testCount = nR;
@@ -139,9 +130,6 @@ static void check_pruning(RadarConfig cfg)
             if ((abs(c[i].b - c[j].b) <= 1 && dD <= 1 && dR <= pc->nTaps) || (dR <= 1 && dD <= 1) ||
                 (dR <= 1 && abs(c[i].b - c[j].b) <= 1)) keep = 0;
         }
-        int dD = abs(c[i].d - q.dIdx);  if (nfft - dD < dD) dD = nfft - dD;
-        if (keep && dD <= 1 && pc->range_m[c[i].r] <= q.range_m + cfg.eclipseExtent_m &&
-            q.power > ratio * c[i].pw) keep = 0;
         if (!keep) continue;
         nKeep++;
         if (k >= s->nReports || s->reports[k].beam != c[i].b || s->reports[k].rIdx != c[i].r || s->reports[k].dIdx != c[i].d)

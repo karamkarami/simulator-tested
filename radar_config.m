@@ -45,13 +45,28 @@ cfg.ant.az0_deg   = 0;    % antenna azimuth at t = 0, clockwise from North [deg]
 cfg.tx.peakPower_W     = 20e3;   % peak transmit power [W]
 cfg.rx.noiseFigure_dB  = 4;      % receiver noise figure [dB]
 cfg.rx.losses_dB       = 3;      % system losses not modelled elsewhere (RF, radome, ...) [dB]
-cfg.rx.gain_dB         = 30;     % gain of the receiver path from the antenna to the ADC [dB]. The echo
-                                 % power grows with the wavelength squared (+24.9 dB from 3 GHz to
-                                 % 170 MHz); 30 dB keeps the near clutter at the start of the receive
-                                 % windows below full scale (0.02% of the samples clipped; 60 dB, the
-                                 % 3 GHz value, clips 10% and clipped echoes give false plots) while the
-                                 % thermal noise (5.7 LSB rms) stays above the ADC noise (1 dB loss)
+cfg.rx.gain_dB         = 60;     % gain of the receiver path from the antenna to the ADC [dB]: the
+                                 % thermal noise is 180 LSB rms at the ADC (no loss by the ADC noise or
+                                 % the 16-bit DDC output); the STC below keeps the near clutter
+                                 % (+32 dB above full scale without it) within the ADC range
 cfg.rx.txIsolation_dB  = 40;     % transmitter-to-receiver isolation (leakage while transmitting) [dB]
+% STC (sensitivity time control): an attenuator in front of the receiver that
+% attenuates the echoes (not the receiver noise) early in each receive window.
+% The attenuation depends on the time dt since the end of the transmitted
+% pulse, as the equivalent range c*dt/2: the nearest range from which echoes
+% still arrive then, where the strongest clutter comes from (at the start of
+% the long-pulse window the eclipsed clutter of 1 - 10 km). Rows [range_m
+% attenuation_dB], linear in dB, none beyond the last row; see stc_demo.m
+% (it also derives the attenuation the clutter needs).
+cfg.rx.stc.enable = true;
+% short-pulse window (and while transmitting): the clutter up to the horizon (10 km)
+cfg.rx.stc.curve  = [    0 40;  1000 40;  2000 32;  4000 25;  6000 22;  8000 16;  9000 12;  10000 5;  10500 0];
+% long-pulse window ([] = the curve above): its start also holds the eclipsed
+% long-pulse echo of every target nearer than the long-pulse blind range
+% (22.5 km), whose compressed response would give false plots up to 22.5 km
+% behind the target; the curve goes on to there. It costs the long-pulse
+% targets at 23 - 40 km up to 13 dB of SNR (1 m^2 at 23 km: 57 dB).
+cfg.rx.stc.curveLong = [0 60;  3000 60;  6000 45;  9000 30;  12000 18;  15000 10;  18000 5;  22500 0];
 cfg.rx.maxRange_m      = 80e3;   % instrumented range of the long pulse: sets the receive window [m]
 cfg.rx.addThermalNoise = true;   % false only for debugging / SNR measurements
 cfg.rx.addLeakage      = true;   % false only for debugging / SNR measurements
@@ -190,6 +205,12 @@ cfg.track.model           = 'cv';    % motion model: 'cv' constant velocity or '
 cfg.track.sigmaRange_m    = 50;      % range error of a plot (cell size, range-Doppler coupling) [m]
 cfg.track.sigmaAz_deg     = 0.3;     % azimuth error of a plot [deg]
 cfg.track.sigmaEl_deg     = 0.5;     % elevation error of a plot (3d) [deg]
+cfg.track.useRadialVelocity = true;  % the radial velocity of the plot (Doppler bin) is a measurement too.
+                                     % It is unambiguous when maxSpeed_mps is below half the span of the
+                                     % Doppler axis (fixed PRF at 170 MHz: +-441 m/s); otherwise (staggered
+                                     % PRF: +-112 m/s) it is unfolded with the range rate predicted by the
+                                     % track, once that is known to 1/6 of the span
+cfg.track.sigmaVr_mps     = [];      % radial velocity error of a plot ([] = 0.4 Doppler bins: 2.8 m/s) [m/s]
 cfg.track.sigmaAccel_mps2 = 5;       % 'cv': horizontal process noise (white acceleration) [m/s^2]
 cfg.track.sigmaAccelZ_mps2 = 1;      % 'cv': vertical process noise (3d) [m/s^2]
 cfg.track.sigmaJerk_mps3  = 0.5;     % 'ca': horizontal process noise (white jerk) [m/s^3]
@@ -232,7 +253,6 @@ cfg.sim.nScans      = 1;      % number of antenna revolutions
 cfg.sim.sectors_deg = [];     % [] = full 360 deg; else rows [azStart azEnd]: only these sectors are simulated
 cfg.sim.seed        = 1;      % random seed
 cfg.sim.swerling    = 1;      % target RCS model: 1 = Swerling 1 (new RCS every scan), 0 = constant
-cfg.sim.verbose     = true;
 
 %% Targets (see make_target.m)
 cfg.targets = six_targets_scenario();
@@ -251,6 +271,14 @@ cfg.udp.host         = '127.0.0.1';
 cfg.udp.port         = 50000;
 cfg.udp.payloadBytes = 1400;         % DDC data bytes per datagram (int16 I/Q; + 64-byte header fits a 1500-byte
                                      % Ethernet MTU; use up to 65400 with jumbo frames / localhost)
+
+%% Console output
+% Printing every plot can take longer than the processing when a low CFAR
+% threshold gives many plots: switch cfg.console.plots off then.
+cfg.console.enable = true;   % MATLAB: summary, SNR budget, progress lines, CFAR threshold changes,
+                             % warnings of the run and the lists below
+cfg.console.plots  = true;   % every plot and every track: MATLAB lists them at the end of the run, the C
+                             % receiver prints them while it runs (its default; --quiet / --print-plots)
 
 %% Display
 cfg.display.enable            = true;

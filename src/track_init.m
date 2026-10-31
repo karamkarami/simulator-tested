@@ -5,7 +5,7 @@ tr.tracks = struct('id', {}, 'confirmed', {}, 'x', {}, 'P', {}, 't', {}, 'hits',
 tr.nextId = 1;
 tr.log = zeros(0, 11);   % one row per update: [time id confirmed x y z vx vy vz hits plotIndex]
 tr.nPlots = 0;
-tr.pending = zeros(0, 5);      % GNN batch: [time az range el plotIndex] of the plots not yet associated
+tr.pending = zeros(0, 6);      % GNN batch: [time az range el plotIndex vr] of the plots not yet associated
 tr.pendingFirst = -Inf;        % arrival time of the first and of the newest plot of the batch
 tr.pendingLast = -Inf;
 end

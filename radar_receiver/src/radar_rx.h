@@ -99,9 +99,8 @@ typedef struct {
     double  alpha;         /* CA-CFAR threshold factor (design value from cfg.cfar.pfa) */
     double  nLooks;        /* looks of the noise power in a cell (for cfar_pfa)       */
     double  sidelobeMargin_dB;
-    double  eclipseExtent_m;  /* eclipsed long-pulse echo of a nearer target: reaches the long-pulse
-                                 cells up to this far behind it (see eclipse blanking, processor.c) */
     int     minHits, maxMiss, updateEvery;
+    int     consolePlots;  /* print every plot and confirmed track (cfg.console.plots; --quiet, --print-plots) */
     double  minExtent_deg;  /* azimuth extent of a plot (minHits = this / azimuth step per update) */
     double  meanPri_s;      /* mean PRI                                               */
 
@@ -116,6 +115,11 @@ typedef struct {
     double  trackBatchGap_s, trackBatchMax_s;   /* GNN batch: time without a new plot,
                                                    longest collection time [s]            */
     double  trackGate;      /* chi-square gate of d^2                                     */
+    int     trackUseVr;     /* the radial velocity of the plots is a measurement too      */
+    int     trackVrUnambiguous;   /* no target faster than half the span: the plot velocity is true */
+    double  trackSigmaVr;   /* its error [m/s]                                            */
+    double  trackVrSpan;    /* the plot velocity is known modulo this (lambda / (2 row PRI)) [m/s] */
+    double  trackGateVr;    /* chi-square gate of d^2 with the radial velocity            */
     int     trackConfirmHits, trackMaxMissTentative, trackMaxMiss;
     double  scanTime_s;     /* antenna revolution                                         */
 

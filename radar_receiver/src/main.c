@@ -26,7 +26,10 @@
  *     --no-skip              never skip Doppler/CFAR updates when the processing falls behind
  *     --cfar-threshold DB    CA-CFAR threshold factor in dB (default from the configuration,
  *                            i.e. from cfg.cfar.pfa); can also be changed in the PPI
- *     --quiet                do not print every plot
+ *     --quiet                do not print every plot and confirmed track
+ *     --print-plots          print them (the default comes from the configuration,
+ *                            cfg.console.plots; printing can take longer than the
+ *                            processing when a low CFAR threshold gives many plots)
  */
 #include "radar_rx.h"
 
@@ -71,7 +74,7 @@ static void usage(void)
          "                      [--serial-content detections|plots] [--threads N] [--mf auto|direct|fft]\n"
          "                      [--update-every N]\n"
          "                      [--plots-csv FILE] [--detections-csv FILE] [--tracks-csv FILE]\n"
-         "                      [--idle-timeout S] [--quiet]\n"
+         "                      [--idle-timeout S] [--quiet | --print-plots]\n"
          "                      [--queue N] [--no-skip] [--cfar-threshold DB]");
 }
 
@@ -87,6 +90,7 @@ static int parse_options(int argc, char **argv, Options *o)
     o->ppiShow = "plots";
     o->queue = 64;
     o->cfarThreshold_dB = NAN;
+    o->quiet = -1;                                   /* from the configuration (consolePlots) */
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
@@ -109,6 +113,7 @@ static int parse_options(int argc, char **argv, Options *o)
         else if (!strcmp(a, "--tracks-csv"))     TAKE(o->tracksCsv = v);
         else if (!strcmp(a, "--idle-timeout"))   TAKE(o->idleTimeout_s = atof(v));
         else if (!strcmp(a, "--quiet"))          o->quiet = 1;
+        else if (!strcmp(a, "--print-plots"))    o->quiet = 0;
         else if (!strcmp(a, "--queue"))          TAKE(o->queue = atoi(v));
         else if (!strcmp(a, "--no-skip"))        o->noSkip = 1;
         else if (!strcmp(a, "--cfar-threshold")) TAKE(o->cfarThreshold_dB = atof(v));
@@ -204,10 +209,12 @@ static void on_track(void *user, const Track *t)
         app->nConfirmed++;
         if (!app->opt.quiet) {
             const double t0 = now_seconds();
-            printf("track %u confirmed  t %8.3f s  R %8.3f km  az %7.2f deg  speed %6.1f m/s\n", t->id, t->time_s,
-                   hypot(hypot(t->pos_m[0], t->pos_m[1]), t->pos_m[2]) / 1e3,
+            const double R = hypot(hypot(t->pos_m[0], t->pos_m[1]), t->pos_m[2]);
+            const double vr = (t->pos_m[0] * t->vel_mps[0] + t->pos_m[1] * t->vel_mps[1] + t->pos_m[2] * t->vel_mps[2]) / R;
+            printf("track %u confirmed  t %8.3f s  R %8.3f km  az %7.2f deg  speed %6.1f m/s  radial velocity %7.1f m/s\n",
+                   t->id, t->time_s, R / 1e3,
                    fmod(atan2(t->pos_m[0], t->pos_m[1]) * 180.0 / 3.14159265358979323846 + 360.0, 360.0),
-                   hypot(t->vel_mps[0], t->vel_mps[1]));
+                   hypot(t->vel_mps[0], t->vel_mps[1]), vr);
             app->console_ms += ms_since(t0);
         }
     }
@@ -421,6 +428,7 @@ int main(int argc, char **argv)
         return 1;
     }
     app.cfg.mfMethod = !strcmp(app.opt.mf, "direct") ? MF_DIRECT : !strcmp(app.opt.mf, "fft") ? MF_FFT : MF_AUTO;
+    if (app.opt.quiet < 0) app.opt.quiet = !app.cfg.consolePlots;
     if (app.opt.updateEvery > 0 && app.opt.updateEvery != app.cfg.updateEvery) {
         /* the plot extractor needs the same azimuth extent with the new update interval */
         app.cfg.updateEvery = app.opt.updateEvery;

@@ -16,7 +16,7 @@ ok = true;
 
 cfg = radar_config();
 cfg.display.enable  = false;
-cfg.sim.verbose     = false;
+cfg.console.enable     = false;
 cfg.sim.sectors_deg = [10 10.25];
 cfg.targets         = make_target('A', 10, 20e3, 10.1, 1000, 0, 0);
 cfg.io.saveRaw      = false;

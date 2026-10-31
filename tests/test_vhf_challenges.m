@@ -3,15 +3,22 @@ function ok = test_vhf_challenges()
 %   At 170 MHz the echoes are 25 dB stronger than at 3 GHz (wavelength
 %   squared): strong targets, strong clutter and a coarse Doppler axis
 %   (6.9 m/s per bin, +-441 m/s unambiguous with the fixed PRF).
-%   1. ADC overload: with the 3 GHz receiver gain (60 dB) adc_overload.m finds
-%      far more clipped receive samples than cfg.adc.overloadWarn (and
-%      run_radar_sim warns); the default gain stays below it.
-%   2. Strong targets near the radar (5, 12, 20 km, up to 10 m^2): exactly
-%      one detection, on the target cell, and no long-pulse detection in the
-%      zone that their eclipsed long-pulse echo reaches (eclipse_blanking.m;
-%      the number of ghosts it removed is printed).
-%   3. A target behind a strong near target, on the same azimuth (other
-%      Doppler): still detected in the long pulse.
+%   1. ADC overload: at the receiver gain of 60 dB without STC adc_overload.m
+%      finds far more clipped receive samples than cfg.adc.overloadWarn (and
+%      run_radar_sim warns); with the STC of radar_config (stc_gain.m) no
+%      sample is clipped, nor at 30 dB without STC.
+%   2. Strong targets near the radar (5, 8, 12, 20 km, up to 10 m^2):
+%      exactly one detection, on the target cell, and no long-pulse
+%      detection at the target velocity in the zone that their eclipsed
+%      long-pulse echo reaches (up to the target range + the long-pulse
+%      blind range): the long-window STC (cfg.rx.stc.curveLong) attenuates
+%      the eclipsed echo. The number of such ghosts without the STC (at 30 dB)
+%      is printed for comparison.
+%   3. Targets behind a strong near target, on the same azimuth (other
+%      Doppler), at 30 km and at 23.5 km (just behind the long-pulse blind
+%      range, where the long-window STC is deepest): detected in the long
+%      pulse, and no other long-pulse detection at the velocity of one of
+%      the three targets (eclipse ghost or range sidelobe).
 %   4. Fixed PRF, velocities 5 (inside the MTI notch: blind), 30, 200 and
 %      430 m/s on one azimuth: all but the blind one are detected, with the
 %      radial velocity within one Doppler bin (no ambiguity at 170 MHz).
@@ -28,13 +35,14 @@ root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
 ok = true;
 cfg = radar_config();
-cfg.sim.verbose = false;  cfg.display.enable = false;  cfg.io.saveRaw = false;
+cfg.console.enable = false;  cfg.display.enable = false;  cfg.io.saveRaw = false;
 cfg.rx.maxRange_m = 50e3;
 fprintf('fc = %.0f MHz, receiver gain %g dB\n', cfg.fc/1e6, cfg.rx.gain_dB);
 
 %% 1) ADC overload
-for g = [60, cfg.rx.gain_dB]
-    c = cfg;  c.rx.gain_dB = g;
+gains = {60, false;  cfg.rx.gain_dB, cfg.rx.stc.enable;  30, false};    % receiver gain, STC
+for k = 1:size(gains, 1)
+    c = cfg;  c.rx.gain_dB = gains{k, 1};  c.rx.stc.enable = gains{k, 2};
     sys = setup_radar(c);
     rng(1);
     clut = clutter_init(sys);
@@ -42,35 +50,48 @@ for g = [60, cfg.rx.gain_dB]
     for az = 0:45:315
         frac = max(frac, adc_overload(adc_sample(generate_rx_signal(sys, [], 0, az, clutter_signal(clut, sys, az, 0)), sys), sys));
     end
-    good = (g == 60) == (frac > c.adc.overloadWarn);
-    ok = report(sprintf('receiver gain %2g dB: up to %.2f%% of the receive samples clipped (warning above %.0f%%)', ...
-                        g, 100*frac, 100*c.adc.overloadWarn), good) && ok;
+    good = (k == 1) == (frac > c.adc.overloadWarn);
+    ok = report(sprintf('receiver gain %2g dB, STC %-3s: up to %.3f%% of the receive samples clipped (warning above %.0f%%)', ...
+                        gains{k, 1}, ternary(gains{k, 2}, 'on', 'off'), 100*frac, 100*c.adc.overloadWarn), good) && ok;
 end
 
 sys = setup_radar(cfg);
 h = cfg.ant.height_m;
+c0 = cfg;  c0.rx.gain_dB = 30;  c0.rx.stc.enable = false;           % for comparison: no STC
+sys0 = setup_radar(c0);
+blindLong = cfg.const.c * sys.wave.long.width_s / 2;               % long-pulse blind range
 
 %% 2) strong targets near the radar: one detection, no eclipse ghosts
-cases = {10, 5e3, -150;  1, 12e3, -236;  1, 20e3, 129};          % RCS, range, radial velocity
+cases = {10, 5e3, -150;  2, 7.7e3, -40;  1, 12e3, -236;  0.5, 20.6e3, 129};   % RCS, range, radial velocity
 for k = 1:size(cases, 1)
     tg = make_target('N', cases{k, 1}, cases{k, 2}, 40, 1000, cases{k, 3}, 0);
-    [r, nGhost] = cpi_reports(cfg, sys, tg, 40, true);
+    r = cpi_reports(cfg, sys, tg, 40, true);
     [Rt, ~, ~, vr] = target_geometry(tg, r.t0, h);
-    s = r.short;  l = r.long;
-    zone = [l.range_m] <= Rt + sys.eclipseExtent_m;
-    good = numel(s) == 1 && abs(s(1).range_m - Rt) < 75 && abs(s(1).vr_mps - vr) < 7 && ~any(zone);
-    ok = report(sprintf(['%4.1f m^2 at %4.1f km, %4.0f m/s: %d short-pulse detection(s), %d long-pulse detection(s) in its ', ...
-                         'eclipse zone (%d ghosts removed by the eclipse blanking)'], cases{k, 1}, Rt/1e3, vr, ...
-                        numel(s), nnz(zone), nGhost), good) && ok;
+    s = r.short;
+    nGhost = eclipse_ghosts(r.long, Rt, vr, blindLong);
+    r0 = cpi_reports(c0, sys0, tg, 40, true);
+    nGhost0 = eclipse_ghosts(r0.long, Rt, vr, blindLong);
+    good = numel(s) == 1 && abs(s(1).range_m - Rt) < 75 && abs(s(1).vr_mps - vr) < 7 && nGhost == 0;
+    ok = report(sprintf(['%4.1f m^2 at %4.1f km, %4.0f m/s: %d short-pulse detection(s), %d long-pulse ghost(s) of its ', ...
+                         'eclipsed echo (%d without STC)'], cases{k, 1}, Rt/1e3, vr, numel(s), nGhost, nGhost0), good) && ok;
 end
 
-%% 3) a target behind a strong near target, same azimuth
-tg = [make_target('N', 1, 12e3, 40, 1000, -236, 0), make_target('F', 1, 30e3, 40, 3000, 150, 0)];
+%% 3) targets behind a strong near target, same azimuth
+tg = [make_target('N', 1, 12e3, 40, 1000, -236, 0), make_target('F', 1, 30e3, 40, 3000, 150, 0), ...
+      make_target('G', 1, 23.5e3, 40, 2000, 80, 0)];
 r = cpi_reports(cfg, sys, tg, 40, true);
-[Rf, ~, ~, vf] = target_geometry(tg(2), r.t0, h);
-hit = abs([r.long.range_m] - Rf) < 75 & abs([r.long.vr_mps] - vf) < 7;
-ok = report(sprintf('1 m^2 at 30 km behind 1 m^2 at 12 km (same azimuth): detected in the long pulse: %d', any(hit)), ...
-            any(hit)) && ok;
+other = false(size(r.long));                 % at the velocity of a target, not on a target cell
+found = false(1, 2);
+for k = 1:3
+    [Rk, ~, ~, vk] = target_geometry(tg(k), r.t0, h);
+    atV = abs([r.long.vr_mps] - vk) < 7;
+    hit = abs([r.long.range_m] - Rk) < 75 & atV;
+    if k > 1, found(k - 1) = any(hit); end
+    other = (other | atV) & ~hit;
+end
+ok = report(sprintf(['1 m^2 at 30 km and at 23.5 km (deepest long-window STC) behind 1 m^2 at 12 km (same azimuth): ', ...
+                     'detected in the long pulse %d %d, other long-pulse detections at their velocities %d'], ...
+                    found, nnz(other)), all(found) && ~any(other)) && ok;
 
 %% 4) fixed PRF: blind speed and unambiguous velocities
 vel = [5 30 200 430];
@@ -135,10 +156,16 @@ ok = report(sprintf('pruning of %d CFAR detections: %d peaks kept in %.2f s, sam
 fprintf('170 MHz challenges: %s\n', ternary(ok, 'PASS', 'FAIL'));
 end
 
-function [r, nGhost] = cpi_reports(cfg, sys, targets, az0, clutterOn)
-% One CPI centred on azimuth az0: detection reports of both sub-pulses (as
-% run_radar_sim) and the number of long-pulse detections the eclipse
-% blanking removed.
+function n = eclipse_ghosts(long, Rt, vr, blindLong)
+% Long-pulse detections at the velocity of a target at range Rt < blindLong
+% within the reach of its eclipsed long-pulse echo.
+n = 0;
+if isempty(long), return; end
+n = nnz([long.range_m] <= Rt + blindLong + 1e3 & abs([long.vr_mps] - vr) < 7);
+end
+
+function r = cpi_reports(cfg, sys, targets, az0, clutterOn)
+% One CPI centred on azimuth az0: detection reports of both sub-pulses (as run_radar_sim).
 rng(11);
 targets = draw_target_rcs(targets, 2, 0);
 clut = [];
@@ -163,21 +190,12 @@ for k = 1:n
         buf.(names{i}) = cpi_buffer_push(buf.(names{i}), matched_filter(bm, wv), st(k), az, tp(k));
     end
 end
-nGhost = 0;
 for i = 1:2
     wv = sys.wave.(names{i});
     [cpi, info] = cpi_buffer_read(buf.(names{i}));
     rd = doppler_process(mti_filter(cpi, sys.mtiCoeffs, info.staggerIdx), sys);
     [isDet, noise] = cfar_detect(rd, sys, wv);
-    dets = prune_peaks(isDet, rd, noise, sys, wv);
-    if i == 1
-        shortDets = dets;
-    else
-        n0 = numel(dets.beam);
-        dets = eclipse_blanking(dets, shortDets, sys);
-        nGhost = n0 - numel(dets.beam);
-    end
-    r.(names{i}) = detection_reports(dets, rd, sys, wv, info);
+    r.(names{i}) = detection_reports(prune_peaks(isDet, rd, noise, sys, wv), rd, sys, wv, info);
 end
 end
 

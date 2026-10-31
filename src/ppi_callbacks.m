@@ -344,6 +344,7 @@ if tk.dim == 3
     txt = [txt sprintf('Height      %.0f m\nClimb       %.1f m/s\n', p(3) + height_m, v(3))];
 end
 txt = [txt sprintf('Speed       %.1f m/s\nHeading     %.1f deg\n', norm(v(1:2)), mod(atan2(v(1), v(2))*180/pi, 360))];
+txt = [txt sprintf('Radial vel. %.1f m/s\n', p(1:tk.dim)*v(1:tk.dim).'/R)];   % from the track: unambiguous
 if isfield(tk, 'acc_mps2') && any(tk.acc_mps2 ~= 0)                     % constant-acceleration model
     txt = [txt sprintf('Accel.      %.2f m/s^2\n', norm(tk.acc_mps2(1:2)))];
 end

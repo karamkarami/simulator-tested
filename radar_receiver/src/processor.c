@@ -861,26 +861,6 @@ static void prune_and_report(const Processor *p, int pulse, PulseState *s)
         }
     }
 
-    /* eclipse blanking (long pulse, as eclipse_blanking.m): the end of the long
-     * pulse echoed by a target nearer than the long-pulse blind range is
-     * spread over the first long-pulse cells, in the Doppler bin of the target
-     * (and in every beam through the DBF sidelobes); a long-pulse peak in the
-     * Doppler bin (+-1) of a short-pulse detection of this update, at most
-     * eclipseExtent_m behind it and more than the sidelobe margin weaker, is dropped */
-    if (pulse == PULSE_LONG) {
-        const PulseState *sh = &p->ps[PULSE_SHORT];
-        for (int i = 0; i < n; i++) {
-            if (!keep[i]) continue;
-            for (int j = 0; j < sh->nReports; j++) {
-                const Detection *q = &sh->reports[j];
-                int dDop = abs(cells[i].d - q->dIdx);
-                if (nfft - dDop < dDop) dDop = nfft - dDop;
-                if (dDop <= 1 && pc->range_m[cells[i].r] <= q->range_m + cfg->eclipseExtent_m &&
-                    q->power > ratio * cells[i].pw) { keep[i] = 0; break; }
-            }
-        }
-    }
-
     free(rank);
 
     /* 3) reports: range, velocity, elevation, CPI centre azimuth/time, SNR */
@@ -1061,7 +1041,6 @@ void processor_process(Processor *p, const PriData *pri, const ProcessorCallback
         const PulseConfig *pc = &cfg->pulse[i];
         PulseState *s = &p->ps[i];
         double t0 = now_seconds();
-        s->nReports = 0;                    /* reports of this PRI only (the long pulse uses the short ones) */
 
         /* fast time into the next CPI slot */
         load_segment(cfg, pc, pri, s);

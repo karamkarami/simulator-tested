@@ -67,7 +67,7 @@ if saveRaw && ~exist(rawFolder, 'dir'), [~, ~] = mkdir(rawFolder); end
 pulses = find(sched.active);
 nPulses = numel(pulses);
 maxWorkers = open_pool(nWorkers);
-if cfg.sim.verbose
+if cfg.console.enable
     fprintf('Generating the DDC output of %d PRIs (%d element(s), DDC %g MHz) -> %s\n', nPulses, ...
             sys.nCh, sys.fsOut/1e6, ddcFolder);
 end
@@ -101,10 +101,11 @@ info.sys       = sys;
 info.adcClipped = struct('mean', mean(clip), 'max', max([clip 0]));
 if info.adcClipped.max > cfg.adc.overloadWarn
     warning(['ADC overload: up to %.1f%% of the receive samples of a PRI are at full scale; clipped ', ...
-             'clutter and targets give false plots. Reduce cfg.rx.gain_dB (%g dB at %g MHz).'], ...
+             'clutter and targets give false plots. Reduce cfg.rx.gain_dB (%g dB at %g MHz) or raise ', ...
+             'the STC (cfg.rx.stc).'], ...
             100*info.adcClipped.max, cfg.rx.gain_dB, cfg.fc/1e6);
 end
-if cfg.sim.verbose
+if cfg.console.enable
     fprintf('%d DDC files written in %.1f s (%.1f ms per PRI)\n', nPulses, info.runTime_s, ...
             1e3*info.runTime_s/max(nPulses, 1));
 end

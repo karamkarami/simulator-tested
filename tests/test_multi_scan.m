@@ -37,7 +37,7 @@ end
 cfg = radar_config();
 cfg.prf.mode = prfMode;
 cfg.sim.nScans = nScans;
-cfg.sim.verbose = false;
+cfg.console.enable = false;
 cfg.rx.maxRange_m = 50e3;
 cfg.targets = six_targets_scenario();
 cfg.display.enable = false;

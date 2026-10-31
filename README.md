@@ -16,8 +16,9 @@ optional Qt PPI and serial output (see `radar_receiver/README.md`).
 ```
  PRI:  short pulse 25 us at 0 | receive (near range) | long pulse 150 us at 200 us | receive (far range)
  per target: position from its motion -> power from the radar equation (Swerling 1)
- echoes + clutter + Tx leakage (40 dB isolation) + thermal noise, 30 MHz IF, 48 elements
- x receiver gain (30 dB) -> ADC 120 MHz, 16 bit, ENOB 12.7 -> int16
+ echoes + clutter + Tx leakage (40 dB isolation), 30 MHz IF, 48 elements
+ x STC (attenuation over the receive window) + thermal noise
+ x receiver gain (60 dB) -> ADC 120 MHz, 16 bit, ENOB 12.7 -> int16
         |                       \--> optional raw data: output/raw_pulses/pulse_<n>.mat
         v
  DDC: x*cos(30 MHz) | x*(-sin(30 MHz)) -> FIR h1, /10 -> FIR h2, /6 (2 MHz) or /3 (4 MHz)
@@ -48,27 +49,44 @@ The carrier is 170 MHz (`cfg.fc`, wavelength 1.76 m; it was 3 GHz). What
 changes with the carrier, and how the configuration and the processing
 take it into account:
 
-* **Receiver gain and dynamic range.** The echo power grows with the
+* **Receiver gain, dynamic range and STC.** The echo power grows with the
   wavelength squared: targets and clutter are 24.9 dB stronger at the ADC
-  than at 3 GHz, the noise is not. With the receiver gain of the 3 GHz
-  design (60 dB) the near clutter at the start of the receive windows
-  overdrives the ADC: 10% of the receive samples are clipped
-  (`adc_overload.m`; `run_radar_sim` warns). Clipped clutter is no longer
-  cancelled by the MTI, and clipped echoes give intermodulation products in
-  other Doppler bins and beams: 25 plots for the 6 targets of the six-target
-  scenario. `cfg.rx.gain_dB` is therefore 30 dB: 0.02% of the samples are
-  clipped (at the very start of the windows), the thermal noise is 5.7 LSB
-  rms at the ADC and 0.5 LSB at the DDC output. This costs 2.2 dB of SNR (ADC
-  noise 1.0 dB, rounding of the 16-bit DDC output 1.2 dB; both are in the
-  SNR budget), against margins of 40 - 60 dB in the six-target scenario.
-  (35 dB would cost 0.8 dB but clips 0.37% of the samples, which gave one
-  intermodulation plot of T1.)
-* **Eclipsed echoes.** The targets are 25 dB stronger, so the eclipsed
-  long-pulse echo of a target nearer than the long-pulse blind range
-  (22.5 km) reaches the CFAR threshold in the first long-pulse cells
-  behind it (14 false plots in the six-target scenario):
-  `eclipse_blanking.m` (and the same rule in the C receiver) removes them
-  (see CFAR below).
+  than at 3 GHz, the noise is not. With the receiver gain of 60 dB the near
+  clutter (1 km to the 10 km horizon) at the start of the receive windows
+  is up to 32 dB above the full scale of the ADC: 6 - 9% of the receive
+  samples are clipped (`adc_overload.m`; `run_radar_sim` warns). Clipped
+  clutter is no longer cancelled by the MTI, and clipped echoes give
+  intermodulation products in other Doppler bins and beams (25 plots for
+  the 6 targets of the six-target scenario). Lowering the gain to 30 dB
+  avoids the clipping but costs 2.2 dB of SNR everywhere (thermal noise only
+  5.7 LSB at the ADC: ADC noise 1.0 dB, rounding of the 16-bit DDC output
+  1.2 dB). The receiver therefore keeps 60 dB and has an **STC**
+  (sensitivity time control, `cfg.rx.stc`, `stc_gain.m`): an attenuator in
+  front of the receiver whose attenuation falls with the time dt since the
+  end of the transmitted pulse, given as the equivalent range c dt/2 (the
+  nearest range whose echoes still arrive then). It attenuates the echoes,
+  not the receiver noise (which is added after it), so it lowers the
+  sensitivity only early in each receive window, where the echoes are
+  strong. `cfg.rx.stc.curve` (short-pulse window, 40 dB at 0 - 1 km, 0 dB
+  from 10.5 km) follows the clutter peak above full scale plus 6 dB
+  (`stc_demo.m` derives it): no sample is clipped (0.000%), the thermal
+  noise is 180 LSB at the ADC (no ADC or DDC loss), and short-pulse targets
+  beyond 10.5 km get the 2.2 dB back. The long-pulse window starts with
+  the eclipsed long-pulse echo of every target nearer than its blind range
+  (22.5 km): its compressed response gives false plots up to 22.5 km behind
+  the target (12 for a 10 m^2 target at 5 km). `cfg.rx.stc.curveLong`
+  (60 dB at 0 - 3 km, 0 dB from 22.5 km, roughly R^4) attenuates it below
+  the noise: no such false plot in `test_vhf_challenges` (5 - 21 km, up to
+  10 m^2). It costs the long-pulse targets at 23 - 40 km up to 13 dB of SNR
+  (a 1 m^2 target at 23 km still has 57 dB after the Doppler processing,
+  22 dB are needed; from 40 km on nothing); `snr_budget.m` includes the
+  STC. This replaces the
+  eclipse blanking of the previous version (which removed such detections
+  after the CFAR, and with them possibly a real target behind a near one).
+  `stc_demo.m` shows the curves, the ADC samples of a PRI, the clipping,
+  the SNR against range and the eclipsed echo with and without the STC
+  (`output/stc_demo/*.png`). `cfg.rx.stc.enable = false` switches it off
+  (then lower `cfg.rx.gain_dB` to 30 dB).
 * **Doppler.** With the fixed PRF (1 kHz, 128 bins) a Doppler bin is
   6.9 m/s and the radial velocity is unambiguous within +-441 m/s (blind
   speed 882 m/s); the MTI notch is +-2 bins (+-13.8 m/s). With the staggered
@@ -79,6 +97,13 @@ take it into account:
   `snr_budget.m` gives the SNR in the best Doppler bin the CFAR tests and
   `print_snr_budget` marks such targets ("blind speed"). At VHF the fixed
   PRF is the better choice.
+* **Unambiguous velocities.** The plots of the fixed PRF carry the true
+  radial velocity (no target is faster than 441 m/s). The tracker uses it
+  as a measurement (`cfg.track.useRadialVelocity`, see Tracking): the track
+  velocity converges in two scans instead of three to four, and with the
+  staggered PRF the folded plot velocity is unfolded with the track, so the
+  track velocities are unambiguous at the end of the processing in both
+  modes.
 * **Antenna and clutter.** The element spacing stays 0.66 wavelength
   (1.16 m: the 48-element column is 56 m high), so the patterns and the DBF
   matrix are the same as before. The internal clutter motion (0.1 m/s) is
@@ -88,6 +113,12 @@ take it into account:
   n log n in both programs (165 000 CFAR detections in 41 ms in C). The
   simulator sends the DDC output of one PRI per loop, so its UDP rate is the
   loop rate: `results.priTime_s` is the time of every PRI.
+* **Console output.** With a low CFAR threshold printing every plot and
+  track can take longer than the processing. `cfg.console.enable` switches
+  the console output of MATLAB on or off, `cfg.console.plots` only the
+  lists of plots and tracks; the C receiver takes `consolePlots` from the
+  configuration file as its default (`--quiet` / `--print-plots` override
+  it).
 
 Six targets, one scan, 170 MHz: fixed PRF 6 plots (all targets, no false
 plot), staggered PRF 4 plots (T1 and T6 at blind speeds, no false plot). The
@@ -108,6 +139,7 @@ cfg.ant.nElements = 1;              % a single antenna: no beamforming
 cfg.sim.sectors_deg = [20 45];      % only simulate this azimuth sector
 cfg.io.saveRaw = false;             % recordings per PRI: raw ADC data and/or DDC output
 cfg.io.saveDdc = true;
+cfg.console.plots = false;          % no list of every plot and track (cfg.console.enable = false: no console output)
 results = run_radar_sim(cfg);
 replay_ddc_udp;                     % send the DDC files over UDP with the PRI timing
 
@@ -148,7 +180,9 @@ file was built for other values (for example after you change
 | `src/setup_radar.m` | derives the PRI timeline, NCO, DDC segments, pulse compression filters (matched / mismatch), axes, CPI length, FFT length, CFAR factor ... |
 | `src/mismatch_filter.m`, `ddc_pulse.m` | mismatch filter with the smallest peak sidelobe for a code or a sampled pulse; the pulse after the DDC filters |
 | `src/generate_rx_signal.m`, `clutter_init.m`, `clutter_signal.m`, `adc_sample.m` | signal generation |
-| `src/adc_overload.m` | fraction of the ADC samples of the receive intervals at full scale (receiver gain too high) |
+| `src/stc_gain.m` | STC: gain of the attenuator in front of the receiver over the PRI (`cfg.rx.stc`) |
+| `stc_demo.m` | STC demonstration: curves, ADC samples of a PRI, clipping, SNR against range, eclipsed echo of a near target (figures in `output/stc_demo`) |
+| `src/adc_overload.m` | fraction of the ADC samples of the receive intervals at full scale (receiver gain too high, STC off) |
 | `src/target_rcs.m`, `draw_target_rcs.m` | Swerling 1 target RCS (a new value every scan) |
 | `src/save_pulse_file.m`, `save_ddc_file.m`, `pulse_header.m` | raw ADC data / DDC output of a PRI to a .mat file, its header |
 | `src/ddc.m`, `fir_decimate_valid.m`, `ddc_decimation.m` | two-stage DDC with I/Q mixer, decimation and filter file of the 2 / 4 MHz output |
@@ -160,11 +194,11 @@ file was built for other values (for example after you change
 | `src/mti_filter.m`, `doppler_process.m` | clutter filter, Doppler processing |
 | `src/cfar_detect.m`, `cfar_alpha.m` | CA-CFAR (2-D, 1-D range, 1-D Doppler window) |
 | `src/track_setup.m`, `track_init.m`, `track_update.m`, `track_report.m` | EKF tracker (2-D / 3-D, CV / CA model, GNN association) |
-| `src/prune_peaks.m`, `eclipse_blanking.m`, `detection_reports.m`, `plot_extractor*.m` | pruning (local peaks, sidelobes, eclipsed long-pulse echoes of nearer targets) and plot extraction |
+| `src/prune_peaks.m`, `detection_reports.m`, `plot_extractor*.m` | pruning (local peaks, sidelobes) and plot extraction |
 | `src/ppi_init.m`, `ppi_update.m`, `ppi_callbacks.m` | interactive PPI display |
 | `src/detection_log_init.m`, `detection_log_add.m` | CFAR detections kept for the PPI |
 | `src/cfar_pfa.m` | false alarm probability of a CFAR threshold (inverse of `cfar_alpha.m`) |
-| `src/snr_budget.m`, `print_snr_budget.m` | expected SNR after every block (incl. ADC noise and DDC rounding; blind speeds marked) |
+| `src/snr_budget.m`, `print_snr_budget.m` | expected SNR after every block (incl. STC, ADC noise and DDC rounding; blind speeds marked) |
 | `src/six_targets_scenario.m`, `make_target.m`, `target_geometry.m`, `illumination_time.m`, `target_sectors.m` | targets |
 | `tests/` | tests (see below) |
 | `radar_receiver/` | the receiver processing in C (CMake/CLion, Qt PPI, serial output) |
@@ -234,23 +268,27 @@ there, at the same beam and Doppler, behind very strong far targets.
   2. Clutter.
   3. Transmitter leakage while a pulse is transmitted: Pt - 40 dB
      isolation, in every channel.
-  4. Thermal noise, k T0 F over fs/2 (NF 4 dB).
-  5. The receiver gain of 30 dB (`cfg.rx.gain_dB`, see "170 MHz" below).
-  6. The ADC: full scale +10 dBm (a 2 Vpp sine into 50 ohm), quantization
+  4. The STC (sensitivity time control, `stc_gain.m`): an attenuator in
+     front of the receiver whose attenuation falls with the time since the
+     end of the pulse (`cfg.rx.stc`, see "170 MHz" below). It attenuates the
+     echoes, not the receiver noise.
+  5. Thermal noise, k T0 F over fs/2 (NF 4 dB).
+  6. The receiver gain of 60 dB (`cfg.rx.gain_dB`).
+  7. The ADC: full scale +10 dBm (a 2 Vpp sine into 50 ohm), quantization
      to 16 bits (rounding and clipping to int16), then the ADC noise for an
      ENOB of 12.7, after which the samples are rounded and clipped to int16
      again (the raw data stays signed 16-bit).
 
   Signals are in sqrt(W) at the receiver input. Thermal noise reaches the
-  ADC at 5.7 LSB rms (-72 dBFS), 6 dB above the ADC noise (2.8 LSB rms; 1 dB
-  SNR loss). The leakage is +63 dBm at the ADC and saturates it while a pulse
-  is transmitted. It never reaches the processing (see the PRI timeline).
-  Very strong near clutter can clip the ADC as well, because there is no
-  STC: `adc_overload.m` counts the clipped samples of the receive intervals
-  of every PRI, `run_radar_sim` and `generate_ddc_files` warn above
-  `cfg.adc.overloadWarn` (1%) and return the fraction (`results.adcClipped`;
-  0.02% of the samples, at the start of the receive windows, with the
-  default gain).
+  ADC at 180 LSB rms (-42 dBFS), 36 dB above the ADC noise (2.8 LSB rms; no
+  SNR loss to speak of). The leakage saturates the ADC while a pulse is
+  transmitted (+23 dBm at the ADC after the 40 dB of the STC). It never
+  reaches the processing (see the PRI timeline). Near clutter would clip
+  the ADC without the STC: `adc_overload.m` counts the clipped samples of
+  the receive intervals of every PRI, `run_radar_sim` and
+  `generate_ddc_files` warn above `cfg.adc.overloadWarn` (1%) and return the
+  fraction (`results.adcClipped`; none with the default STC, 6% at 60 dB
+  without it).
 * **Targets:** Swerling 1. Every target gets a new exponentially
   distributed RCS (mean `rcs_m2`) on every pass of the antenna, constant
   during the dwell (`cfg.sim.swerling = 0` for constant RCS). The pass
@@ -289,9 +327,10 @@ there, at the same beam and Doppler, behind very strong far targets.
   coefficients are integers with 13 fractional bits. Each stage shifts its
   accumulator right by 13 bits (`cfg.ddc.shift`, unit gain), rounds and
   saturates it to int16. The DDC output is therefore signed 16-bit, with
-  the thermal noise at about 0.5 LSB rms per I/Q component: the rounding to
-  16 bits costs 1.2 dB of SNR, which `setup_radar` (`sys.N0ddc`) and the SNR
-  budget include (`run_radar_sim` prints both losses).
+  the thermal noise at about 16 LSB rms per I/Q component; the rounding to
+  16 bits costs SNR only when the noise is near 1 LSB (a low receiver
+  gain), which `setup_radar` (`sys.N0ddc`) and the SNR budget include
+  (`run_radar_sim` prints both losses).
 * **Elements and DBF:** the antenna has a fixed 4.1 deg beam in azimuth
   and a column of `cfg.ant.nElements` elements (default 48) spaced 0.66
   wavelength in elevation. The default DBF matrix forms 21 beams equally
@@ -405,14 +444,11 @@ there, at the same beam and Doppler, behind very strong far targets.
   (eclipsed) at the start of the long-pulse window, where its compressed
   response spreads over the long-pulse cells up to 22.5 km (+ 0.9 km DDC
   filters) behind the target, in the target's Doppler bin (and through the
-  DBF sidelobes in the other beams). At 170 MHz its peaks reach the CFAR
-  threshold with every method: in the six-target scenario T1 (12 km), T2
-  (21 km) and T5 (7.7 km) gave 14 such false long-pulse plots. The **eclipse
-  blanking** (`eclipse_blanking.m`) removes them: a long-pulse detection in
-  the Doppler bin (+-1) of a short-pulse detection of the same CPI update,
-  at most `sys.eclipseExtent_m` behind it and more than the sidelobe margin
-  (20 dB) weaker, is dropped. A real target behind a near target is kept
-  when it is in another Doppler bin or less than 20 dB weaker.
+  DBF sidelobes in the other beams). Without STC its peaks reach the CFAR
+  threshold at 170 MHz with every method (14 false long-pulse plots of T1,
+  T2 and T5 in the six-target scenario). The long-window STC
+  (`cfg.rx.stc.curveLong`, see "170 MHz") attenuates this eclipsed echo
+  before the receiver, so no detection has to be removed afterwards.
 * **Tracking (optional, `cfg.track`):** an extended Kalman filter on the
   plots. State relative to the antenna (East, North, up), `cfg.track.model`:
   `'cv'` (default) position and velocity, nearly constant velocity with
@@ -429,6 +465,22 @@ there, at the same beam and Doppler, behind very strong far targets.
   horizontal plane (slant range when the elevation is unknown: 1 element),
   `'auto'` (default) takes 3-D with DBF. The measurement h(x) is linearised
   at the predicted state. Plot errors: 50 m, 0.3 deg, 0.5 deg.
+  With `cfg.track.useRadialVelocity` (default) the radial velocity of the
+  plot is a measurement as well (h = p.v/|p|, error `sigmaVr_mps`, default
+  0.4 Doppler bins = 2.8 m/s). It is unambiguous with the fixed PRF at
+  170 MHz (+-441 m/s, more than `maxSpeed_mps`). With the staggered PRF
+  (+-112 m/s) the plot velocity is folded (span lambda/(2 sum(PRI)) =
+  225 m/s): the tracker unfolds it to the value nearest the predicted range
+  rate and uses it only once the track predicts that rate to better than a
+  sixth of the span (after a few plots of position only). A new track
+  starts with the measured velocity along the line of sight (when
+  unambiguous); the gate is a chi-square gate of one more dimension. A position-only filter needs 3 - 4 scans to learn the
+  velocity: with the radial velocity the velocity error after two scans is
+  about 20 m/s instead of 90 m/s (radial: 5 instead of 80 m/s,
+  `test_tracker`), and a maneuvering target is held better. The track
+  velocity is therefore unambiguous at the end of the processing in both PRF
+  modes: tracks print and show their radial velocity next to the plot
+  velocity.
   Association: global nearest neighbour (GNN). The plots are collected
   until the antenna has turned `gnnSector_deg` (5 deg) without a new plot,
   at most `gnnMaxSector_deg` (30 deg) after the first one. Then every
@@ -664,10 +716,10 @@ budget.
 | `test_six_targets(mode, clutterOn, keepRaw)` | 6 targets (0.5 - 10 m^2 mean RCS, Swerling 1, 8 - 48 km, up to 290 m/s, around the radar) are detected with the right range, azimuth, elevation and (folded) velocity, with at most 2 false plots; a target at a blind speed (`snr_budget`: with the staggered PRF at 170 MHz T1 and T6) may be missed; one raw file per PRI, named by the pulse number |
 | `test_ppi_interactive` | PPI interaction: data tips, zoom around the cursor, pan, keys, filters, pinned tips, pause, clear, PNG; detection display (modes, arcs, data tips, filters); CFAR threshold field (Apply, hand-over through `ppi_update`, invalid input, Default, Pfa); tracks (triangles, data tip, checkbox); block processing times |
 | `test_setup` | configuration edge cases without a simulation: the simulated sectors (`[0 360]` = whole circle, across North, several sectors), settings that cannot work stop with a message naming them (MTI notch over all Doppler bins, CPI too short, unknown CFAR method, DDC rate, PRF mode), a short pulse that hands over within its first CFAR window keeps one whole window (and the C receiver accepts the exported configuration); the DDC output and the PRI header are the same for every CFAR method and pulse compression filter |
-| `test_vhf_challenges` | demanding cases at 170 MHz (one CPI each, clutter): ADC overload detected at the 3 GHz gain (60 dB) and not at the default; strong targets at 5, 12 and 20 km (up to 10 m^2) give one detection and no eclipsed-echo ghost; a target behind a strong near target is still detected; fixed PRF: blind at 5 m/s, 30 - 430 m/s detected with the right velocity; staggered PRF: the row blind speed (225 m/s) flagged and not detected, 150 m/s detected; two targets 300 m apart resolved; 33 000 CFAR detections pruned in about a second, exactly as the direct rules |
+| `test_vhf_challenges` | demanding cases at 170 MHz (one CPI each, clutter): ADC overload detected at 60 dB without STC, none with the STC (and at 30 dB without it); strong targets at 5, 8, 12 and 21 km (up to 10 m^2) give one detection and no ghost of their eclipsed long-pulse echo with the STC (the number without it is printed); targets at 30 and 23.5 km (deepest long-window STC) behind a strong near target are detected, no other long-pulse detection; fixed PRF: blind at 5 m/s, 30 - 430 m/s detected with the right velocity; staggered PRF: the row blind speed (225 m/s) flagged and not detected, 150 m/s detected; two targets 300 m apart resolved; 33 000 CFAR detections pruned in about a second, exactly as the direct rules |
 | `test_multi_scan(mode, nScans)` | several scans of the six-target scenario through the C receiver (DDC files, `radar_stream_send`): every PRI received, a confirmed track on every target not at a blind speed, no confirmed false track, at most 2 false plots per scan |
 | `test_cfar` | the three CFAR methods on exponential noise: false alarm rate 1e-3 in the interior and at the range edges (shifted window), targets in the first and last range cell detected, only the tested range interval is tested, the noise estimate equals the direct sums over the (shifted) window, also when the whole tested interval lies within the edge cells |
-| `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA: one confirmed track per target, close to it, no false track; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |
+| `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA, with and without the radial velocity: one confirmed track per target, close to it, no false track; the radial velocity lowers the velocity error after two scans; staggered PRF (folded plot velocities): the track radial velocity is unfolded; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |
 | `test_c_receiver(mode, ..., cfarMethod)` | the six-target scenario streamed over UDP to the C receiver (`radar_receiver/`): its plots and track updates must match MATLAB; the recorded stream is replayed to check repeatability and speed |
 
 Latest results at 170 MHz (Octave 8.4 on a 4-vCPU VM, every test of
@@ -731,8 +783,8 @@ PPI use a virtual display: `xvfb-run octave --no-gui --eval run_all_tests`.
   receive element sees the full azimuth pattern.
 * Swerling 1 targets (constant RCS within a scan), no multipath, no echoes
   from the previous PRI.
-* LFM range-Doppler coupling is not corrected (about 130 m at 290 m/s with the
-  150 us pulse), because the measured velocity is ambiguous.
+* LFM range-Doppler coupling is not corrected (at 170 MHz about 7 m at
+  290 m/s with the 150 us pulse, a tenth of a range cell).
 * Signal generation uses single precision. That is enough for a 16-bit ADC
   and about twice as fast. The DDC computes with integers (exact in
   double). The processing after the DDC uses single precision, as the C

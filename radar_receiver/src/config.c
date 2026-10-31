@@ -265,10 +265,10 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         cfg->alpha        = get_scalar(&rs, "alpha");
         cfg->nLooks       = get_scalar(&rs, "nLooks");
         cfg->sidelobeMargin_dB = get_scalar(&rs, "sidelobeMargin_dB");
-        cfg->eclipseExtent_m = get_scalar(&rs, "eclipseExtent_m");
         cfg->minHits      = get_int(&rs, "minHits");
         cfg->maxMiss      = get_int(&rs, "maxMiss");
         cfg->updateEvery  = get_int(&rs, "updateEvery");
+        cfg->consolePlots = get_int(&rs, "consolePlots");
         cfg->minExtent_deg = get_scalar(&rs, "minExtent_deg");
         cfg->meanPri_s    = get_scalar(&rs, "meanPri_s");
         cfg->trackEnable  = get_int(&rs, "trackEnable");
@@ -286,6 +286,11 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             cfg->trackBatchGap_s = get_scalar(&rs, "trackBatchGap_s");
             cfg->trackBatchMax_s = get_scalar(&rs, "trackBatchMax_s");
             cfg->trackGate = get_scalar(&rs, "trackGate");
+            cfg->trackUseVr = get_int(&rs, "trackUseVr");
+            cfg->trackVrUnambiguous = get_int(&rs, "trackVrUnambiguous");
+            cfg->trackSigmaVr = get_scalar(&rs, "trackSigmaVr");
+            cfg->trackVrSpan = get_scalar(&rs, "trackVrSpan");
+            cfg->trackGateVr = get_scalar(&rs, "trackGateVr");
             cfg->trackConfirmHits = get_int(&rs, "trackConfirmHits");
             cfg->trackMaxMissTentative = get_int(&rs, "trackMaxMissTentative");
             cfg->trackMaxMiss = get_int(&rs, "trackMaxMiss");

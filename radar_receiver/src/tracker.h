@@ -19,7 +19,7 @@ typedef struct {
 } TrackState;
 
 typedef struct {            /* a plot waiting in the GNN batch                   */
-    double   time_s, az_deg, range_m, el_deg;
+    double   time_s, az_deg, range_m, el_deg, vr_mps;
     int      plotIndex;     /* counts the plots given to the tracker (1-based)   */
 } PendingPlot;
 
@@ -28,6 +28,8 @@ typedef struct {
     double   R[3];                       /* measurement variances                   */
     double   q[3];                       /* white acceleration (CV) / jerk (CA) density per axis */
     double   sigmaV0, sigmaA0, gate, scanTime_s, height_m;
+    int      useVr, vrUnambiguous;       /* radial velocity measurement (as track_update.m) */
+    double   Rvr, vrSpan, gateVr;
     double   batchGap_s, batchMax_s;     /* GNN batch                               */
     int      confirmHits, maxMissTentative, maxMiss;
     TrackState *tracks;

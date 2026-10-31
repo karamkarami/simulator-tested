@@ -19,7 +19,15 @@ function tr = track_update(tr, plots, t_s, flush)
 %   Measurement of a plot: 2-D z = [ground range; azimuth] (ground range =
 %   range*cos(elevation) when the elevation is known), 3-D z = [range;
 %   azimuth; elevation], with the nonlinear h(x) linearised at the predicted
-%   state (EKF; the azimuth innovation is wrapped to +-pi).
+%   state (EKF; the azimuth innovation is wrapped to +-pi). With
+%   p.useVr the radial velocity of the plot is one more component, h(x) =
+%   p.v/|p| (2-D: the ground range rate, the plot velocity divided by
+%   cos(elevation) when it is known), variance p.Rvr. The plot velocity is
+%   known modulo p.vrSpan: when p.vrUnambiguous (no target can be faster
+%   than half the span) it is used as it is, otherwise it is unfolded to the
+%   value nearest the predicted range rate and used only when the track
+%   predicts that rate to better than p.vrSpan/6 (a new track first needs a
+%   few plots). The gate then has one degree of freedom more (p.gateVr).
 %
 %   Association: global nearest neighbour (GNN) on batches of plots. A plot
 %   waits in the batch until the antenna has turned p.batchGap_s without a
@@ -32,7 +40,9 @@ function tr = track_update(tr, plots, t_s, flush)
 %   then taken in their order: an assigned plot updates its track (EKF,
 %   Joseph form), a plot without a track starts a tentative track at the
 %   measured position with zero velocity (and acceleration) and the
-%   uncertainty p.sigmaV0 (p.sigmaA0). A tentative track with p.confirmHits
+%   uncertainty p.sigmaV0 (p.sigmaA0); with an unambiguous radial velocity
+%   its velocity along the line of sight is the measured one (variance
+%   p.Rvr), across it 0 with p.sigmaV0. A tentative track with p.confirmHits
 %   updates is confirmed.
 %   Missed scans: the antenna passed the predicted position half a scan ago
 %   without an update; a track with more than p.maxMiss (tentative:
@@ -50,7 +60,8 @@ end
 for k = 1:numel(plots)
     tr.nPlots = tr.nPlots + 1;
     if isempty(tr.pending), tr.pendingFirst = t_s; end
-    tr.pending(end+1, :) = [plots(k).time_s, plots(k).az_deg, plots(k).range_m, plots(k).el_deg, tr.nPlots];
+    tr.pending(end+1, :) = [plots(k).time_s, plots(k).az_deg, plots(k).range_m, plots(k).el_deg, tr.nPlots, ...
+                            plots(k).vr_mps];
     tr.pendingLast = t_s;
 end
 if flush && ~isempty(tr.pending)
@@ -72,20 +83,23 @@ function tr = associate(tr)
 % GNN association of the plots of the batch, then the updates and new tracks.
 p = tr.p;
 B = tr.pending;
-tr.pending = zeros(0, 5);
+tr.pending = zeros(0, 6);
 m = size(B, 1);
 nT = numel(tr.tracks);
 Z = zeros(p.dim, m);
+Zvr = nan(1, m);
 usable = false(1, m);
 for i = 1:m
-    [Z(:, i), usable(i)] = measurement(B(i, :), p.dim);
+    [Z(:, i), usable(i), Zvr(i)] = measurement(B(i, :), p.dim);
 end
 cost = inf(nT, m);                                  % d^2 + ln|S| of the gated pairs
 for j = 1:nT
     for i = find(usable)
-        [~, ~, nu, ~, S] = predict_measure(tr.tracks(j), Z(:, i), B(i, 1), p);
+        [~, ~, nu, ~, S] = predict_measure(tr.tracks(j), Z(:, i), Zvr(i), B(i, 1), p);
         d2 = nu' * (S \ nu);
-        if d2 <= p.gate
+        gate = p.gate;
+        if numel(nu) > p.dim, gate = p.gateVr; end  % with the radial velocity
+        if d2 <= gate
             cost(j, i) = d2 + log(det(S));
         end
     end
@@ -99,11 +113,11 @@ for i = 1:m
     j = trackOf(i);
     if j > 0                                        % EKF update (Joseph form)
         tk = tr.tracks(j);
-        [x, P, nu, H, S] = predict_measure(tk, Z(:, i), tp, p);
+        [x, P, nu, H, S, Rm] = predict_measure(tk, Z(:, i), Zvr(i), tp, p);
         K = P * H' / S;
         I_KH = eye(n) - K*H;
         tk.x = x + K*nu;
-        tk.P = I_KH*P*I_KH' + K*p.R*K';
+        tk.P = I_KH*P*I_KH' + K*Rm*K';
         tk.P = (tk.P + tk.P') / 2;
         tk.t = tp;
         tk.hits = tk.hits + 1;
@@ -119,7 +133,13 @@ for i = 1:m
         if p.nd == 3
             P(2*d+1:end, 2*d+1:end) = p.sigmaA0^2 * eye(d);
         end
-        tk = struct('id', tr.nextId, 'confirmed', p.confirmHits <= 1, 'x', [pos; zeros(n - d, 1)], ...
+        x0 = [pos; zeros(n - d, 1)];
+        if p.useVr && p.vrUnambiguous && isfinite(Zvr(i))   % velocity along the line of sight is measured
+            u = pos / norm(pos);
+            x0(d+1:2*d) = Zvr(i) * u;
+            P(d+1:2*d, d+1:2*d) = p.sigmaV0^2 * (eye(d) - u*u') + p.Rvr * (u*u');
+        end
+        tk = struct('id', tr.nextId, 'confirmed', p.confirmHits <= 1, 'x', x0, ...
                     'P', P, 't', tp, 'hits', 1, 'misses', 0);
         tr.nextId = tr.nextId + 1;
         tr.tracks(end+1) = tk;
@@ -210,26 +230,55 @@ end
 rowOf = p(2:end).';
 end
 
-function [z, ok] = measurement(b, dim)
-% Measurement vector of a plot of the batch ([time az range el plotIndex]).
+function [z, ok, zvr] = measurement(b, dim)
+% Measurement vector of a plot of the batch ([time az range el plotIndex vr])
+% and its radial velocity (2-D: of the ground range when the elevation is known).
 az = deg2rad(b(2));
 el = deg2rad(b(4));
+zvr = b(6);
 if dim == 3
     z = [b(3); az; el];
     ok = isfinite(el);
 else
     rho = b(3);
-    if isfinite(el), rho = rho * cos(el); end
+    if isfinite(el), rho = rho * cos(el);  zvr = zvr / cos(el); end
     z = [rho; az];
     ok = true;
 end
 end
 
-function [x, P, nu, H, S] = predict_measure(tk, z, tp, p)
-% Track predicted to the plot time, innovation, Jacobian and its covariance.
+function [x, P, nu, H, S, Rm] = predict_measure(tk, z, zvr, tp, p)
+% Track predicted to the plot time, innovation, Jacobian, its covariance and
+% the measurement noise; with the radial velocity when it can be used
+% (unambiguous, or unfolded with the predicted range rate).
 [x, P] = predict(tk.x, tk.P, tp - tk.t, p);
 [nu, H] = innovation(z, x, p);
-S = H*P*H' + p.R;
+Rm = p.R;
+if p.useVr && isfinite(zvr)
+    [hv, Hv] = radial_velocity(x, p.dim);
+    k = 0;
+    use = true;
+    if ~p.vrUnambiguous
+        use = sqrt(Hv*P*Hv' + p.Rvr) < p.vrSpan/6;
+        k = round((hv - zvr) / p.vrSpan);
+    end
+    if use
+        nu = [nu; zvr + k*p.vrSpan - hv];
+        H = [H; Hv];
+        Rm = blkdiag(p.R, p.Rvr);
+    end
+end
+S = H*P*H' + Rm;
+end
+
+function [hv, Hv] = radial_velocity(x, d)
+% Range rate p.v/|p| of the state and its Jacobian.
+pos = x(1:d);  vel = x(d+1:2*d);
+r = norm(pos);
+hv = pos' * vel / r;
+Hv = zeros(1, numel(x));
+Hv(1:d) = (vel' - hv * pos' / r) / r;
+Hv(d+1:2*d) = pos' / r;
 end
 
 function [x, P] = predict(x, P, dt, p)

@@ -6,7 +6,7 @@
  *   test_tracker CONFIG PLOTS.csv LOG.csv TEND
  *       CONFIG:    exported for the case (export_receiver_config.m): dimension,
  *                  motion model, gate and GNN batch as in tests/test_tracker.m
- *       PLOTS.csv: time_s,az_deg,range_m,el_deg of every plot in processing order
+ *       PLOTS.csv: time_s,az_deg,range_m,el_deg,vr_mps of every plot in processing order
  *       LOG.csv:   the MATLAB track log (track_update.m): time,id,confirmed,x,y,z,vx,vy,vz,hits,plotIndex
  *       TEND:      time of the last call (the open batch is associated)
  *       Every plot is given to the tracker in a call of its own at the plot
@@ -68,6 +68,7 @@ static void self_test(RadarConfig *cfg, int dim)
             d.range_m = R + cfg->trackSigma[0] * gauss();
             d.az_deg = (atan2(x, y) + cfg->trackSigma[1] * gauss()) * 180.0 / PI;
             d.el_deg = dim == 3 ? (asin(z / R) + cfg->trackSigma[2] * gauss()) * 180.0 / PI : NAN;
+            d.vr_mps = (x * v[i][0] + y * v[i][1]) / R + cfg->trackSigmaVr * gauss();   /* radial velocity */
             tracker_update(&t, &d, 1, tt, 0, NULL, NULL);
         }
     }
@@ -114,6 +115,7 @@ static void gnn_test(RadarConfig *cfg)
             d[i].range_m = R0[i] + v * scan * T;
             d[i].az_deg = az;
             d[i].el_deg = NAN;
+            d[i].vr_mps = v;
         }
         tracker_update(&t, d, 2, scan * T, 1, NULL, NULL);
     }
@@ -189,12 +191,12 @@ static int compare_with_matlab(RadarConfig *cfg, const char *plotsPath, const ch
     tracker_init(&t, cfg);
     c.haveRef = read_ref(&c);
     int nPlots = 0;
-    double tp, az, R, el;
-    while (fscanf(fp, "%lf,%lf,%lf,%lf", &tp, &az, &R, &el) == 4) {
+    double tp, az, R, el, vr;
+    while (fscanf(fp, "%lf,%lf,%lf,%lf,%lf", &tp, &az, &R, &el, &vr) == 5) {
         nPlots++;
         Detection d;
         memset(&d, 0, sizeof d);
-        d.time_s = tp;  d.az_deg = az;  d.range_m = R;  d.el_deg = el;
+        d.time_s = tp;  d.az_deg = az;  d.range_m = R;  d.el_deg = el;  d.vr_mps = vr;
         tracker_update(&t, &d, 1, tp, 0, on_update, &c);
     }
     tracker_update(&t, NULL, 0, tEnd, 1, on_update, &c);

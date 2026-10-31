@@ -9,8 +9,9 @@ function x = generate_rx_signal(sys, targets, t_s, azAnt_deg, clutterIf)
 %        sub-pulses on the 30 MHz IF with the element phases
 %     2. ground clutter (clutterIf from clutter_signal.m, [] = none)
 %     3. transmitter leakage while a pulse is transmitted (isolation)
-%     4. thermal noise of the receiver (k*T0*F over fs/2)
-%     5. receiver path gain
+%     4. the STC attenuator in front of the receiver (sys.rx.stcGain, stc_gain.m)
+%     5. thermal noise of the receiver (k*T0*F over fs/2), after the STC
+%     6. receiver path gain
 %   adc_sample.m then converts the result to 16-bit ADC samples.
 
 c   = sys.cfg.const.c;
@@ -68,11 +69,16 @@ if sys.cfg.rx.addLeakage
     end
 end
 
-%% 4) Thermal noise of the receiver
+%% 4) STC: attenuation of the echoes (not of the receiver noise) early in each receive window
+if sys.cfg.rx.stc.enable
+    x = x .* sys.rx.stcGain;
+end
+
+%% 5) Thermal noise of the receiver
 if sys.cfg.rx.addThermalNoise
     x = x + sys.rx.sigmaTh * randn(sys.nAdc, sys.nCh, 'single');
 end
 
-%% 5) Receiver path gain
+%% 6) Receiver path gain
 x = x * sys.rx.voltGain;
 end
