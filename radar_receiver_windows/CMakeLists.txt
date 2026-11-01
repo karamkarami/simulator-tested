@@ -3,7 +3,7 @@
 # with an optional Qt PPI and an optional serial output of the detections.
 # CMake 3.21: C_STANDARD 11 gives MSVC /std:c11 (needed for 'restrict').
 cmake_minimum_required(VERSION 3.21)
-project(radar_receiver LANGUAGES C)
+project(radar_receiver LANGUAGES C)   # Windows project (radar_receiver_windows)
 
 option(RADAR_WITH_QT     "Build the Qt PPI display (Qt 6 or Qt 5 Widgets)" ON)
 option(RADAR_OPENMP      "Use OpenMP threads"                              ON)
@@ -205,6 +205,20 @@ if(RADAR_BUILD_TESTS)
     endif()
     add_test(NAME cfar COMMAND test_cfar ${CMAKE_CURRENT_SOURCE_DIR}/config/radar_config.bin)
     add_test(NAME cfar_1ch COMMAND test_cfar ${CMAKE_CURRENT_SOURCE_DIR}/config/radar_config_1ch.bin)
+
+    # the same sources as the other CLion project of the receiver
+    # (radar_receiver_windows <-> radar_receiver_linux), when it is there
+    get_filename_component(RADAR_PROJECT_NAME "${CMAKE_CURRENT_SOURCE_DIR}" NAME)
+    get_filename_component(RADAR_PARENT "${CMAKE_CURRENT_SOURCE_DIR}" DIRECTORY)
+    if(RADAR_PROJECT_NAME STREQUAL "radar_receiver_windows")
+        set(RADAR_SIBLING "${RADAR_PARENT}/radar_receiver_linux")
+    else()
+        set(RADAR_SIBLING "${RADAR_PARENT}/radar_receiver_windows")
+    endif()
+    if(EXISTS "${RADAR_SIBLING}/src")
+        add_test(NAME same_sources COMMAND ${CMAKE_COMMAND} -DA=${CMAKE_CURRENT_SOURCE_DIR} -DB=${RADAR_SIBLING}
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_same_sources.cmake)
+    endif()
 
     add_executable(test_tracker tests/test_tracker.c)
     target_link_libraries(test_tracker PRIVATE radar_core)

@@ -28,7 +28,7 @@ function ok = test_tracker()
 %      closer than the constant-velocity model. With the radial velocity the
 %      CV track must be closer than without it (this target accelerates
 %      nearly along the line of sight) and CA still better in velocity.
-%   When the C receiver is built, radar_receiver/build/test_tracker runs the
+%   When the C receiver is built, radar_receiver_<os>/build/test_tracker runs the
 %   C tracker on the plots of case 1: every track update must match MATLAB.
 
 root = fileparts(fileparts(mfilename('fullpath')));
@@ -172,7 +172,7 @@ function ok = compare_with_c(cfg, plots, log, tEnd)
 % The C tracker on the same plots (when built): it must give the same track updates.
 ok = true;
 root = fileparts(fileparts(mfilename('fullpath')));
-bin = fullfile(root, 'radar_receiver', 'build', 'test_tracker');
+bin = fullfile(receiver_dir(), 'build', 'test_tracker');
 if ispc, bin = [bin '.exe']; end
 if ~exist(bin, 'file')
     fprintf('    C tracker not built: comparison skipped\n');

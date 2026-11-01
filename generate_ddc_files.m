@@ -17,7 +17,7 @@ function info = generate_ddc_files(cfg, nWorkers)
 %     3. DDC (2 or 4 MHz output, cfg.ddc.outputRate_Hz) -> <cfg.io.ddcFolder>/ddc_<n>.mat
 %   The DDC files are the same as those of run_radar_sim with cfg.io.saveDdc
 %   (I, Q int16 [nDdc x nElements] and hdr), so replay_ddc_udp.m or the C
-%   sender (radar_receiver/build/radar_stream_send) can send them to the
+%   sender (radar_receiver_<os>/build/radar_stream_send) can send them to the
 %   receiver. No processing after the DDC is done.
 %
 %   Random numbers: the target RCS of every scan and the clutter map are drawn

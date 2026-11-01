@@ -68,7 +68,7 @@ ok = report(sprintf('30 us long pulse: short pulse %d range cells (CFAR window %
                     ws.nRange, 2*oR + 1, ws.testIdx), good) && ok;
 fc = [tempname() '.bin'];
 evalc('export_receiver_config(c, fc)');
-bin = fullfile(root, 'radar_receiver', 'build', 'test_cfar');
+bin = fullfile(receiver_dir(), 'build', 'test_cfar');
 if ispc, bin = [bin '.exe']; end
 if exist(bin, 'file')                                  % the C receiver accepts the configuration
     [status, out] = system(sprintf('"%s" "%s"', bin, fc));

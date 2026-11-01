@@ -8,10 +8,12 @@ the PPI display is simulated. Each processing block is a short function in
 `src/`. All parameters are in one file, `radar_config.m`.
 
 The code needs no MATLAB toolbox (UDP streaming uses `udpport` or Java). It
-was tested with GNU Octave 8.4. The folder `radar_receiver/` holds a C
+was tested with GNU Octave 8.4. The folders `radar_receiver_windows/` and
+`radar_receiver_linux/` (two CLion projects with the same sources) hold a C
 version of the whole receiver processing (CMake project for CLion). It
 processes the DDC output that the simulator streams over UDP and has an
-optional Qt PPI and serial output (see `radar_receiver/README.md`).
+optional Qt PPI and serial output (see `radar_receiver_windows/README.md`
+or `radar_receiver_linux/README.md`; below `radar_receiver_<os>`).
 
 ```
  PRI:  short pulse 25 us at 0 | receive (near range) | long pulse 150 us at 200 us | receive (far range)
@@ -27,7 +29,7 @@ optional Qt PPI and serial output (see `radar_receiver/README.md`).
         |                       \--> optional DDC files: output/ddc_pulses/ddc_<n>.mat
         |                             (replay_ddc_udp.m sends them later with the PRI timing)
         |                       \--> optional UDP: int16 DDC output + pulse/scan/azimuth header
-        |                             (-> radar_receiver/, the same processing in C)
+        |                             (-> radar_receiver_<os>/, the same processing in C)
         v  split in time: short-pulse samples | long-pulse samples
  DBF (21 x 48 matrix, off for 1 element)                   -> [21 beams x nSamples] per sub-pulse
  Pulse compression (valid convolution): matched filter (Taylor for LFM) or, for a phase code,
@@ -128,7 +130,7 @@ take it into account:
   many detections, so its time is bounded by the map size (see Pruning
   below), and the C receiver does the local peak test inside its CFAR,
   finds the plot extractor groups in a hash grid and selects the noise
-  floor median among a few values (`radar_receiver/README.md`, Speed: one
+  floor median among a few values (`radar_receiver_<os>/README.md`, Speed: one
   element, 80 km, 0.35 ms instead of 1.44 ms per PRI at the default
   threshold with 3 threads of a small VM, 0.87 ms instead of 2.33 ms at
   6 dB). With a CFAR
@@ -177,12 +179,12 @@ cd tests
 run_all_tests                       % SNR budget, UDP, ghost and six-target tests
 ```
 
-C receiver (see `radar_receiver/README.md`):
+C receiver (see `radar_receiver_<os>/README.md`):
 
 ```matlab
 cfg = radar_config;  cfg.udp.enable = true;
 export_receiver_config(cfg);        % configuration file for the C receiver
-% start radar_receiver/build/radar_receiver --ppi, then:
+% start radar_receiver_<os>/build/radar_receiver --ppi, then:
 results = run_radar_sim(cfg);
 ```
 
@@ -197,7 +199,7 @@ file was built for other values (for example after you change
 | File | Purpose |
 |---|---|
 | `radar_config.m` | all user parameters |
-| `export_receiver_config.m` | writes the configuration of the C receiver (`radar_receiver/config/radar_config.bin`) |
+| `export_receiver_config.m` | writes the configuration of the C receiver (`radar_receiver_<os>/config/radar_config.bin`) |
 | `run_radar_sim.m` | main loop: generation, recording, DDC/streaming, processing, display |
 | `replay_ddc_udp.m` | sends recorded DDC files (`ddc_<n>.mat`) over UDP, unchanged, with the original PRI timing |
 | `generate_ddc_files.m` | simulates every PRI only up to the DDC output and saves the DDC files, the PRIs in parallel (`parfor`) |
@@ -227,7 +229,8 @@ file was built for other values (for example after you change
 | `src/snr_budget.m`, `print_snr_budget.m` | expected SNR after every block (incl. STC, ADC noise and DDC rounding; blind speeds marked) |
 | `src/six_targets_scenario.m`, `make_target.m`, `target_geometry.m`, `illumination_time.m`, `target_sectors.m` | targets |
 | `tests/` | tests (see below) |
-| `radar_receiver/` | the receiver processing in C (CMake/CLion, Qt PPI, serial output) |
+| `radar_receiver_windows/`, `radar_receiver_linux/` | the receiver processing in C (CMake/CLion, Qt PPI, serial output), one project per operating system with the same `src`, `tests`, `tools` and `config` (test `same_sources`; the Linux one also has real-time options) |
+| `src/receiver_dir.m` | the folder of the C receiver for this computer (`ispc`: Windows, else Linux) |
 
 ## Input files (`inputs/`)
 
@@ -659,7 +662,7 @@ files are bit-identical to those of `run_radar_sim` (`test_generate_ddc`).
 ```matlab
 cfg = radar_config;  cfg.io.saveRaw = false;  cfg.sim.nScans = 3;
 info = generate_ddc_files(cfg, 8);                    % -> cfg.io.ddcFolder
-radar_receiver/build/radar_stream_send output/ddc_pulses --port 50000   % (shell) to the C receiver
+radar_receiver_<os>/build/radar_stream_send output/ddc_pulses --port 50000   % (shell) to the C receiver
 ```
 
 ### Replaying the DDC files over UDP
@@ -667,7 +670,7 @@ radar_receiver/build/radar_stream_send output/ddc_pulses --port 50000   % (shell
 `replay_ddc_udp.m` reads the DDC files and sends them to a receiver
 without any processing: the stored samples and header go out in the same
 datagrams as the live stream below, so the receiver (for example
-`radar_receiver/`) cannot tell a replay from the simulator. The PRIs are
+`radar_receiver_<os>/`) cannot tell a replay from the simulator. The PRIs are
 sent with the original timing:
 
 ```matlab
@@ -704,12 +707,12 @@ stats = replay_ddc_udp('output/ddc_pulses', 'host', '192.168.1.20', 'port', 5000
   datagrams up to 64 kB) instead of 245 with 1400 bytes.
 
 For exact real-time timing use the C sender `radar_stream_send` of
-`radar_receiver/` (see its README). It reads the same folder (files saved
+`radar_receiver_<os>/` (see its README). It reads the same folder (files saved
 with `-v6`, or `-v7` when built with zlib), sends the same datagrams, and
 keeps the PRI timing within microseconds at 2.7 Gbit/s:
 
 ```sh
-radar_receiver/build/radar_stream_send output/ddc_pulses --host 192.168.1.20 --port 50000
+radar_receiver_<os>/build/radar_stream_send output/ddc_pulses --host 192.168.1.20 --port 50000
 ```
 
 ### UDP stream
@@ -775,7 +778,7 @@ budget.
 | `test_multi_scan(mode, nScans)` | several scans of the six-target scenario through the C receiver (DDC files, `radar_stream_send`): every PRI received, a confirmed track on every target not at a blind speed, no confirmed false track, at most 2 false plots per scan |
 | `test_cfar` | the three CFAR methods on exponential noise: false alarm rate 1e-3 in the interior and at the range edges (shifted window), targets in the first and last range cell detected, only the tested range interval is tested, the noise estimate equals the direct sums over the (shifted) window, also when the whole tested interval lies within the edge cells |
 | `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA, with and without the radial velocity: one confirmed track per target, close to it, no false track; the radial velocity lowers the velocity error after two scans; staggered PRF (folded plot velocities): the track radial velocity is unfolded; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |
-| `test_c_receiver(mode, ..., cfarMethod)` | the six-target scenario streamed over UDP to the C receiver (`radar_receiver/`): its plots and track updates must match MATLAB; the recorded stream is replayed to check repeatability and speed |
+| `test_c_receiver(mode, ..., cfarMethod)` | the six-target scenario streamed over UDP to the C receiver (`radar_receiver_<os>/`): its plots and track updates must match MATLAB; the recorded stream is replayed to check repeatability and speed |
 
 Latest results at 170 MHz with the receiver gain of 60 dB and the STC
 (Octave 8.4 on a 4-vCPU VM): every SNR budget check passes (fixed and

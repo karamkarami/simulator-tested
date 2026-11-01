@@ -8,7 +8,7 @@ function ok = test_ddc_replay()
 %   their header, and the PRIs must leave on time: median delay below 10 % of
 %   the PRI (single late PRIs come from the operating system and are allowed)
 %   and, with 'catchUp', the replay must last as long as the recording.
-%   When the C sender radar_receiver/build/radar_stream_send is built, it
+%   When the C sender radar_receiver_<os>/build/radar_stream_send is built, it
 %   sends the same files, saved with -v6 and with -v7 (compressed), and they
 %   must arrive bit-exact as well.
 
@@ -65,11 +65,11 @@ for attempt = 1:3
     if timingOk, break; end
 end
 
-% The C sender (radar_receiver/build/radar_stream_send), when it is built:
+% The C sender (radar_receiver_<os>/build/radar_stream_send), when it is built:
 % the same files as saved (-v6) and compressed (-v7) must arrive bit-exact
 cOk = true;
 cText = 'C sender not built';
-sender = fullfile(root, 'radar_receiver', 'build', 'radar_stream_send');
+sender = fullfile(receiver_dir(), 'build', 'radar_stream_send');
 if ispc, sender = [sender '.exe']; end
 if exist(sender, 'file')
     v7Folder = fullfile(cfg.io.outFolder, 'ddc_pulses_v7');

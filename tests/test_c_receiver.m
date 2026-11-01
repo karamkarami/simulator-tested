@@ -1,5 +1,5 @@
 function [ok, cmp] = test_c_receiver(prfMode, receiverBin, port, targetIdx, replayOnly, cfarMethod)
-%TEST_C_RECEIVER  The C receiver (radar_receiver/) against the MATLAB processing.
+%TEST_C_RECEIVER  The C receiver (radar_receiver_<os>/, <os> = windows or linux: receiver_dir.m) against the MATLAB processing.
 %
 %   [ok, cmp] = TEST_C_RECEIVER(prfMode, receiverBin, port) runs the
 %   six-target scenario of test_six_targets ('fixed' or 'staggered' PRF) and
@@ -13,7 +13,7 @@ function [ok, cmp] = test_c_receiver(prfMode, receiverBin, port, targetIdx, repl
 %   PRI is reported.
 %
 %   receiverBin: the radar_receiver program (default
-%   radar_receiver/build/radar_receiver, see radar_receiver/README.md).
+%   radar_receiver_<os>/build/radar_receiver, see radar_receiver_<os>/README.md).
 %   port: UDP port (default 50000 fixed, 50001 staggered).
 %   targetIdx: simulate only the sectors of these targets (default: all six).
 %   replayOnly = true: skip the simulation and the live run, and only replay
@@ -28,14 +28,14 @@ if nargin < 1, prfMode = 'fixed'; end
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
 if nargin < 2 || isempty(receiverBin)
-    receiverBin = fullfile(root, 'radar_receiver', 'build', 'radar_receiver');
+    receiverBin = fullfile(receiver_dir(), 'build', 'radar_receiver');
 end
 if nargin < 3 || isempty(port), port = 50000 + strcmp(prfMode, 'staggered'); end
 if nargin < 4, targetIdx = []; end
 if nargin < 5, replayOnly = false; end
 if nargin < 6 || isempty(cfarMethod), cfarMethod = '2d'; end
 if ~exist(receiverBin, 'file')
-    error('C receiver %s not found: build it first (radar_receiver/README.md)', receiverBin);
+    error('C receiver %s not found: build it first (radar_receiver_<os>/README.md)', receiverBin);
 end
 
 %% Configuration: the six-target scenario, DDC output streamed over UDP

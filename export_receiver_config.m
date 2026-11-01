@@ -1,5 +1,5 @@
 function export_receiver_config(cfg, fileName)
-%EXPORT_RECEIVER_CONFIG  Write the receiver configuration for the C receiver (radar_receiver/).
+%EXPORT_RECEIVER_CONFIG  Write the receiver configuration for the C receiver (radar_receiver_<os>/, <os> = windows or linux: receiver_dir.m).
 %
 %   EXPORT_RECEIVER_CONFIG(cfg, fileName) runs setup_radar(cfg) and writes
 %   everything the C receiver needs to process the DDC output that the
@@ -9,7 +9,7 @@ function export_receiver_config(cfg, fileName)
 %   tested range cells, noise floor of the SNR, plot extraction and tracker
 %   settings). Export again
 %   whenever cfg changes, before starting the C receiver. Default file:
-%   radar_receiver/config/radar_config.bin.
+%   radar_receiver_<os>/config/radar_config.bin.
 %
 %   File format (little-endian): 8 bytes 'RADRXCFG', uint32 version (2),
 %   uint32 number of records, then per record: char name[32] (zero padded),
@@ -19,7 +19,7 @@ function export_receiver_config(cfg, fileName)
 root = fileparts(mfilename('fullpath'));
 addpath(root, fullfile(root, 'src'));
 if nargin < 1, cfg = radar_config(); end
-if nargin < 2, fileName = fullfile(root, 'radar_receiver', 'config', 'radar_config.bin'); end
+if nargin < 2, fileName = fullfile(receiver_dir(), 'config', 'radar_config.bin'); end
 sys = setup_radar(cfg);
 
 r = {};                                              % {name, value} pairs

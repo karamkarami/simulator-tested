@@ -18,7 +18,7 @@ function [ok, out] = test_multi_scan(prfMode, nScans, buildDir, replayOnly)
 %   The live run is reported as well: when the computer is busy the receiver
 %   cannot follow 20 ms per PRI and drops PRIs (its queue is full).
 %   TEST_MULTI_SCAN(prfMode, nScans, buildDir, true) only processes the
-%   recording of an earlier run again. buildDir: radar_receiver/build
+%   recording of an earlier run again. buildDir: radar_receiver_<os>/build
 %   (default). Needs a POSIX shell. About 40 minutes per 3 scans in Octave
 %   (the DDC files, about 2 GB, are deleted again).
 
@@ -27,11 +27,11 @@ if nargin < 2 || isempty(nScans), nScans = 3; end
 if nargin < 4, replayOnly = false; end
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
-if nargin < 3 || isempty(buildDir), buildDir = fullfile(root, 'radar_receiver', 'build'); end
+if nargin < 3 || isempty(buildDir), buildDir = fullfile(receiver_dir(), 'build'); end
 receiver = fullfile(buildDir, 'radar_receiver');
 sender = fullfile(buildDir, 'radar_stream_send');
 if ~exist(receiver, 'file') || ~exist(sender, 'file')
-    error('C receiver not built in %s (radar_receiver/README.md)', buildDir);
+    error('C receiver not built in %s (radar_receiver_<os>/README.md)', buildDir);
 end
 
 cfg = radar_config();

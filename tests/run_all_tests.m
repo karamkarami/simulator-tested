@@ -2,7 +2,7 @@
 %   The six-target tests take about 35 minutes each in Octave 8.4 on a
 %   4-vCPU VM. Each writes about 18 GB of raw data (output/test_<mode>/raw_pulses),
 %   checks it and deletes it again (call test_six_targets(mode, true) to keep
-%   the files). When the C receiver is built (radar_receiver/build/radar_receiver,
+%   the files). When the C receiver is built (radar_receiver_<os>/build/radar_receiver,
 %   Linux or macOS), test_c_receiver compares it with the MATLAB processing
 %   (about 20 minutes per run: fixed and staggered PRF, 1-D range and Doppler
 %   CFAR), and test_multi_scan sends three scans through it (about 40 minutes).
@@ -46,7 +46,7 @@ for mode = {'fixed', 'staggered'}
                        @() test_six_targets(mode{1}, true, false)}; %#ok<SAGROW>
 end
 
-receiverBin = fullfile(fileparts(fileparts(mfilename('fullpath'))), 'radar_receiver', 'build', 'radar_receiver');
+receiverBin = fullfile(receiver_dir(), 'build', 'radar_receiver');
 if isunix && exist(receiverBin, 'file')
     for mode = {'fixed', 'staggered'}
         tests(end+1, :) = {sprintf('C receiver vs MATLAB (%s PRF)', mode{1}), ...

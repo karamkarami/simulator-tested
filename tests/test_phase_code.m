@@ -22,7 +22,7 @@ function ok = test_phase_code()
 %   5. The whole chain (run_radar_sim) with phase codes and mismatch filters:
 %      one plot of a target at 40 km at the right range (default and 3x
 %      filters).
-%   6. When the C receiver is built, its core test (radar_receiver/build/
+%   6. When the C receiver is built, its core test (radar_receiver_<os>/build/
 %      test_core) passes with the exported configuration of the mismatch
 %      filters (default and 3x).
 
@@ -136,7 +136,7 @@ for run = {{c, 'mismatch filters'}, {c3, '3x mismatch filters'}}
 end
 
 %% 6) the C receiver core test with the exported mismatch configurations
-bin = fullfile(root, 'radar_receiver', 'build', 'test_core');
+bin = fullfile(receiver_dir(), 'build', 'test_core');
 if ispc, bin = [bin '.exe']; end
 if exist(bin, 'file')
     for run = {{c, 'mismatch filters'}, {c3, '3x mismatch filters'}}

@@ -1,4 +1,12 @@
-# Radar receiver in C (CLion / CMake project)
+# Radar receiver in C (CLion / CMake project, Linux)
+
+The receiver is kept as two CLion projects with the same sources:
+`radar_receiver_linux` (this one: Ubuntu with GCC and the Qt of the
+distribution, optionally the Ubuntu real-time kernel, see "Linux and real
+time") and `../radar_receiver_windows`. Their `src`, `tests`, `tools` and
+`config` folders are identical (test `same_sources`), so every change goes
+into both; only `CMakeLists.txt` (the default Qt location) and the README
+differ.
 
 This program does all the receiver processing of the MATLAB simulator in C.
 Its input is the signed 16-bit DDC output of every PRI, which the simulator
@@ -56,21 +64,22 @@ OpenMP (optional, for multi-threading), Qt 5.12+ or Qt 6 Widgets
 (optional, for the PPI) and zlib (optional: `radar_stream_send` then also
 reads compressed `-v7` DDC files; `-v6` files need nothing).
 
-**CLion:** *File > Open* the `radar_receiver` folder; CLion loads
+**CLion:** *File > Open* the `radar_receiver_linux` folder; CLion loads
 `CMakeLists.txt`. Choose the **Release** profile (*Settings > Build,
 Execution, Deployment > CMake*, add a Release profile). Without it the code
 is not optimised and runs about 10 times slower. Run configurations are
 created for `radar_receiver` and the tests. Set the program arguments in the
 run configuration, for example `--config ../config/radar_config.bin --ppi`.
 If CMake does not find Qt, add `-DCMAKE_PREFIX_PATH=<Qt>/lib/cmake` (for
-example `C:/Qt/6.7.2/mingw_64/lib/cmake`) to the CMake options.
+example `~/Qt/6.7.2/gcc_64/lib/cmake` of the Qt installer) to the CMake
+options.
 
 **Command line:**
 
 ```sh
-cmake -S radar_receiver -B radar_receiver/build -DCMAKE_BUILD_TYPE=Release
-cmake --build radar_receiver/build -j
-cd radar_receiver/build && ctest --output-on-failure
+cmake -S radar_receiver_linux -B radar_receiver_linux/build -DCMAKE_BUILD_TYPE=Release
+cmake --build radar_receiver_linux/build -j
+cd radar_receiver_linux/build && ctest --output-on-failure
 ```
 
 CMake options:
@@ -82,23 +91,20 @@ CMake options:
 | `RADAR_NATIVE` | ON | optimise for the CPU of the build machine (`-march=native`, MSVC `/arch:AVX2`); switch it off when the program must run on other PCs |
 | `RADAR_BUILD_TESTS` | ON | unit tests (`ctest`) |
 
-On Windows, the MinGW toolchain bundled with CLion and MSVC both work.
-OpenMP and `-march=native` need no extra setup with MinGW. With MSVC,
-`/openmp` is used, and `RADAR_NATIVE` means `/arch:AVX2` (every Intel Core
-CPU since 2013). When Qt is found, `windeployqt` copies the Qt DLLs next to
-the programs after the build, so they also start outside Qt's environment.
-The serial port is opened as `COM3` and so on.
+On Ubuntu the packages of "Linux and real time" are all that is needed;
+CMake finds the Qt of the distribution. The serial port is opened as
+`/dev/ttyUSB0` and so on (user in the group `dialout`).
 
 ## Use with the MATLAB simulator
 
 ```matlab
 cfg = radar_config;                       % the same cfg for both programs
 cfg.udp.enable = true;                    % stream the DDC output
-export_receiver_config(cfg);              % -> radar_receiver/config/radar_config.bin
+export_receiver_config(cfg);              % -> radar_receiver_linux/config/radar_config.bin
 ```
 
 ```sh
-radar_receiver/build/radar_receiver --config radar_receiver/config/radar_config.bin --ppi
+radar_receiver_linux/build/radar_receiver --config radar_receiver_linux/config/radar_config.bin --ppi
 ```
 
 Then run `run_radar_sim(cfg)` in MATLAB. Export the configuration again
@@ -450,11 +456,24 @@ sudo sysctl --system
 sudo usermod -aG dialout $USER
 ```
 
-**PREEMPT_RT kernel.** A real-time kernel (mainline Linux 6.12 and newer has
-PREEMPT_RT built in; Ubuntu: `sudo pro enable realtime-kernel`; Debian:
-`linux-image-rt-amd64`) bounds the time until a thread of high priority
-runs, but only threads with a real-time priority profit from it. The
-receiver therefore sets it itself:
+**Ubuntu real-time kernel** (https://ubuntu.com/real-time: the PREEMPT_RT
+kernel of Ubuntu Pro, Ubuntu 22.04 and 24.04; Ubuntu Pro is free for
+personal use on up to 5 machines). Get the token at https://ubuntu.com/pro,
+then:
+
+```sh
+sudo pro attach <token>
+sudo pro enable realtime-kernel     # asks for confirmation, installs linux-realtime
+sudo reboot
+uname -v                            # contains PREEMPT_RT
+```
+
+(For Intel Core / Atom CPUs Ubuntu also offers `--variant=intel-iotg`, the
+same kernel with Intel's time-coordinated computing support; the generic
+variant is enough here.) The real-time kernel bounds the time until a
+thread of high priority runs, but only threads with a real-time priority
+profit from it: the receiver therefore sets it itself (nothing else changes
+in the program):
 
 ```sh
 radar_receiver --config cfg.bin --ppi --rt-priority 40 --cpus 2-7 --input-cpus 1 --mlock

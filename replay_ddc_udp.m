@@ -46,8 +46,8 @@ function stats = replay_ddc_udp(folder, varargin)
 %     ('preloadMB') when the idle time is too short to read them.
 %   stats.late_s shows whether the timing was kept. For exact real-time
 %   timing use the C sender, which reads the same files and sends the same
-%   datagrams: radar_receiver/build/radar_stream_send <folder> (see
-%   radar_receiver/README.md).
+%   datagrams: radar_receiver_<os>/build/radar_stream_send <folder> (see
+%   radar_receiver_<os>/README.md).
 %
 %   Example:
 %     cfg = radar_config;  cfg.io.saveDdc = true;  cfg.io.saveRaw = false;
