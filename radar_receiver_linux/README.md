@@ -456,18 +456,29 @@ sudo sysctl --system
 sudo usermod -aG dialout $USER
 ```
 
-**Ubuntu real-time kernel** (https://ubuntu.com/real-time: the PREEMPT_RT
-kernel of Ubuntu Pro, Ubuntu 22.04 and 24.04; Ubuntu Pro is free for
-personal use on up to 5 machines). Get the token at https://ubuntu.com/pro,
-then:
+**Ubuntu real-time kernel** (https://ubuntu.com/real-time, PREEMPT_RT).
+From Ubuntu 26.04 on it is in the normal archive, free and without Ubuntu
+Pro:
 
 ```sh
-sudo pro attach <token>
-sudo pro enable realtime-kernel     # asks for confirmation, installs linux-realtime
+sudo apt install ubuntu-realtime
 sudo reboot
 uname -v                            # contains PREEMPT_RT
 ```
 
+Ubuntu 22.04 and 24.04 need Ubuntu Pro (free for personal use on up to 5
+machines): `sudo pro attach <token>`, `sudo pro enable realtime-kernel`.
+The previous kernel stays installed and can be chosen in the GRUB menu
+(Esc or Shift while booting); remove the real-time one with
+`sudo apt remove ubuntu-realtime` and its `linux-image-*realtime*`
+packages. Before installing it, measure whether it is needed at all: the
+average processing time does not get shorter (the kernel bounds the delays,
+it does not speed up the processing; throughput can even drop a little),
+and with the PRI queue of the input thread delays of a few ms cost no PRI.
+`sudo apt install rt-tests; sudo cyclictest -m -p 90 -t -i 200 -D 5m` shows
+the largest scheduling delay (`Max`, us) of this computer under its normal
+load. The proprietary NVIDIA driver and DKMS modules (VirtualBox, some
+Wi-Fi drivers) may not build for the real-time kernel.
 (For Intel Core / Atom CPUs Ubuntu also offers `--variant=intel-iotg`, the
 same kernel with Intel's time-coordinated computing support; the generic
 variant is enough here.) The real-time kernel bounds the time until a
