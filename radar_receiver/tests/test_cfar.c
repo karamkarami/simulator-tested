@@ -10,7 +10,9 @@
  * edges (shifted windows, also when the whole interval lies within the first
  * or last guard+training cells) and over all cells; with the beams of the
  * configuration (argv[1], which gives the window sizes) and with one beam
- * split into range chunks over several threads. Then the exact noise floor
+ * split into range chunks over several threads; the noise estimate kept for
+ * the SNR of every detection (cfg.report.snrNoise = 'cfar') equals the
+ * direct one. Then the exact noise floor
  * median (check_median) against a sorted copy, and the pruning of thousands
  * of detections (check_pruning) against the direct pairwise rules.
  */
@@ -61,6 +63,7 @@ static void check_window(RadarConfig cfg, const char *name, int gR, int tR, int 
     cfg.guardRange = gR;  cfg.trainRange = tR;  cfg.guardDoppler = gD;  cfg.trainDoppler = tD;
     cfg.nTrain = (2 * (gR + tR) + 1) * (2 * (gD + tD) + 1) - (2 * gR + 1) * (2 * gD + 1);
     if (nBeams > 0) cfg.nBeams = nBeams;                /* the CFAR only needs the maps */
+    cfg.snrNoise = SNR_NOISE_CFAR;                      /* the CFAR keeps the noise of its detections */
     Processor *p = processor_create(&cfg, nThreads);
     PulseState *s = &p->ps[PULSE_LONG];
     const int nR = s->nR, oR = gR + tR, nfft = cfg.nfft, failuresBefore = failures;
@@ -89,6 +92,10 @@ static void check_window(RadarConfig cfg, const char *name, int gR, int tR, int 
                     const double thr = p->alpha * direct_noise(&cfg, s, b, r, d), v = P_at(s, d, b, r);
                     if (fabs(v - thr) > 1e-5 * thr && got != (v > thr && direct_peak(&cfg, s, b, r, d)))
                         wrong++;                                        /* (ties: float sums) */
+                    if (got) {                                          /* its noise for the SNR */
+                        const double nz = s->noise[(size_t)d * s->nCells + (size_t)b * nR + r];
+                        if (fabs(nz * p->alpha - thr) > 1e-5 * thr) wrong++;
+                    }
                 }
         if (wrong) {
             failures++;

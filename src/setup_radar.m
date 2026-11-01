@@ -14,6 +14,13 @@ sys.fIF    = cfg.adc.fIF_Hz;                                  % IF carrier at th
 sys.fLO    = cfg.fc - sys.fIF;                                % receiver local oscillator [Hz]
 
 sys.cfar = cfar_window(cfg);                                  % window of the selected CFAR method
+sys.report.snrNoise = 'median';                               % noise floor of the SNR of the reports
+if isfield(cfg, 'report') && isfield(cfg.report, 'snrNoise')
+    sys.report.snrNoise = lower(cfg.report.snrNoise);
+end
+if ~any(strcmp(sys.report.snrNoise, {'median', 'cfar'}))
+    error('cfg.report.snrNoise must be ''median'' or ''cfar''.');
+end
 
 %% Input files (defaults are built when missing or when made for other cfg values)
 ant  = load_input(cfg, 'antenna', struct('fc', cfg.fc, 'spacing', cfg.ant.elementSpacing_lambda));

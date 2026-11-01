@@ -539,7 +539,10 @@ there, at the same beam and Doppler, behind very strong far targets.
   needs detections over at least 2 deg of antenna rotation, half a beamwidth
   (`cfg.extract.minExtent_deg`). Noise false alarms last about 1 deg, while
   a target is detected over about 6-8 deg. Elevation is interpolated between adjacent
-  beams. The plot SNR is measured against the noise floor of the beam. The
+  beams. The plot SNR is measured against the noise floor of the beam (the
+  median of its range-Doppler map), or with `cfg.report.snrNoise = 'cfar'`
+  against the CFAR noise estimate of the cell (no median is computed; too
+  low near strong targets and clutter residue, see `radar_config.m`). The
   radial velocity is unambiguous within +-441 m/s with the fixed PRF (6.9 m/s
   per Doppler bin) and +-112 m/s with the default stagger.
   The pruning compares a peak only with the peaks more than the margin

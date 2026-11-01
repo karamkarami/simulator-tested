@@ -45,6 +45,14 @@ static const Record *find(RecordSet *rs, const char *name)
     return NULL;
 }
 
+/* The record, or NULL without an error (optional values). */
+static const Record *find_optional(const RecordSet *rs, const char *name)
+{
+    for (int i = 0; i < rs->n; i++)
+        if (strcmp(rs->rec[i].name, name) == 0) return &rs->rec[i];
+    return NULL;
+}
+
 static double get_scalar(RecordSet *rs, const char *name)
 {
     const Record *r = find(rs, name);
@@ -265,6 +273,10 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         cfg->alpha        = get_scalar(&rs, "alpha");
         cfg->nLooks       = get_scalar(&rs, "nLooks");
         cfg->sidelobeMargin_dB = get_scalar(&rs, "sidelobeMargin_dB");
+        {                                              /* optional: median in older files */
+            const Record *r = find_optional(&rs, "snrNoise");
+            cfg->snrNoise = (r && r->rows * r->cols >= 1 && lround(r->data[0]) == 1) ? SNR_NOISE_CFAR : SNR_NOISE_MEDIAN;
+        }
         cfg->minHits      = get_int(&rs, "minHits");
         cfg->maxMiss      = get_int(&rs, "maxMiss");
         cfg->updateEvery  = get_int(&rs, "updateEvery");

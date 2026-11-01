@@ -6,7 +6,8 @@ function export_receiver_config(cfg, fileName)
 %   simulator streams over UDP (DBF matrix, pulse compression filters:
 %   matched or, for a phase code, mismatch; range axes, CPI length, MTI
 %   weights, Doppler window and noise gains, CFAR method, window, factor and
-%   tested range cells, plot extraction and tracker settings). Export again
+%   tested range cells, noise floor of the SNR, plot extraction and tracker
+%   settings). Export again
 %   whenever cfg changes, before starting the C receiver. Default file:
 %   radar_receiver/config/radar_config.bin.
 %
@@ -80,6 +81,7 @@ r{end+1} = {'nTrain', sys.cfar.nTrain};
 r{end+1} = {'alpha', sys.cfar.alpha};
 r{end+1} = {'nLooks', sys.dop.nLooks};               % Pfa of the threshold
 r{end+1} = {'sidelobeMargin_dB', cfg.prune.sidelobeMargin_dB};
+r{end+1} = {'snrNoise', double(strcmp(sys.report.snrNoise, 'cfar'))};   % SNR noise: 0 median, 1 CFAR window
 r{end+1} = {'minHits', max(1, ceil(cfg.extract.minExtent_deg / ...
                        (sys.ant.rate_dps * mean(sys.pri) * cfg.proc.updateEvery)))};
 r{end+1} = {'maxMiss', cfg.extract.maxMiss};

@@ -32,6 +32,7 @@ enum { CFAR_2D = 0, CFAR_RANGE = 1, CFAR_DOPPLER = 2 };
 enum { TRACK_CV = 0, TRACK_CA = 1 };
 enum { WAVE_LFM = 0, WAVE_PHASE_CODE = 1 };
 enum { COMPRESSION_MATCHED = 0, COMPRESSION_MISMATCH = 1 };
+enum { SNR_NOISE_MEDIAN = 0, SNR_NOISE_CFAR = 1 };   /* noise floor of the SNR of the reports */
 const char *cfar_method_name(int method);   /* "2-D", "1-D range", "1-D Doppler" */
 
 typedef struct {
@@ -99,6 +100,10 @@ typedef struct {
     double  alpha;         /* CA-CFAR threshold factor (design value from cfg.cfar.pfa) */
     double  nLooks;        /* looks of the noise power in a cell (for cfar_pfa)       */
     double  sidelobeMargin_dB;
+    int     snrNoise;      /* SNR = power / noise - 1 of the reports with the noise of
+                              SNR_NOISE_MEDIAN: the median of the beam's map / medianToMean, or
+                              SNR_NOISE_CFAR: the CFAR estimate of the cell (no median computed);
+                              cfg.report.snrNoise, optional in the file (median)            */
     int     minHits, maxMiss, updateEvery;
     int     consolePlots;  /* print every plot and confirmed track (cfg.console.plots; --quiet, --print-plots) */
     double  minExtent_deg;  /* azimuth extent of a plot (minHits = this / azimuth step per update) */

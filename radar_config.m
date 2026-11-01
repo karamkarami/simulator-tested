@@ -187,6 +187,16 @@ cfg.cfar.long.maxRange_m  = Inf;
 cfg.prune.sidelobeMargin_dB = 20;  % a peak this much weaker than a peak on the same range, beam
                                    % or Doppler line is treated as its sidelobe and removed
 
+%% Detection reports: noise floor of the SNR = power / noise - 1 of every detection and plot
+% 'median' the median of the range-Doppler map of the beam, scaled to the mean: the receiver
+%          noise, not raised by the range sidelobes of strong targets or by a second target
+%          near the detection
+% 'cfar'   the noise estimate of the CFAR window of the cell (mean of its training cells):
+%          no extra computation (no median of the map), but the SNR of a target near a
+%          strong one (range sidelobes, Doppler mainlobe) or near clutter residue is too low,
+%          and with few training cells it scatters more (32 cells: +-0.8 dB)
+cfg.report.snrNoise = 'median';
+
 %% Plot extraction (azimuth peak picking over successive CPIs)
 cfg.extract.minExtent_deg = 2; % minimum azimuth extent of the detections of a plot [deg]
                                % (noise false alarms last only a few CPIs, targets about one beamwidth)

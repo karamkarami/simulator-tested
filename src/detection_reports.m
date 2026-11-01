@@ -6,14 +6,21 @@ function rep = detection_reports(dets, P, sys, wv, info)
 %   CPI centre and the SNR.
 %   The SNR uses the noise floor of the beam (median of its range-Doppler map
 %   scaled to the mean), which, unlike the CFAR noise estimate, is not raised
-%   by the range sidelobes of strong targets.
+%   by the range sidelobes of strong targets; with cfg.report.snrNoise =
+%   'cfar' it uses the CFAR noise estimate of the cell (dets.noise) instead,
+%   and the median is not computed.
 
 rep = struct('time_s', {}, 'az_deg', {}, 'range_m', {}, 'el_deg', {}, 'vr_mps', {}, ...
              'snr_dB', {}, 'power', {}, 'beam', {}, 'rIdx', {}, 'dIdx', {}, 'pulse', {});
 nB = sys.nBeams;
 if isempty(dets.beam), return; end
-noiseFloor = median(reshape(P, nB, []), 2) / sys.dop.medianToMean;   % per beam
 b = dets.beam(:);  rI = dets.rIdx(:);  dI = dets.dIdx(:);
+if isfield(sys, 'report') && strcmp(sys.report.snrNoise, 'cfar')
+    noise = dets.noise(:);                                             % CFAR window of the cell
+else
+    noiseFloor = median(reshape(P, nB, []), 2) / sys.dop.medianToMean;   % per beam
+    noise = noiseFloor(b);
+end
 n = numel(b);
 % Parabolic interpolation of the beam powers (dB) around the strongest beam
 u = sys.dbf.beamU(b);  u = u(:);
@@ -31,7 +38,7 @@ if ~isempty(mid)
         u(mid(ok)) = interp1(1:nB, sys.dbf.beamU, b(mid(ok)) + delta(ok));
     end
 end
-snr = 10*log10(max(double(dets.power(:) ./ noiseFloor(b)) - 1, eps));
+snr = 10*log10(max(double(dets.power(:) ./ noise) - 1, eps));
 rep = struct('time_s', info.tCenter_s, 'az_deg', info.azCenter_deg, ...
              'range_m', num2cell(reshape(wv.range_m(rI), 1, [])), ...
              'el_deg', num2cell(sys.ant.tilt_deg + asind(u.')), ...

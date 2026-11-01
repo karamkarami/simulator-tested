@@ -194,6 +194,10 @@ receiver asks for 32 MB; on Linux, allow it with
 elevation (NaN with one element), radial velocity (ambiguous, + = away),
 SNR, sub-pulse, number of CPI detections (hits), beam, range cell, Doppler
 bin (0-based) and pulse number.
+The SNR is power / noise - 1 with the noise floor of the beam (the median
+of its map, scaled to the mean) or, with `cfg.report.snrNoise = 'cfar'`,
+the CFAR noise estimate of the cell; the start of the console output says
+which (`SNR noise: ...`).
 
 **Serial frames** (little-endian; CRC-16/CCITT-FALSE, polynomial 0x1021,
 init 0xFFFF, over the bytes after the sync word up to the CRC):
@@ -323,7 +327,12 @@ The processing is written for x86 CPUs with AVX2:
   median of the previous update (about 1 % of them; one vectorised pass
   counts the values below the bracket and copies those inside it); a sample
   of 2048 values gives the bracket when that one misses. It took more time
-  than the CFAR itself with the histogram of the previous version.
+  than the CFAR itself with the histogram of the previous version. With
+  `cfg.report.snrNoise = 'cfar'` (record `snrNoise` of the configuration;
+  older files without it: median) the SNR uses the CFAR noise estimate of
+  the cell, which the CFAR keeps for its detections, and no median is
+  computed (about 0.03 ms less per PRI with one element; the SNR of a
+  target near a strong one or near clutter residue is too low).
 * Plot extractor: a detection joins the oldest open group near it, found in
   a hash grid of the cells (beam, range cell, Doppler bin / 8) instead of a
   search through all open groups (with a low threshold there are thousands).

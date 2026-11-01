@@ -77,6 +77,8 @@ typedef struct {
     unsigned char *det;         /* CFAR detections that are local peaks [bin][cell] */
     double *cntInv;             /* CFAR: 1 / training cells of every range cell (more at the edges) */
     double *thrScale;           /* CFAR: alpha * cntInv of every range cell       */
+    float  *noise;              /* CFAR noise estimate of the detected cells [bin][cell]
+                                   (cfg->snrNoise == SNR_NOISE_CFAR, else NULL)   */
     float  *lastMedian;         /* noise floor: median of every beam's map at its last
                                    computation (bracket of the next one; 0 = none) */
     float *pkM, *pkA;           /* dense sidelobe blanking: peak map, its maxima [bin][cell] */
@@ -274,6 +276,7 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
         s->det = xcalloc(map, 1);
         s->cntInv = xcalloc(s->nR, sizeof(double));
         s->thrScale = xcalloc(s->nR, sizeof(double));
+        if (cfg->snrNoise == SNR_NOISE_CFAR) s->noise = xcalloc(map, sizeof(float));
         s->lastMedian = xcalloc(cfg->nBeams, sizeof(float));
         {
             const int gR = cfg->guardRange, oR = gR + cfg->trainRange;
@@ -320,7 +323,7 @@ void processor_destroy(Processor *p)
         free(s->segRe); free(s->segIm); free(s->beamRe); free(s->beamIm);
         free(s->cpiRe); free(s->cpiIm); free(s->mtiRe); free(s->mtiIm);
         free(s->staggerIdx); free(s->az); free(s->time);
-        free(s->P); free(s->det); free(s->cntInv); free(s->thrScale); free(s->lastMedian);
+        free(s->P); free(s->det); free(s->cntInv); free(s->thrScale); free(s->noise); free(s->lastMedian);
         free(s->pkM); free(s->pkA); free(s->pkE); free(s->pkD); free(s->pkT);
         free(s->reports);
         if (s->mfFft) fft_plan_free(&s->mfPlan);
@@ -909,6 +912,15 @@ static void cfar_chunk(const Processor *p, PulseState *s, int b, int cf, int cl,
             unsigned char *det = s->det + (size_t)d * nCells + (size_t)b * nR;
             cfar_test_row(Pb + (size_t)d * nCells, aO, aG, s->thrScale, det, cf, cl, oR, nR);
             cfar_peaks_row(s, nfft, nB, b, d, cf, cl, w->colMax, det);
+            if (s->noise) {                                     /* SNR of the reports: CFAR noise */
+                float *nz = s->noise + (size_t)d * nCells + (size_t)b * nR;
+                const unsigned char *hit;
+                for (int r = cf; r <= cl && (hit = memchr(det + r, 1, (size_t)(cl - r + 1))) != NULL; r++) {
+                    r = (int)(hit - det);
+                    const int rc = r < oR ? oR : r > nR - 1 - oR ? nR - 1 - oR : r;
+                    nz[r] = (float)(s->cntInv[r] * (aO[rc] - aG[r]));
+                }
+            }
         }
         if (d == nfft - 1) break;
         /* slide the Doppler windows to bin d + 1 */
@@ -1307,10 +1319,11 @@ static void prune_and_report(const Processor *p, int pulse, PulseState *s)
     }
     double azCenter = atan2(sinSum / s->nSlots, cosSum / s->nSlots) * 180 / PI;
     azCenter = fmod(azCenter + 360.0, 360.0);
-    /* noise floors of the beams with detections, in parallel */
+    /* noise floors of the beams with detections, in parallel (not needed with
+     * the CFAR noise of every cell) */
     double *floors = xcalloc(nB, sizeof(double));
     int *beams = xcalloc(nB, sizeof(int)), nNeed = 0;
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n && !s->noise; i++)
         if (keep[i] && floors[cells[i].b] == 0) { floors[cells[i].b] = -1; beams[nNeed++] = cells[i].b; }
     #pragma omp parallel for schedule(dynamic) num_threads(team_size(p->nThreads, nNeed)) if(nNeed > 1)
     for (int j = 0; j < nNeed; j++)
@@ -1342,7 +1355,8 @@ static void prune_and_report(const Processor *p, int pulse, PulseState *s)
             }
             d.el_deg = cfg->tilt_deg + asin(u) * 180 / PI;
         }
-        double ratioSnr = c->pw / floors[c->b] - 1;
+        const double noise = s->noise ? s->noise[(size_t)c->d * s->nCells + (size_t)c->b * nR + c->r] : floors[c->b];
+        double ratioSnr = c->pw / noise - 1;
         d.snr_dB = 10 * log10(ratioSnr > DBL_EPSILON ? ratioSnr : DBL_EPSILON);
         d.power = c->pw;
         d.beam = c->b;  d.rIdx = c->r;  d.dIdx = c->d;

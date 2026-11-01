@@ -451,8 +451,9 @@ int main(int argc, char **argv)
             fprintf(stderr, "%s pulse: LFM, matched filter of %d taps (%.2f ... %.2f km)\n", pulse_name(i), pc->nTaps,
                     pc->range_m[0] / 1e3, pc->range_m[pc->nRange - 1] / 1e3);
     }
-    fprintf(stderr, "CFAR %s (window: range %d+%d, Doppler %d+%d guard+training cells per side), ", cfar_method_name(app.cfg.cfarMethod),
-            app.cfg.guardRange, app.cfg.trainRange, app.cfg.guardDoppler, app.cfg.trainDoppler);
+    fprintf(stderr, "CFAR %s (window: range %d+%d, Doppler %d+%d guard+training cells per side), SNR noise: %s, ",
+            cfar_method_name(app.cfg.cfarMethod), app.cfg.guardRange, app.cfg.trainRange, app.cfg.guardDoppler,
+            app.cfg.trainDoppler, app.cfg.snrNoise == SNR_NOISE_CFAR ? "CFAR window" : "median of the map");
     if (app.cfg.trackEnable)
         fprintf(stderr, "tracking: EKF %d-D, %s model, GNN association\n", app.cfg.trackDim,
                 app.cfg.trackModel == TRACK_CA ? "constant-acceleration" : "constant-velocity");

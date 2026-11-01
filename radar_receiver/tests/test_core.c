@@ -250,7 +250,7 @@ static int16_t sat16(double v)
  * a mismatch filter the echo starts mfShift samples after the start of the
  * target cell (its range axis). Noise 16 LSB rms per component like the
  * simulator's DDC output. */
-static int test_end_to_end(const char *configPath, int mfDirect, double threshold_dB, Detection *plotOut)
+static int test_end_to_end(const char *configPath, int mfDirect, double threshold_dB, Detection *plotOut, int snrNoise)
 {
     RadarConfig cfg;
     char err[256];
@@ -259,6 +259,7 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
         return 0;
     }
     cfg.mfMethod = mfDirect ? MF_DIRECT : MF_AUTO;
+    cfg.snrNoise = snrNoise;
     CHECK(cfg.nCh >= 1 && cfg.nDdc > 0 && cfg.cpiLength > 0, "configuration sizes");
     CHECK(cfg.pulse[PULSE_SHORT].ddcFirst < cfg.pulse[PULSE_LONG].ddcFirst, "short pulse before the long one");
     printf("config: %d channels, %d beams, %d DDC samples, CPI %d, nfft %d, %s PRF, %s matched filter\n",
@@ -421,7 +422,7 @@ int main(int argc, char **argv)
     if (argc > 1) {
         /* fast convolution (where cheaper) and direct matched filter: same plot */
         Detection a, b;
-        if (test_end_to_end(argv[1], 0, NAN, &a) && test_end_to_end(argv[1], 1, NAN, &b)) {
+        if (test_end_to_end(argv[1], 0, NAN, &a, SNR_NOISE_MEDIAN) && test_end_to_end(argv[1], 1, NAN, &b, SNR_NOISE_MEDIAN)) {
             CHECK(a.rIdx == b.rIdx && a.dIdx == b.dIdx && a.beam == b.beam && a.hits == b.hits,
                   "fast and direct matched filter give different plots");
             CHECK(fabs(a.snr_dB - b.snr_dB) < 0.01 && fabs(a.power / b.power - 1) < 1e-4,
@@ -429,7 +430,18 @@ int main(int argc, char **argv)
                   a.snr_dB, b.snr_dB, a.power / b.power);
         }
         /* the same target with the CFAR threshold raised far above its peak (run-time change) */
-        test_end_to_end(argv[1], 0, 45.0, &a);
+        test_end_to_end(argv[1], 0, 45.0, &a, SNR_NOISE_MEDIAN);
+        /* the SNR with the CFAR noise of the cell instead of the median of the map:
+         * the same plot, a target alone in noise has nearly the same SNR */
+        Detection c;
+        if (test_end_to_end(argv[1], 0, NAN, &c, SNR_NOISE_CFAR) && test_end_to_end(argv[1], 0, NAN, &a, SNR_NOISE_MEDIAN)) {
+            CHECK(a.rIdx == c.rIdx && a.dIdx == c.dIdx && a.beam == c.beam && a.hits == c.hits && a.power == c.power,
+                  "the SNR noise changes the plot");
+            CHECK(fabs(a.snr_dB - c.snr_dB) < 1.5, "SNR with the median %.2f dB, with the CFAR noise %.2f dB",
+                  a.snr_dB, c.snr_dB);
+            printf("SNR of the target: %.2f dB with the median of the map, %.2f dB with the CFAR noise\n",
+                   a.snr_dB, c.snr_dB);
+        }
         test_cfar_pfa(argv[1]);
     } else {
         printf("no configuration file given: end-to-end test skipped\n");
