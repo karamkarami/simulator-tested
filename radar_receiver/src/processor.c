@@ -7,19 +7,25 @@
  *   equalisation) -> 2-D CA-CFAR -> pruning -> detection reports -> plot
  *   extraction.
  *
- * Speed: long matched filters run as fast convolution (FFT, identical result
- * to the valid convolution); the MTI output of every pulse is computed once
- * and kept in a ring buffer; the Doppler FFTs of all beam/range cells run
- * together (cells are the fast index, so the loops vectorise) in cache-sized
- * blocks (radix-2^2); the CFAR works beam by beam (range sums from partial
- * sums, running Doppler sums) so its data stays in the cache; the noise
- * floor median uses a histogram; DBF, matched filter, Doppler, CFAR and the
- * noise floors are split over threads with OpenMP. Work buffers are
- * allocated once.
+ * Speed: long matched filters run as fast convolution (FFT, the valid
+ * convolution within float rounding; a single beam as a four-step FFT whose
+ * 8 sub-FFTs fill a vector); the MTI output of every pulse is computed once
+ * and kept in a ring buffer stored by cell blocks; the Doppler FFTs of all
+ * beam/range cells run together (cells are the fast index, so the loops
+ * vectorise) in blocks that fit the L1 cache (radix-2^2); the CFAR works
+ * beam by beam, or by range chunks with one beam (range sums from partial
+ * sums in a ring of a few Doppler rows, running Doppler sums) so its data
+ * stays in the cache, and it marks only the cells that are also local peaks
+ * (the first pruning step); the noise floor median is selected among the few
+ * values of a bracket around the previous median; the plot extractor finds
+ * the groups near a detection in a hash grid; DBF, matched filter, Doppler,
+ * CFAR and the noise floors are split over threads with OpenMP. Work buffers
+ * are allocated once.
  *
  * Array layouts (float, real and imaginary parts in separate arrays):
  *   cell             = beam * nRange + rangeCell
- *   CPI / MTI buffer = [slot][cell]
+ *   CPI buffer       = [slot][cell]
+ *   MTI buffer       = [cellBlock][slot][CELL_BLOCK]   (cell = cellBlock * CELL_BLOCK + c)
  *   power map P      = [dopplerBin][cell]   (Doppler after fftshift)
  */
 #include "radar_rx.h"
@@ -34,12 +40,14 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 #define PI 3.14159265358979323846
-#define CELL_BLOCK 64           /* cells per Doppler FFT block (fits the L1/L2 cache) */
+#define CELL_BLOCK 32           /* cells per Doppler FFT block (32 KB: fits the L1 cache) */
 #define MF_LANES   24           /* beams per fast-convolution chunk (3 AVX registers) */
-#define HIST_SHIFT 19           /* noise floor median: histogram of float bits >> 19 */
-#define HIST_BINS  (1 << (32 - HIST_SHIFT))
+#define MEDIAN_SAMPLE 2048      /* noise floor: sample that brackets the median */
 
 #if defined(__clang__)
 #  define IVDEP _Pragma("clang loop vectorize(assume_safety)")
@@ -57,7 +65,7 @@ typedef struct {
     float *beamRe, *beamIm;     /* beamformer output [beam][n]                    */
     float *cpiRe, *cpiIm;       /* matched filter outputs of the newest nMtiTaps
                                    pulses (all the MTI needs) [mfSlot][cell]      */
-    float *mtiRe, *mtiIm;       /* MTI outputs [slot][cell]                       */
+    float *mtiRe, *mtiIm;       /* MTI outputs [cell block][slot][CELL_BLOCK]     */
     int    last, count, nPushed;            /* CPI buffer state                   */
     int    mfLast;                          /* newest slot of cpiRe/cpiIm         */
     int    sinceUpdate;                     /* pulses since the last performed update */
@@ -66,8 +74,11 @@ typedef struct {
     double   *az, *time;
     uint32_t newestPulse;
     float *P;                   /* power map [bin][cell]                          */
-    unsigned char *det;         /* CFAR detections [bin][cell]                    */
+    unsigned char *det;         /* CFAR detections that are local peaks [bin][cell] */
     double *cntInv;             /* CFAR: 1 / training cells of every range cell (more at the edges) */
+    double *thrScale;           /* CFAR: alpha * cntInv of every range cell       */
+    float  *lastMedian;         /* noise floor: median of every beam's map at its last
+                                   computation (bracket of the next one; 0 = none) */
     float *pkM, *pkA;           /* dense sidelobe blanking: peak map, its maxima [bin][cell] */
     float *pkE, *pkD, *pkT;     /* maxima over the beams [bin][r], over Doppler [beam][r], temp */
     Detection *reports;         /* pruned detections of the latest CPI           */
@@ -75,18 +86,22 @@ typedef struct {
     Extractor ext;
     /* matched filter by fast convolution (used when cheaper than direct) */
     int    mfFft, mfN, mfChunks;
-    FftPlan mfPlan;
+    int    mfFour;              /* one beam: FFT of length mfN as 8 FFTs of mfN/8 (four-step) */
+    FftPlan mfPlan, mfPlanQ, mfPlan8;   /* lengths mfN; mfN/8 and 8 (four-step)  */
     float *mfHre, *mfHim;       /* FFT of the zero-padded taps, divided by mfN    */
-    float *mfWork;              /* per chunk: Xre, Xim, Yre, Yim [mfN][MF_LANES]  */
+    float *mfTwRe, *mfTwIm;     /* four-step twiddles exp(-2 pi j n1 k2 / mfN) [8][mfN/8] */
+    float *mfWork;              /* per chunk: Xre, Xim, Yre, Yim [mfN][MF_LANES]
+                                   (four-step: Are, Aim, Bre, Bim [mfN])           */
 } PulseState;
 
 typedef struct {                /* work buffers of one thread                      */
     float  *xr, *xi;            /* Doppler: one cell block [nfft][CELL_BLOCK]     */
-    float  *sumO, *sumG;        /* CFAR: range box sums of one beam [nfft][nR]    */
+    float  *ringO, *ringG;      /* CFAR: range box sums of the Doppler rows d-oD ... d+1+oD
+                                   of one beam [ringRows][maxNR]                  */
     float  *partial;            /* CFAR: partial range sums, 6 x (maxNR + 2*oR + 32) */
     double *accO, *accG;        /* CFAR: Doppler running sums [nR]                */
-    uint32_t *hist;             /* noise floor: histogram of the float keys       */
-    float  *work;               /* noise floor: median candidates [nfft*maxNR]    */
+    float  *colMax;             /* CFAR: maxima over the neighbouring beams and bins [nR + 2] */
+    float  *work;               /* noise floor: median candidates [nfft*maxNR + 8] */
 } Scratch;
 
 struct Processor {
@@ -94,6 +109,7 @@ struct Processor {
     FftPlan fft;
     PulseState ps[N_PULSES];
     int nThreads;
+    int ringRows;               /* CFAR: rows of the range sum ring (2*oD + 2)    */
     Scratch *scratch;           /* [nThreads] */
     int slowTime;               /* 0: skip the Doppler/CFAR updates (overload)    */
     double alpha;               /* CA-CFAR threshold factor in use                */
@@ -155,24 +171,43 @@ static int team_size(int nThreads, int nWork)
     return nWork < nThreads ? (nWork > 1 ? nWork : 1) : nThreads;
 }
 
+/* Noise floor median: lane numbers of the set bits of every 8-bit mask, in
+ * order, and their count (left-packing of 8 values with AVX2). The same
+ * values are written by every processor_create. */
+static uint8_t g_packIdx[256][8], g_packCnt[256];
+
+static void init_pack_table(void)
+{
+    for (int m = 0; m < 256; m++) {
+        int k = 0;
+        for (int lane = 0; lane < 8; lane++)
+            if (m >> lane & 1) g_packIdx[m][k++] = (uint8_t)lane;
+        g_packCnt[m] = (uint8_t)k;
+    }
+}
+
 /* Fast convolution of the matched filter: FFT length and the FFT of the taps.
  * It is used when its estimated time is shorter than that of the direct
  * convolution (which is split over the threads beam by beam; the FFTs of
- * MF_LANES beams run in one thread). Costs per operation measured on an
- * AVX2 Xeon: 0.3 ns per complex MAC (direct), 0.6 ns per FFT unit. */
+ * MF_LANES beams run in one thread; a single beam is split into the 8
+ * interleaved sub-FFTs of a four-step FFT instead, which fill the vectors).
+ * Costs per operation measured on an AVX2 Xeon: 0.3 ns per complex MAC
+ * (direct), 0.6 ns per FFT unit (N log2 N + N per beam, or per sub-pulse
+ * with the four-step FFT). */
 static int mf_fft_init(const RadarConfig *cfg, const PulseConfig *pc, PulseState *s, int method, int nThreads)
 {
     int N = 1;
     while (N < pc->ddcCount) N *= 2;
     int log2N = 0;
     while ((1 << log2N) < N) log2N++;
-    const int nChunks = (cfg->nBeams + MF_LANES - 1) / MF_LANES;
+    const int nChunks = (cfg->nBeams + MF_LANES - 1) / MF_LANES, four = cfg->nBeams == 1 && N >= 64;
     const double direct = 0.3 * pc->nTaps * pc->nRange * cfg->nBeams / team_size(nThreads, cfg->nBeams);
-    const double fast = 0.6 * ((double)N * log2N + N) * nChunks * MF_LANES / team_size(nThreads, nChunks);
+    const double fast = 0.6 * ((double)N * log2N + N) * (four ? 1.0 : (double)nChunks * MF_LANES / team_size(nThreads, nChunks));
     s->mfFft = method == MF_FFT || (method == MF_AUTO && fast < direct);
     if (!s->mfFft) return 0;
     s->mfN = N;
     s->mfChunks = nChunks;
+    s->mfFour = four;
     if (fft_plan_init(&s->mfPlan, N) != 0) return -1;
     s->mfHre = xcalloc(N, sizeof(float));
     s->mfHim = xcalloc(N, sizeof(float));
@@ -181,6 +216,20 @@ static int mf_fft_init(const RadarConfig *cfg, const PulseConfig *pc, PulseState
         s->mfHim[s->mfPlan.bitrev[j]] = pc->tapsIm[j] / N;
     }
     fft_rows(&s->mfPlan, s->mfHre, s->mfHim, 1, 1);
+    if (four) {
+        const int Q = N / 8;
+        if (fft_plan_init(&s->mfPlanQ, Q) != 0 || fft_plan_init(&s->mfPlan8, 8) != 0) return -1;
+        s->mfTwRe = xcalloc(N, sizeof(float));
+        s->mfTwIm = xcalloc(N, sizeof(float));
+        for (int n1 = 0; n1 < 8; n1++)
+            for (int k2 = 0; k2 < Q; k2++) {
+                const double a = -2.0 * PI * n1 * k2 / N;
+                s->mfTwRe[n1 * Q + k2] = (float)cos(a);
+                s->mfTwIm[n1 * Q + k2] = (float)sin(a);
+            }
+        s->mfWork = xcalloc(4 * (size_t)N, sizeof(float));
+        return 0;
+    }
     s->mfWork = xcalloc((size_t)s->mfChunks * 4 * N * MF_LANES, sizeof(float));
     return 0;
 }
@@ -211,7 +260,8 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
         s->nSlots = cfg->cpiLength;
         s->nMtiOut = cfg->cpiLength - cfg->nMtiTaps + 1;
         size_t seg = (size_t)cfg->nCh * pc->ddcCount, beams = (size_t)cfg->nBeams * pc->ddcCount;
-        size_t cpi = (size_t)cfg->nMtiTaps * s->nCells, mti = (size_t)s->nMtiOut * s->nCells;
+        size_t cpi = (size_t)cfg->nMtiTaps * s->nCells;
+        size_t mti = (size_t)(s->nCells + CELL_BLOCK - 1) / CELL_BLOCK * s->nMtiOut * CELL_BLOCK;
         size_t map = (size_t)cfg->nfft * s->nCells;
         s->segRe = xcalloc(seg, sizeof(float));   s->segIm = xcalloc(seg, sizeof(float));
         s->beamRe = xcalloc(beams, sizeof(float)); s->beamIm = xcalloc(beams, sizeof(float));
@@ -223,6 +273,8 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
         s->P = xcalloc(map, sizeof(float));
         s->det = xcalloc(map, 1);
         s->cntInv = xcalloc(s->nR, sizeof(double));
+        s->thrScale = xcalloc(s->nR, sizeof(double));
+        s->lastMedian = xcalloc(cfg->nBeams, sizeof(float));
         {
             const int gR = cfg->guardRange, oR = gR + cfg->trainRange;
             const int gD = cfg->guardDoppler, oD = gD + cfg->trainDoppler;
@@ -234,23 +286,26 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
         }
         if (mf_fft_init(cfg, pc, s, cfg->mfMethod, nThr) != 0) { processor_destroy(p); return NULL; }
         extractor_init(&s->ext, cfg->nfft, cfg->minHits, cfg->maxMiss);
+        s->ext.nBeams = cfg->nBeams;
         reset_buffers(s);
     }
     const size_t partialLen = (size_t)maxNR + 2 * (cfg->guardRange + cfg->trainRange) + 32;
     p->nThreads = nThr;
+    p->ringRows = 2 * (cfg->guardDoppler + cfg->trainDoppler) + 2;
     p->slowTime = 1;
     p->alpha = cfg->alpha;
     if (cfg->trackEnable) tracker_init(&p->tracker, cfg);
+    init_pack_table();
     p->scratch = xcalloc(nThr, sizeof(Scratch));
     for (int t = 0; t < nThr; t++) {
         Scratch *w = &p->scratch[t];
         w->xr = xcalloc((size_t)cfg->nfft * CELL_BLOCK, sizeof(float));
         w->xi = xcalloc((size_t)cfg->nfft * CELL_BLOCK, sizeof(float));
-        w->sumO = xcalloc((size_t)cfg->nfft * maxNR, sizeof(float));
-        w->sumG = xcalloc((size_t)cfg->nfft * maxNR, sizeof(float));
+        w->ringO = xcalloc((size_t)p->ringRows * maxNR, sizeof(float));
+        w->ringG = xcalloc((size_t)p->ringRows * maxNR, sizeof(float));
         w->partial = xcalloc(6 * partialLen, sizeof(float));
-        w->hist = xcalloc(HIST_BINS, sizeof(uint32_t));
-        w->work = xcalloc((size_t)cfg->nfft * maxNR, sizeof(float));
+        w->colMax = xcalloc((size_t)maxNR + 2, sizeof(float));
+        w->work = xcalloc((size_t)cfg->nfft * maxNR + 8, sizeof(float));
         w->accO = xcalloc(maxNR, sizeof(double));
         w->accG = xcalloc(maxNR, sizeof(double));
     }
@@ -265,16 +320,18 @@ void processor_destroy(Processor *p)
         free(s->segRe); free(s->segIm); free(s->beamRe); free(s->beamIm);
         free(s->cpiRe); free(s->cpiIm); free(s->mtiRe); free(s->mtiIm);
         free(s->staggerIdx); free(s->az); free(s->time);
-        free(s->P); free(s->det); free(s->cntInv);
+        free(s->P); free(s->det); free(s->cntInv); free(s->thrScale); free(s->lastMedian);
         free(s->pkM); free(s->pkA); free(s->pkE); free(s->pkD); free(s->pkT);
         free(s->reports);
         if (s->mfFft) fft_plan_free(&s->mfPlan);
-        free(s->mfHre); free(s->mfHim); free(s->mfWork);
+        if (s->mfFour) { fft_plan_free(&s->mfPlanQ); fft_plan_free(&s->mfPlan8); }
+        free(s->mfHre); free(s->mfHim); free(s->mfTwRe); free(s->mfTwIm); free(s->mfWork);
         extractor_free(&s->ext);
     }
     for (int t = 0; p->scratch && t < p->nThreads; t++) {
         Scratch *w = &p->scratch[t];
-        free(w->xr); free(w->xi); free(w->sumO); free(w->sumG); free(w->partial); free(w->hist); free(w->work); free(w->accO); free(w->accG);
+        free(w->xr); free(w->xi); free(w->ringO); free(w->ringG); free(w->partial); free(w->colMax); free(w->work);
+        free(w->accO); free(w->accG);
     }
     free(p->scratch);
     fft_plan_free(&p->fft);
@@ -468,10 +525,78 @@ static void matched_filter_fft(const RadarConfig *cfg, const PulseConfig *pc, Pu
     }
 }
 
+/* Four-step FFT of length N = 8Q of one signal: A holds x[n1 + 8 n2] in row
+ * bitrev_Q(n2), lane n1 ([Q][8]; overwritten). The 8 interleaved FFTs of
+ * length Q run as the lanes of one vector, they are multiplied by the
+ * twiddles exp(-2 pi j n1 k2 / N), and the FFTs of length 8 over the lanes
+ * give B[k1 Q + k2] = X[k2 + Q k1]: X in natural order. */
+static void fft_four_step(const PulseState *s, float *Ar, float *Ai, float *restrict Br, float *restrict Bi)
+{
+    const int Q = s->mfN / 8;
+    const int *rev8 = s->mfPlan8.bitrev;
+    fft_rows(&s->mfPlanQ, Ar, Ai, 8, 8);
+    for (int k0 = 0; k0 < Q; k0 += 8) {                    /* transpose 8 x 8 blocks, twiddles */
+        float tr[8][8], ti[8][8];
+        for (int k = 0; k < 8; k++)
+            for (int n1 = 0; n1 < 8; n1++) {
+                tr[n1][k] = Ar[(k0 + k) * 8 + n1];
+                ti[n1][k] = Ai[(k0 + k) * 8 + n1];
+            }
+        for (int n1 = 0; n1 < 8; n1++) {
+            float *restrict br = Br + (size_t)rev8[n1] * Q + k0, *restrict bi = Bi + (size_t)rev8[n1] * Q + k0;
+            const float *restrict wr = s->mfTwRe + (size_t)n1 * Q + k0, *restrict wi = s->mfTwIm + (size_t)n1 * Q + k0;
+            for (int k = 0; k < 8; k++) {
+                br[k] = tr[n1][k] * wr[k] - ti[n1][k] * wi[k];
+                bi[k] = tr[n1][k] * wi[k] + ti[n1][k] * wr[k];
+            }
+        }
+    }
+    fft_rows(&s->mfPlan8, Br, Bi, Q, Q);
+}
+
+/* Fast convolution of the single beam (no DBF) with four-step FFTs, as
+ * matched_filter_fft: X = FFT(x), conj(FFT(conj(X H))) at the valid outputs. */
+static void matched_filter_four(const PulseConfig *pc, PulseState *s, int slot)
+{
+    const int N = s->mfN, Q = N / 8, n = pc->ddcCount, L = pc->nTaps, nR = s->nR;
+    const int *revQ = s->mfPlanQ.bitrev;
+    float *Ar = s->mfWork, *Ai = Ar + N, *Br = Ai + N, *Bi = Br + N;
+    for (int n2 = 0; n2 < Q; n2++) {                        /* zero padded beam into the rows */
+        float *dr = Ar + (size_t)revQ[n2] * 8, *di = Ai + (size_t)revQ[n2] * 8;
+        const int m0 = 8 * n2, k = n - m0 < 0 ? 0 : n - m0 > 8 ? 8 : n - m0;
+        if (k > 0) {
+            memcpy(dr, s->beamRe + m0, sizeof(float) * k);
+            memcpy(di, s->beamIm + m0, sizeof(float) * k);
+        }
+        memset(dr + k, 0, sizeof(float) * (8 - k));
+        memset(di + k, 0, sizeof(float) * (8 - k));
+    }
+    fft_four_step(s, Ar, Ai, Br, Bi);
+    for (int n2 = 0; n2 < Q; n2++) {                        /* conj(X * H) into the rows      */
+        float *dr = Ar + (size_t)revQ[n2] * 8, *di = Ai + (size_t)revQ[n2] * 8;
+        for (int n1 = 0; n1 < 8; n1++) {
+            const int k = 8 * n2 + n1;
+            const float xr = Br[k], xi = Bi[k], hr = s->mfHre[k], hi = s->mfHim[k];
+            dr[n1] = xr * hr - xi * hi;
+            di[n1] = -(xr * hi + xi * hr);
+        }
+    }
+    fft_four_step(s, Ar, Ai, Br, Bi);
+    float *outR = s->cpiRe + (size_t)slot * s->nCells, *outI = s->cpiIm + (size_t)slot * s->nCells;
+    for (int r = 0; r < nR; r++) {                          /* valid outputs, conjugated      */
+        outR[r] = Br[r + L - 1];
+        outI[r] = -Bi[r + L - 1];
+    }
+}
+
 /* Valid convolution of every beam with the matched filter, written into the
  * CPI buffer slot: y[r] = sum_j h[j] * x[r + nTaps - 1 - j]. */
 static void matched_filter(const RadarConfig *cfg, const PulseConfig *pc, PulseState *s, int slot, int nThreads)
 {
+    if (s->mfFour) {
+        matched_filter_four(pc, s, slot);
+        return;
+    }
     if (s->mfFft) {
         matched_filter_fft(cfg, pc, s, slot, nThreads);
         return;
@@ -499,6 +624,14 @@ static void matched_filter(const RadarConfig *cfg, const PulseConfig *pc, PulseS
 /* Slow time: MTI and Doppler                                               */
 /* ------------------------------------------------------------------------ */
 
+/* Row of the MTI ring: the cells c0 ... c0+CELL_BLOCK-1 of cell block blk in
+ * slot slot ([block][slot][CELL_BLOCK]: the Doppler processing of a block
+ * reads contiguous memory). */
+static float *mti_row(const PulseState *s, float *ring, int blk, int slot)
+{
+    return ring + ((size_t)blk * s->nMtiOut + slot) * CELL_BLOCK;
+}
+
 /* MTI output of the newest L pulses: sum_l c[stagger of the oldest][l] * x[oldest + l]. */
 static void mti_newest(const RadarConfig *cfg, PulseState *s)
 {
@@ -506,19 +639,23 @@ static void mti_newest(const RadarConfig *cfg, PulseState *s)
     const int first = (s->last - (L - 1) + N) % N;               /* oldest pulse of the output */
     const double *c = cfg->mtiCoeffs + (size_t)(s->staggerIdx[first] - 1) * L;
     const int firstMf = (s->mfLast + 1) % L;                     /* its matched filter output  */
+    const int nBlocks = (s->nCells + CELL_BLOCK - 1) / CELL_BLOCK;
     s->mtiLast = (s->mtiLast + 1) % s->nMtiOut;
-    float *restrict yr = s->mtiRe + (size_t)s->mtiLast * s->nCells;
-    float *restrict yi = s->mtiIm + (size_t)s->mtiLast * s->nCells;
-    memset(yr, 0, sizeof(float) * s->nCells);
-    memset(yi, 0, sizeof(float) * s->nCells);
-    for (int l = 0; l < L; l++) {
-        const float w = (float)c[l];
-        const int slot = (firstMf + l) % L;
-        const float *restrict xr = s->cpiRe + (size_t)slot * s->nCells;
-        const float *restrict xi = s->cpiIm + (size_t)slot * s->nCells;
-        for (int k = 0; k < s->nCells; k++) {
-            yr[k] += w * xr[k];
-            yi[k] += w * xi[k];
+    for (int blk = 0; blk < nBlocks; blk++) {
+        const int c0 = blk * CELL_BLOCK, nc = s->nCells - c0 < CELL_BLOCK ? s->nCells - c0 : CELL_BLOCK;
+        float *restrict yr = mti_row(s, s->mtiRe, blk, s->mtiLast);
+        float *restrict yi = mti_row(s, s->mtiIm, blk, s->mtiLast);
+        memset(yr, 0, sizeof(float) * CELL_BLOCK);
+        memset(yi, 0, sizeof(float) * CELL_BLOCK);
+        for (int l = 0; l < L; l++) {
+            const float w = (float)c[l];
+            const int slot = (firstMf + l) % L;
+            const float *restrict xr = s->cpiRe + (size_t)slot * s->nCells + c0;
+            const float *restrict xi = s->cpiIm + (size_t)slot * s->nCells + c0;
+            for (int k = 0; k < nc; k++) {
+                yr[k] += w * xr[k];
+                yi[k] += w * xi[k];
+            }
         }
     }
     if (s->mtiCount < s->nMtiOut) s->mtiCount++;
@@ -561,8 +698,8 @@ static void doppler(const Processor *p, PulseState *s)
                     const int q = j * nRows + row;                       /* chronological index */
                     const int slot = (s->mtiLast - (nUsed - 1) + q + 2 * s->nMtiOut) % s->nMtiOut;
                     const float w = cfg->dopWindow[j];
-                    const float *sr = s->mtiRe + (size_t)slot * s->nCells + c0;
-                    const float *si = s->mtiIm + (size_t)slot * s->nCells + c0;
+                    const float *restrict sr = mti_row(s, s->mtiRe, blk, slot);
+                    const float *restrict si = mti_row(s, s->mtiIm, blk, slot);
                     for (int c = 0; c < nc; c++) {
                         dr[c] = w * sr[c];
                         di[c] = w * si[c];
@@ -594,12 +731,15 @@ static void doppler(const Processor *p, PulseState *s)
 /* 2-D CA-CFAR                                                              */
 /* ------------------------------------------------------------------------ */
 
-/* Range box sums of one range row x (zero padded): yO[r] = sum of x over
- * r-hO ... r+hO, yG[r] over r-hG ... r+hG. Partial sums of 1, 2, 4, 8, ...
- * neighbouring values are built with vectorised passes, and every window
- * is the sum of the partial sums given by the binary digits of its length
- * (no running sum, so no rounding drift). buf: 6 x (nR + 2*hO + 32) floats. */
-static void range_box_sums(const float *x, float *yO, float *yG, int nR, int hO, int hG, float *buf)
+/* Range box sums of the range segment x[0 ... nR-1] (zero outside it):
+ * yO[r] = sum of x over r-hO ... r+hO, yG[r] over r-hG ... r+hG, for
+ * r = o0 ... o0+no-1 (yO, yG are indexed like x). Partial sums of 1, 2, 4,
+ * 8, ... neighbouring values are built with vectorised passes, and every
+ * window is the sum of the partial sums given by the binary digits of its
+ * length, added in one pass (no running sum, so no rounding drift; a sum
+ * depends only on the values of its window, so any segment that holds the
+ * window gives the same float result). buf: 6 x (nR + 2*hO + 32) floats. */
+static void range_box_sums(const float *x, float *yO, float *yG, int nR, int o0, int no, int hO, int hG, float *buf)
 {
     const int L = nR + 2 * hO, ld = L + 32;
     const int wO = 2 * hO + 1, wG = 2 * hG + 1;
@@ -619,16 +759,90 @@ static void range_box_sums(const float *x, float *yO, float *yG, int nR, int hO,
     const int width[2] = { wO, wG }, start[2] = { 0, hO - hG };
     float *out[2] = { yO, yG };
     for (int w = 0; w < 2; w++) {
-        int off = start[w], first = 1;
+        const float *t[6];                              /* the terms, largest first */
+        int nt = 0, off = start[w];
         for (int k = top; k >= 0; k--) {
             if (!(width[w] & (1 << k))) continue;
-            const float *restrict a = part[k] + off;
-            float *restrict y = out[w];
-            if (first) for (int r = 0; r < nR; r++) y[r] = a[r];
-            else       for (int r = 0; r < nR; r++) y[r] += a[r];
-            first = 0;
+            t[nt++] = part[k] + off;
             off += 1 << k;
         }
+        float *restrict y = out[w];
+        const float *restrict t0 = t[0], *restrict t1 = t[nt > 1 ? 1 : 0], *restrict t2 = t[nt > 2 ? 2 : 0];
+        const float *restrict t3 = t[nt > 3 ? 3 : 0], *restrict t4 = t[nt > 4 ? 4 : 0], *restrict t5 = t[nt > 5 ? 5 : 0];
+        const int r1 = o0 + no;
+        switch (nt) {                                   /* one pass, added in the same order */
+        case 1:  for (int r = o0; r < r1; r++) y[r] = t0[r]; break;
+        case 2:  for (int r = o0; r < r1; r++) y[r] = t0[r] + t1[r]; break;
+        case 3:  for (int r = o0; r < r1; r++) y[r] = t0[r] + t1[r] + t2[r]; break;
+        case 4:  for (int r = o0; r < r1; r++) y[r] = t0[r] + t1[r] + t2[r] + t3[r]; break;
+        case 5:  for (int r = o0; r < r1; r++) y[r] = t0[r] + t1[r] + t2[r] + t3[r] + t4[r]; break;
+        default: for (int r = o0; r < r1; r++) y[r] = t0[r] + t1[r] + t2[r] + t3[r] + t4[r] + t5[r]; break;
+        }
+    }
+}
+
+/* The cell (b, r, d) is a local peak: no neighbour in beam (b-1 ... b+1),
+ * range (r-1 ... r+1) and Doppler (d-1 ... d+1, circular) is stronger (as
+ * prune_peaks.m). */
+static int is_peak(const PulseState *s, int nfft, int nB, int b, int r, int d)
+{
+    const int nR = s->nR;
+    const float v = s->P[(size_t)d * s->nCells + (size_t)b * nR + r];
+    for (int dd = -1; dd <= 1; dd++) {
+        const float *row = s->P + (size_t)((d + dd + nfft) % nfft) * s->nCells;
+        for (int bb = b > 0 ? b - 1 : 0; bb <= b + 1 && bb < nB; bb++)
+            for (int rr = r > 0 ? r - 1 : 0; rr <= r + 1 && rr < nR; rr++)
+                if (row[(size_t)bb * nR + rr] > v) return 0;
+    }
+    return 1;
+}
+
+/* Threshold test of the cells f ... l of one Doppler row: det[r] = P[r] >
+ * alpha/nTrain(r) * (outer sum - guard sum), with the outer sum of the centre
+ * rc of the (shifted) range window. Three loops (left edge, interior, right
+ * edge), so that the interior one vectorises. */
+static void cfar_test_row(const float *restrict P, const double *restrict aO, const double *restrict aG,
+                          const double *restrict ts, unsigned char *restrict det, int f, int l, int oR, int nR)
+{
+    const int e0 = l < oR - 1 ? l : oR - 1, e1 = l < nR - 1 - oR ? l : nR - 1 - oR;
+    int r = f;
+    for (; r <= e0; r++) det[r] = P[r] > ts[r] * (aO[oR] - aG[r]);                   /* rc = oR       */
+    for (; r <= e1; r++) det[r] = P[r] > ts[r] * (aO[r] - aG[r]);                    /* rc = r        */
+    for (; r <= l; r++) det[r] = P[r] > ts[r] * (aO[nR - 1 - oR] - aG[r]);           /* rc = nR-1-oR  */
+}
+
+/* Keeps in det[f ... l] (one Doppler row d of beam b) only the local peaks.
+ * Many detections in the row (a low threshold): one vectorised pass with the
+ * maxima over the neighbouring beams and Doppler bins (cm, nR + 2 floats),
+ * whose cost does not depend on the threshold; few: each one is checked. */
+static void cfar_peaks_row(const PulseState *s, int nfft, int nB, int b, int d, int f, int l, float *cm,
+                           unsigned char *restrict det)
+{
+    const int nR = s->nR;
+    int nDet = 0;
+    for (int r = f; r <= l; r++) nDet += det[r];
+    if (nDet == 0) return;
+    if (8 * nDet < l - f + 1) {
+        for (int r = f; r <= l; r++)
+            if (det[r] && !is_peak(s, nfft, nB, b, r, d)) det[r] = 0;
+        return;
+    }
+    const int ra = f > 0 ? f - 1 : 0, rb = l < nR - 1 ? l + 1 : nR - 1;
+    float *restrict c = cm + 1;                                  /* c[-1] ... c[nR] */
+    c[-1] = c[nR] = -FLT_MAX;                                    /* no neighbour outside the range */
+    for (int r = ra; r <= rb; r++) c[r] = -FLT_MAX;
+    for (int dd = -1; dd <= 1; dd++) {
+        const float *row = s->P + (size_t)((d + dd + nfft) % nfft) * s->nCells;
+        for (int bb = b > 0 ? b - 1 : 0; bb <= b + 1 && bb < nB; bb++) {
+            const float *restrict x = row + (size_t)bb * nR;
+            for (int r = ra; r <= rb; r++) c[r] = c[r] > x[r] ? c[r] : x[r];
+        }
+    }
+    const float *restrict x = s->P + (size_t)d * s->nCells + (size_t)b * nR;
+    for (int r = f; r <= l; r++) {
+        float m = c[r - 1] > c[r] ? c[r - 1] : c[r];
+        m = m > c[r + 1] ? m : c[r + 1];
+        det[r] = (unsigned char)(det[r] & (x[r] >= m));
     }
 }
 
@@ -639,65 +853,101 @@ static void range_box_sums(const float *x, float *yO, float *yG, int nR, int hO,
  * window is shifted inwards: its sum is the centred sum of the nearest cell
  * whose window lies inside the data (rc), the guard window is cut at the edge,
  * and the noise is divided by the actual number of training cells
- * (s->cntInv). One beam at a time: range box sums of every Doppler bin, then
- * running sums along Doppler (double, no drift), fused with the test. */
+ * (s->cntInv). One beam at a time: the range box sums of the Doppler rows
+ * d-oD ... d+1+oD are kept in a ring (a few rows, so they stay in the cache),
+ * the running sums along Doppler are double (no drift); the sums and
+ * decisions are the same as from range sums of the whole map.
+ * det marks the detections that are also local peaks (prune_peaks.m: the
+ * maximum of their 3 x 3 x 3 neighbourhood in beam x range x Doppler, also
+ * for the 1-D windows, since a target spreads over range and Doppler cells
+ * whatever the window). Both conditions together, decided here, give the
+ * same cells as the threshold followed by the peak test, without a pass
+ * over many detections afterwards.
+ * The work items are the beams, or, with fewer beams than threads (one
+ * element), chunks of tested range cells of at least CFAR_MIN_CHUNK cells:
+ * each chunk sums the range cells its windows need, so its sums and
+ * decisions are those of the whole beam. */
+#define CFAR_MIN_CHUNK 64
+
+/* The tested cells cf ... cl of beam b. */
+static void cfar_chunk(const Processor *p, PulseState *s, int b, int cf, int cl, Scratch *w)
+{
+    const RadarConfig *cfg = p->cfg;
+    const int nfft = cfg->nfft, nB = cfg->nBeams, nR = s->nR, R = p->ringRows;
+    const int gR = cfg->guardRange, oR = gR + cfg->trainRange;
+    const int gD = cfg->guardDoppler, oD = gD + cfg->trainDoppler;
+    const int zeroBin = nfft / 2;
+    const size_t nCells = (size_t)s->nCells;
+    /* sums needed at a ... z: the outer window of the centre rc of every tested
+     * cell (shifted inwards at the edges), the guard window of the cell; they
+     * use the range cells e0 ... e1 */
+    const int rcA = cf < oR ? oR : cf > nR - 1 - oR ? nR - 1 - oR : cf;
+    const int rcB = cl < oR ? oR : cl > nR - 1 - oR ? nR - 1 - oR : cl;
+    const int a = rcA < cf ? rcA : cf, z = rcB > cl ? rcB : cl;
+    const int e0 = a - oR > 0 ? a - oR : 0, e1 = z + oR < nR - 1 ? z + oR : nR - 1;
+    const float *Pb = s->P + (size_t)b * nR;
+    /* range sums of the (unwrapped) Doppler row u in ring slot u mod R */
+#define RING_ROW(u) do { const int u_ = (u), slot_ = ((u_ % R) + R) % R;                                     \
+                         range_box_sums(Pb + (size_t)(((u_ % nfft) + nfft) % nfft) * nCells + e0,              \
+                                        w->ringO + (size_t)slot_ * nR + e0, w->ringG + (size_t)slot_ * nR + e0, \
+                                        e1 - e0 + 1, a - e0, z - a + 1, oR, gR, w->partial);                   \
+                     } while (0)
+#define RING(arr, u) (w->arr + (size_t)((((u) % R) + R) % R) * nR)
+    for (int u = -oD; u <= oD; u++) RING_ROW(u);
+    double *restrict aO = w->accO, *restrict aG = w->accG;
+    for (int r = a; r <= z; r++) aO[r] = aG[r] = 0.0;
+    for (int k = -oD; k <= oD; k++) {                          /* window of bin 0 */
+        const float *restrict o = RING(ringO, k);
+        for (int r = a; r <= z; r++) aO[r] += o[r];
+    }
+    for (int k = -gD; k <= gD; k++) {
+        const float *restrict g = RING(ringG, k);
+        for (int r = a; r <= z; r++) aG[r] += g[r];
+    }
+    for (int d = 0; d < nfft; d++) {
+        if (abs(d - zeroBin) > cfg->notchBins) {
+            unsigned char *det = s->det + (size_t)d * nCells + (size_t)b * nR;
+            cfar_test_row(Pb + (size_t)d * nCells, aO, aG, s->thrScale, det, cf, cl, oR, nR);
+            cfar_peaks_row(s, nfft, nB, b, d, cf, cl, w->colMax, det);
+        }
+        if (d == nfft - 1) break;
+        /* slide the Doppler windows to bin d + 1 */
+        RING_ROW(d + 1 + oD);
+        const float *restrict addO = RING(ringO, d + 1 + oD), *restrict subO = RING(ringO, d - oD);
+        const float *restrict addG = RING(ringG, d + 1 + gD), *restrict subG = RING(ringG, d - gD);
+        for (int r = a; r <= z; r++) {
+            aO[r] += (double)addO[r] - subO[r];
+            aG[r] += (double)addG[r] - subG[r];
+        }
+    }
+#undef RING
+#undef RING_ROW
+}
+
 static void cfar(const Processor *p, PulseState *s, const PulseConfig *pc)
 {
     const RadarConfig *cfg = p->cfg;
-    const int nfft = cfg->nfft, nB = cfg->nBeams, nR = s->nR;
-    const int gR = cfg->guardRange, oR = gR + cfg->trainRange;
-    const int gD = cfg->guardDoppler, oD = gD + cfg->trainDoppler;
-    const double alpha = p->alpha;
-    const int zeroBin = nfft / 2;
-    const size_t nCells = (size_t)s->nCells;
-    const int f = pc->testFirst, l = pc->testFirst + pc->testCount - 1;
+    const int nB = cfg->nBeams;
+    const int f = pc->testFirst, l = pc->testFirst + pc->testCount - 1, nTest = l - f + 1;
 
-    memset(s->det, 0, (size_t)nfft * nCells);
+    memset(s->det, 0, (size_t)cfg->nfft * s->nCells);
     if (l < f) return;
-    /* range cells the windows of the tested cells need (also the shifted windows
-     * of tested cells within oR cells of an edge): centres fc ... lc */
-    const int fc = f < nR - 1 - oR ? f : nR - 1 - oR, lc = l > oR ? l : oR;
-    const int lo = fc - oR > 0 ? fc - oR : 0, hi = lc + oR < nR - 1 ? lc + oR : nR - 1;
-    const int n = hi - lo + 1;
-    const double *restrict cntInv = s->cntInv;
-
-    #pragma omp parallel num_threads(team_size(p->nThreads, nB)) if(nB > 1)
+    for (int r = f; r <= l; r++) s->thrScale[r] = p->alpha * s->cntInv[r];
+    int nChunks = 1;
+    if (nB < p->nThreads) {
+        const int most = nTest / CFAR_MIN_CHUNK > 1 ? nTest / CFAR_MIN_CHUNK : 1;
+        nChunks = (p->nThreads + nB - 1) / nB;
+        if (nChunks > most) nChunks = most;
+    }
+    const int nItems = nB * nChunks;
+    #pragma omp parallel num_threads(team_size(p->nThreads, nItems)) if(nItems > 1)
     {
         Scratch *w = &p->scratch[thread_num()];
         #pragma omp for schedule(dynamic)
-        for (int b = 0; b < nB; b++) {
-            for (int d = 0; d < nfft; d++)
-                range_box_sums(s->P + (size_t)d * nCells + (size_t)b * nR + lo, w->sumO + (size_t)d * nR + lo,
-                               w->sumG + (size_t)d * nR + lo, n, oR, gR, w->partial);
-            double *restrict aO = w->accO, *restrict aG = w->accG;
-            for (int r = lo; r <= hi; r++) aO[r] = aG[r] = 0.0;
-            for (int k = -oD; k <= oD; k++) {                  /* window of bin 0 */
-                const float *restrict o = w->sumO + (size_t)(((k % nfft) + nfft) % nfft) * nR;
-                for (int r = lo; r <= hi; r++) aO[r] += o[r];
-            }
-            for (int k = -gD; k <= gD; k++) {
-                const float *restrict g = w->sumG + (size_t)(((k % nfft) + nfft) % nfft) * nR;
-                for (int r = lo; r <= hi; r++) aG[r] += g[r];
-            }
-            for (int d = 0; d < nfft; d++) {
-                const float *restrict P = s->P + (size_t)d * nCells + (size_t)b * nR;
-                unsigned char *restrict det = s->det + (size_t)d * nCells + (size_t)b * nR;
-                if (abs(d - zeroBin) > cfg->notchBins) {
-                    for (int r = f; r <= l; r++) {
-                        const int rc = r < oR ? oR : r > nR - 1 - oR ? nR - 1 - oR : r;   /* shifted window */
-                        det[r] = P[r] > alpha * cntInv[r] * (aO[rc] - aG[r]);
-                    }
-                }
-                /* slide the Doppler windows to bin d + 1 */
-                const float *restrict addO = w->sumO + (size_t)((d + 1 + oD) % nfft) * nR;
-                const float *restrict subO = w->sumO + (size_t)(((d - oD) % nfft + nfft) % nfft) * nR;
-                const float *restrict addG = w->sumG + (size_t)((d + 1 + gD) % nfft) * nR;
-                const float *restrict subG = w->sumG + (size_t)(((d - gD) % nfft + nfft) % nfft) * nR;
-                for (int r = lo; r <= hi; r++) {
-                    aO[r] += (double)addO[r] - subO[r];
-                    aG[r] += (double)addG[r] - subG[r];
-                }
-            }
+        for (int it = 0; it < nItems; it++) {
+            const int c = it % nChunks;
+            cfar_chunk(p, s, it / nChunks, f + (int)((long long)nTest * c / nChunks),
+                       f + (int)((long long)nTest * (c + 1) / nChunks) - 1, w);
         }
     }
 }
@@ -746,44 +996,93 @@ static float select_kth(float *v, int n, int k)
     return v[k];
 }
 
-/* Order-preserving integer key of a float (any sign). */
-static uint32_t float_key(float x)
+/* Appends the values of x[0 ... n-1] inside [lo, hi] to out + *cnt (advancing
+ * *cnt) and adds the number of values below lo to *below. out needs room for
+ * 8 more floats than it gets values (AVX2 stores whole vectors: the values
+ * are left-packed with a permutation). */
+static void bracket_pass(const float *restrict x, int n, float lo, float hi, float *restrict out, int *cnt,
+                         int *below)
 {
-    uint32_t u;
-    memcpy(&u, &x, sizeof u);
-    return (u & 0x80000000u) ? ~u : (u | 0x80000000u);
+    int c = *cnt, b = 0, i = 0;
+#if defined(__AVX2__)
+    const __m256 vlo = _mm256_set1_ps(lo), vhi = _mm256_set1_ps(hi);
+    __m256i vb = _mm256_setzero_si256();
+    for (; i + 8 <= n; i += 8) {
+        const __m256 v = _mm256_loadu_ps(x + i);
+        const __m256 lt = _mm256_cmp_ps(v, vlo, _CMP_LT_OQ);
+        const int m = _mm256_movemask_ps(_mm256_andnot_ps(lt, _mm256_cmp_ps(v, vhi, _CMP_LE_OQ)));
+        vb = _mm256_sub_epi32(vb, _mm256_castps_si256(lt));            /* below: lanes of -1 */
+        const __m256i idx = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)g_packIdx[m]));
+        _mm256_storeu_ps(out + c, _mm256_permutevar8x32_ps(v, idx));
+        c += g_packCnt[m];
+    }
+    int lanes[8];
+    _mm256_storeu_si256((__m256i *)lanes, vb);
+    for (int k = 0; k < 8; k++) b += lanes[k];
+#endif
+    for (; i < n; i++) {
+        const float v = x[i];
+        b += v < lo;
+        out[c] = v;
+        c += (v >= lo) & (v <= hi);
+    }
+    *cnt = c;
+    *below += b;
+}
+
+/* Exact median of the nRows x rowLen values (row d at base + d*stride), as
+ * MATLAB's median (mean of the two middle values when their number is even).
+ * The middle values are selected among the few values of a bracket: one pass
+ * counts the values below it and copies those inside it. The bracket is
+ * +-1.6 % around the median of the previous update (*guess, 0 = none; the
+ * map changes little from one update to the next: about 1 % of the values),
+ * else, or when it misses the middle ranks, the range of +-3.5 standard
+ * deviations of the middle ranks in a strided sample of MEDIAN_SAMPLE values
+ * (about 8 % of the values). If that misses them too (an unusual map), all
+ * values are searched: the result never depends on the bracket. *guess gets
+ * the new median. work: nRows*rowLen + 8 floats. */
+static double map_median(const float *base, int nRows, int rowLen, size_t stride, float *work, float *guess)
+{
+    const int n = nRows * rowLen, kHi = n / 2, kLo = (n - 1) / 2;    /* ranks of the middle values */
+    int below = 0, cnt = 0, found = 0;
+    if (*guess > 0.0f) {
+        const float lo = *guess * (1.0f - 1.0f / 64), hi = *guess * (1.0f + 1.0f / 64);
+        for (int d = 0; d < nRows; d++) bracket_pass(base + (size_t)d * stride, rowLen, lo, hi, work, &cnt, &below);
+        found = below <= kLo && kHi < below + cnt;
+    }
+    if (!found) {
+        const int S = n < MEDIAN_SAMPLE ? n : MEDIAN_SAMPLE;
+        for (int i = 0; i < S; i++) {
+            const long long q = (long long)i * n / S;
+            work[i] = base[(size_t)(q / rowLen) * stride + (size_t)(q % rowLen)];
+        }
+        const int delta = (int)(1.75 * sqrt((double)S)) + 2;
+        const int sLo = (int)((long long)kLo * S / n) - delta, sHi = (int)((long long)kHi * S / n) + 1 + delta;
+        const float lo = sLo <= 0 ? -FLT_MAX : select_kth(work, S, sLo);
+        const float hi = sHi >= S - 1 ? FLT_MAX : select_kth(work, S, sHi);
+        below = cnt = 0;
+        for (int d = 0; d < nRows; d++) bracket_pass(base + (size_t)d * stride, rowLen, lo, hi, work, &cnt, &below);
+        found = below <= kLo && kHi < below + cnt;
+    }
+    if (!found) {
+        cnt = below = 0;
+        for (int d = 0; d < nRows; d++, cnt += rowLen)
+            memcpy(work + cnt, base + (size_t)d * stride, sizeof(float) * rowLen);
+    }
+    const float vHi = select_kth(work, cnt, kHi - below);   /* work[0 ... kHi-below-1] <= vHi */
+    *guess = vHi;
+    if (kLo == kHi) return vHi;
+    float vLo = work[0];
+    for (int i = 1; i < kHi - below; i++) vLo = work[i] > vLo ? work[i] : vLo;
+    return 0.5 * ((double)vLo + vHi);
 }
 
 /* Noise floor of a beam: median of its range-Doppler map / (median/mean of
- * the noise). Exact median: a histogram of the float keys finds the bins of
- * the middle values, then only the values in those bins are searched. */
-static double beam_noise_floor(const RadarConfig *cfg, const PulseState *s, int b, Scratch *w)
+ * the noise). */
+static double beam_noise_floor(const RadarConfig *cfg, PulseState *s, int b, Scratch *w)
 {
-    const int nfft = cfg->nfft, nR = s->nR, n = nfft * nR;
-    uint32_t *hist = w->hist;
-    memset(hist, 0, sizeof(uint32_t) * HIST_BINS);
-    for (int d = 0; d < nfft; d++) {
-        const float *row = s->P + (size_t)d * s->nCells + (size_t)b * nR;
-        for (int r = 0; r < nR; r++) hist[float_key(row[r]) >> HIST_SHIFT]++;
-    }
-    const int kHi = n / 2, kLo = (n % 2) ? n / 2 : n / 2 - 1;      /* ranks of the middle values */
-    int binLo = -1, binHi = -1, before = 0, cum = 0;
-    for (int q = 0; q < HIST_BINS && binHi < 0; q++) {
-        if (binLo < 0 && cum + (int)hist[q] > kLo) { binLo = q; before = cum; }
-        if (cum + (int)hist[q] > kHi) binHi = q;
-        cum += (int)hist[q];
-    }
-    int m = 0;
-    for (int d = 0; d < nfft; d++) {
-        const float *row = s->P + (size_t)d * s->nCells + (size_t)b * nR;
-        for (int r = 0; r < nR; r++) {
-            const int q = (int)(float_key(row[r]) >> HIST_SHIFT);
-            if (q >= binLo && q <= binHi) w->work[m++] = row[r];
-        }
-    }
-    const float hi = select_kth(w->work, m, kHi - before);
-    const double med = (n % 2) ? hi : 0.5 * ((double)select_kth(w->work, m, kLo - before) + hi);
-    return med / cfg->medianToMean;
+    return map_median(s->P + (size_t)b * s->nR, cfg->nfft, s->nR, (size_t)s->nCells, w->work, &s->lastMedian[b]) /
+           cfg->medianToMean;
 }
 
 static void add_report(PulseState *s, const Detection *d)
@@ -919,8 +1218,9 @@ static void blank_dense(const Processor *p, PulseState *s, const Cell *cells, in
     }
 }
 
-/* Keeps the detections that are local peaks (3x3x3 beam x range x Doppler) and
- * not sidelobes of a much stronger peak, and converts them to reports. */
+/* Keeps the CFAR detections that are not sidelobes of a much stronger peak
+ * (cfar() has kept only the local peaks: 3x3x3 beam x range x Doppler) and
+ * converts them to reports. */
 static void prune_and_report(const Processor *p, int pulse, PulseState *s)
 {
     const RadarConfig *cfg = p->cfg;
@@ -929,40 +1229,29 @@ static void prune_and_report(const Processor *p, int pulse, PulseState *s)
     Cell *cells = NULL;
     int n = 0, cap = 0;
 
-    /* 1) local peaks (scanned in memory order, then sorted into the order of
-     *    MATLAB's find() on [beam x range x Doppler]) */
+    /* 1) the local peaks above the threshold, scanned in memory order and (with
+     *    several beams) sorted into the order of MATLAB's find() on [beam x
+     *    range x Doppler]; with one beam the memory order is that order */
     for (int d = 0; d < nfft; d++) {
         for (int b = 0; b < nB; b++) {
-            const unsigned char *detRow = s->det + (size_t)d * s->nCells + (size_t)b * nR;
-            const unsigned char *hit = memchr(detRow, 1, nR);
-            for (int r = hit ? (int)(hit - detRow) : nR; r < nR; r++) {
-                if (!detRow[r]) continue;
-                const float v = P_at(s, d, b, r);
-                int peak = 1;
-                for (int dd = -1; dd <= 1 && peak; dd++) {
-                    const int d2 = (d + dd + nfft) % nfft;
-                    for (int bb = b - 1; bb <= b + 1 && peak; bb++) {
-                        if (bb < 0 || bb >= nB) continue;
-                        for (int rr = r - 1; rr <= r + 1; rr++) {
-                            if (rr < 0 || rr >= nR) continue;
-                            if (P_at(s, d2, bb, rr) > v) { peak = 0; break; }
-                        }
-                    }
-                }
-                if (!peak) continue;
+            const unsigned char *detRow = s->det + (size_t)d * s->nCells + (size_t)b * nR, *hit;
+            for (int r = 0; r < nR && (hit = memchr(detRow + r, 1, (size_t)(nR - r))) != NULL; r++) {
+                r = (int)(hit - detRow);
                 if (n == cap) {
                     cap = cap ? 2 * cap : 64;
                     cells = xrealloc(cells, sizeof(Cell) * cap);
                 }
-                cells[n++] = (Cell){ b, r, d, v };
+                cells[n++] = (Cell){ b, r, d, P_at(s, d, b, r) };
             }
         }
     }
-    if (n > 1) qsort(cells, n, sizeof(Cell), cell_order);
+    if (n > 1 && nB > 1) qsort(cells, n, sizeof(Cell), cell_order);
 
     /* 2) sidelobe blanking (range, elevation and Doppler sidelobes). Only the
-     *    peaks more than the margin stronger can blank a peak: with the peaks
-     *    sorted by power they are the first lo[i] (binary search). When these
+     *    peaks more than the margin stronger can blank a peak: the "strong"
+     *    peaks, more than the margin above the weakest one, sorted by power,
+     *    and of them the first lo[i] (binary search) for peak i. With a low
+     *    threshold the many weak peaks are not sorted. When these
      *    comparisons would cost more than the passes over the map (a low CFAR
      *    threshold: many weak peaks, many strong ones), the map maxima are
      *    used instead (blank_dense, same result), so the time is bounded by
@@ -972,12 +1261,16 @@ static void prune_and_report(const Processor *p, int pulse, PulseState *s)
     unsigned char *keep = xcalloc(n > 0 ? n : 1, 1);
     Ranked *rank = xcalloc(n > 0 ? n : 1, sizeof(Ranked));
     int *loK = xcalloc(n > 0 ? n : 1, sizeof(int));
-    for (int i = 0; i < n; i++) rank[i] = (Ranked){ cells[i].pw, i };
-    if (n > 1) qsort(rank, n, sizeof(Ranked), ranked_desc);
+    double minPw = INFINITY;
+    for (int i = 0; i < n; i++) minPw = cells[i].pw < minPw ? cells[i].pw : minPw;
+    int nStrong = 0;                                        /* only these can blank a peak */
+    for (int i = 0; i < n; i++)
+        if (cells[i].pw > ratio * minPw) rank[nStrong++] = (Ranked){ cells[i].pw, i };
+    if (nStrong > 1) qsort(rank, nStrong, sizeof(Ranked), ranked_desc);
     double work = 0.0;
     for (int i = 0; i < n; i++) {
         const double x = ratio * cells[i].pw;
-        int lo = 0, hi = n;                                  /* rank[0..lo) > x, rank[hi..n) <= x */
+        int lo = 0, hi = nStrong;                            /* rank[0..lo) > x, rank[hi..) <= x */
         while (lo < hi) {
             const int mid = (lo + hi) / 2;
             if (rank[mid].pw > x) lo = mid + 1; else hi = mid;

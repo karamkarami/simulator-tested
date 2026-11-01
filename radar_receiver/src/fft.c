@@ -127,6 +127,7 @@ void fft_rows(const FftPlan *plan, float *re, float *im, size_t stride, int nSig
 {
     switch (nSignals) {                                /* common widths: unrolled */
     case 1:  fft_core(plan, re, im, stride, 1);  break;
+    case 8:  fft_core(plan, re, im, stride, 8);  break;
     case 24: fft_core(plan, re, im, stride, 24); break;
     case 32: fft_core(plan, re, im, stride, 32); break;
     case 64: fft_core(plan, re, im, stride, 64); break;

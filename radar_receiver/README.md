@@ -109,15 +109,25 @@ needs every value that `export_receiver_config.m` writes.
 
 **Pruning:** as in MATLAB (`prune_peaks.m`): local peaks in beam x range x
 Doppler; range, elevation and Doppler sidelobes more than
-`sidelobeMargin_dB` below a stronger peak are dropped (only the peaks that
-much stronger are compared, sorted by power, binary search). When those
-comparisons would cost more than about 20 passes over the map (a low CFAR
-threshold with many strong peaks, e.g. clutter residue), `blank_dense()`
-takes the largest peak power of each sidelobe neighbourhood over the whole
-map instead (running maxima, van Herk / Gil-Werman along range): the same
-result, in a time bounded by the map size, so lowering the threshold no
-longer makes the CFAR block slower and slower (`test_cfar`: 392 000
-detections with 3000 strong cells in about 50 ms, 107 ms before).
+`sidelobeMargin_dB` below a stronger peak are dropped. The local peak test
+is done inside the CFAR: a cell is detected when it is above the threshold
+*and* the maximum of its 3 x 3 x 3 neighbourhood (the same cells as the
+threshold followed by the peak test). In a row of the map with many cells
+above the threshold the peak test is one vectorised pass with the maxima of
+the neighbouring beams and Doppler bins, in a row with few each cell is
+checked, so its time no longer grows with the number of threshold
+crossings. The neighbourhood is 3 x 3 (x 3 with DBF) also for the 1-D range
+and 1-D Doppler CFAR: a target spreads over neighbouring range cells and
+Doppler bins whatever the CFAR window, and a peak test along one dimension
+only would keep 3 - 5 cells of every target (one per Doppler bin of its
+mainlobe with the range CFAR). Only the peaks more than the margin above the
+weakest peak can blank another one; only those are sorted by power, and
+each peak is compared with the ones that much stronger (binary search).
+When those comparisons would cost more than about 20 passes over the map (a
+low CFAR threshold with many strong peaks, e.g. clutter residue),
+`blank_dense()` takes the largest peak power of each sidelobe neighbourhood
+over the whole map instead (running maxima, van Herk / Gil-Werman along
+range): the same result, in a time bounded by the map size.
 `tests/test_c_receiver.m` does all of this automatically and compares the
 plots of both programs.
 
@@ -137,7 +147,7 @@ plots of both programs.
 | `--baud N` | serial baud rate (default 921600) |
 | `--serial-content X` | `detections` (default: the pruned CFAR detections of every CPI update) or `plots` |
 | `--threads N` | processing threads (default: `OMP_NUM_THREADS`, else number of cores - 1) |
-| `--mf auto\|direct\|fft` | matched filter: direct valid convolution or FFT fast convolution (same result); `auto` (default) takes the faster one for the thread count |
+| `--mf auto\|direct\|fft` | matched filter: direct valid convolution or FFT fast convolution (same result within float rounding); `auto` (default) takes the faster one for the thread count (with one element: the FFT, see Speed) |
 | `--update-every N` | run Doppler, CFAR and extraction every N pulses (default from the configuration: 1) |
 | `--plots-csv FILE` | plot list (default `plots.csv`; `''` = none) |
 | `--detections-csv FILE` | all pruned CFAR detections (default none) |
@@ -285,24 +295,84 @@ The processing is written for x86 CPUs with AVX2:
 * The data is float and stored as separate real and imaginary arrays, so
   the inner loops of every stage vectorise.
 * DBF: three beams are formed per pass over the channel data.
-* Matched filter: FFT fast convolution (same result as the valid
-  convolution) or direct convolution, whichever is faster for the filter
-  length and the number of threads.
+* Matched filter: FFT fast convolution (the valid convolution, within float
+  rounding) or direct convolution, whichever is faster for the filter
+  length and the number of threads. The FFTs of up to 24 beams run as the
+  lanes of one batched FFT. A single element (no DBF) is split into the 8
+  interleaved sub-sequences of a four-step FFT (8 FFTs of length N/8 as the
+  lanes of one vector, twiddles, FFTs of length 8 over the lanes), so its
+  fast convolution is vectorised too: 15 us instead of 55 us for the long
+  pulse of the 80 km configuration (300 taps, 771 range cells).
 * Only the matched filter outputs that the MTI needs are kept, and the MTI
-  output of every pulse is computed once and kept in a ring.
-* Doppler: radix-2^2 FFTs of many cells at once, in cache-sized blocks.
-* CFAR: beam by beam, so the data stays in the cache. Range sums are built
-  from partial sums, and Doppler sums are running sums. The noise floor
-  median uses a histogram.
+  output of every pulse is computed once and kept in a ring, stored by
+  blocks of 32 cells (`[block][slot][32]`), so that the Doppler processing
+  of a block reads contiguous memory.
+* Doppler: radix-2^2 FFTs of 32 cells at once (a block of 128 x 32 complex
+  values fits the L1 cache).
+* CFAR: beam by beam, so the data stays in the cache. The range sums of a
+  Doppler row come from partial sums of 1, 2, 4, ... cells, added in one
+  pass; only the rows d-oD ... d+1+oD are kept (a ring of 16 rows instead
+  of the range sums of the whole map); the Doppler sums are running sums
+  (double). The local peak test is part of the CFAR test (see Pruning).
+  With fewer beams than threads (one element) the tested range cells are
+  split into chunks of at least 64 cells for the threads; each chunk sums
+  the cells its windows need, so the sums and decisions are those of the
+  whole beam.
+* Noise floor (the SNR of the reports): the exact median of the beam's map
+  (as MATLAB's `median`), selected among the values of a bracket around the
+  median of the previous update (about 1 % of them; one vectorised pass
+  counts the values below the bracket and copies those inside it); a sample
+  of 2048 values gives the bracket when that one misses. It took more time
+  than the CFAR itself with the histogram of the previous version.
+* Plot extractor: a detection joins the oldest open group near it, found in
+  a hash grid of the cells (beam, range cell, Doppler bin / 8) instead of a
+  search through all open groups (with a low threshold there are thousands).
 * All stages are split over threads with OpenMP, and all buffers are
   allocated once. A loop never gets more threads than it has work items
-  (beams, cell blocks): with a single element (no DBF) the loops over beams
-  (matched filter, CFAR) run in the processing thread. Otherwise every idle
-  thread has to be woken and reach the closing barrier; with the PPI and the
-  UDP input on the other cores that wait made the single-beam matched filter
-  take more than 1 ms per PRI instead of about 0.1 ms.
+  (beams, range chunks, cell blocks). Otherwise every idle thread has to be
+  woken and reach the closing barrier; with the PPI and the UDP input on the
+  other cores that wait made the single-beam matched filter take more than
+  1 ms per PRI instead of about 0.1 ms.
+* `radar_bench` measures the time of every block on synthetic PRIs (noise,
+  moving targets, optional clutter) for a list of CFAR thresholds, without
+  the network, the display and the console: `radar_bench --config
+  config/radar_config_1ch.bin --threads 11`. The default thread count is
+  all logical CPUs but one: on a CPU with performance and efficiency cores
+  (e.g. a Core i5-13420H: 4 + 4 cores, 12 threads, so 11 threads) that
+  leaves one logical CPU for the UDP input and the PPI; compare
+  `--threads 4`, `6`, `8` and `11` with `radar_bench` and start the
+  receiver with the fastest one.
 
-Measured processing time per PRI (replay of the six-target streams of
+Processing time per PRI with `radar_bench` (synthetic PRIs with moving
+targets, Doppler/CFAR on every pulse, mean over 1000 PRIs (300 with 48
+elements) and two runs; the 80 km default radar: 262 + 771 range cells;
+4-vCPU Intel Xeon VM, built with `-march=native`), before and after the
+changes to the CFAR, pruning, noise floor, plot extractor and single-beam
+matched filter listed above (the reports, plots and tracks are the same):
+
+| Configuration | Threads | CFAR threshold | before | now |
+|---|---|---|---|---|
+| 1 element (`config/radar_config_1ch.bin`) | 3 | 12.8 dB (Pfa 1e-8, default) | 1.44 ms | 0.35 ms |
+| | 3 | 8 dB (Pfa 2e-3) | 1.53 ms | 0.44 ms |
+| | 3 | 6 dB (Pfa 2e-2) | 2.33 ms | 0.87 ms |
+| | 1 | 12.8 dB | 1.56 ms | 0.64 ms |
+| 48 elements, 21 beams (`config/radar_config.bin`) | 3 | 12.8 dB | 7.9 ms | 6.0 ms |
+| | 3 | 8 dB | 24.7 ms | 9.2 ms |
+
+With one element and the default threshold the CFAR block (CFAR, pruning
+and reports, the "CFAR" row of the PPI panel) took 1.22 ms of the 1.44 ms,
+most of it the median of the noise floor (computed for every sub-pulse with
+a detection); now 0.21 ms. The matched filter went from 0.07 to 0.02 ms,
+the Doppler processing from 0.14 to 0.11 ms. At 6 dB the plot extractor
+took 0.31 ms (now 0.07 ms), with 48 elements at 8 dB 8.2 ms (now 0.65 ms).
+With a threshold at which most cells are false alarms (4 dB, Pfa 8e-2:
+1100 detections per update, 14 000 plots in a second) the EKF tracker
+takes 7 - 8 ms per PRI: it gets thousands of false plots. The replays of
+`tests/test_c_receiver.m` (fixed PRF, 50 km: 262 + 371 range cells, 3
+threads) now take 0.18 ms per PRI with one element and 2.7 ms with 48
+elements.
+
+Measured with the previous version (replay of the six-target streams of
 `tests/test_c_receiver.m`: 48 channels, 21 beams, both sub-pulses, 273 +
 382 range cells; 4-vCPU Intel Xeon VM at 2.1 GHz, AVX2):
 
@@ -408,9 +478,11 @@ Timing:
 | Test | What it checks |
 |---|---|
 | `tracker` (`tests/test_tracker.c`) | two crossing targets over 6 scans, 3-D and 2-D (plots with radial velocity): two confirmed tracks that stay on their targets; GNN with two targets 200 m apart: each track stays on its own target; with plots, a configuration and the track log from `../tests/test_tracker.m` (CV and CA, 2-D and 3-D, with and without the radial velocity, staggered PRF with folded plot velocities), every C track update equals MATLAB's (same plot, state within 1e-6) |
-| `core` (`tests/test_core.c`) | batched FFT against a direct DFT; plot extractor; a moving target through the whole chain with the exported configuration (its velocity a quarter of the Doppler axis from zero, for any carrier frequency; one plot at the right range, velocity and beam); direct and fast-convolution matched filters give the same plot; the same target with the CFAR threshold raised to 45 dB at run time gives no detection; `cfar_pfa()` against the closed form (one look) and the Pfa 1e-8 of the configured threshold |
+| `core` (`tests/test_core.c`) | batched FFT against a direct DFT; plot extractor, also on random dense detection streams (hundreds of open groups) against the linear search of `plot_extractor.m`: the same plots in the same order; a moving target through the whole chain with the exported configuration (its velocity a quarter of the Doppler axis from zero, for any carrier frequency; one plot at the right range, velocity and beam); direct and fast-convolution matched filters give the same plot; the same target with the CFAR threshold raised to 45 dB at run time gives no detection; `cfar_pfa()` against the closed form (one look) and the Pfa 1e-8 of the configured threshold |
 | `core_phasecode` | the same core test with `config/radar_config_phasecode.bin` (both sub-pulses P4 phase codes with mismatch filters): the echo is the real code, the plot lies on the target cell |
-| `cfar` (`tests/test_cfar.c`) | the CA-CFAR of `processor.c` against direct sums over the training cells: every decision, for the 2-D, 1-D range and 1-D Doppler windows and tested range intervals in the middle, at both range edges (also when the whole interval lies within the cells of the shifted windows) and over all cells; the pruning of 165 000 CFAR detections (a strong target with sidelobes) gives exactly the cells of the direct pairwise rules, in about 50 ms |
+| `core_1ch` | the same core test with `config/radar_config_1ch.bin` (the default radar with one receive element, no DBF): four-step FFT and direct matched filter give the same plot |
+| `cfar` (`tests/test_cfar.c`) | the CA-CFAR of `processor.c` against direct sums over the training cells combined with the direct local peak test: every decision, for the 2-D, 1-D range and 1-D Doppler windows and tested range intervals in the middle, at both range edges (also when the whole interval lies within the cells of the shifted windows) and over all cells, with the beams of the configuration and with one beam split into range chunks over 4 threads; the noise floor median equals that of a sorted copy (400 maps: odd and even sizes, ties, zeros, a structured half; with and without a bracket from the previous median); the pruning of tens of thousands of CFAR detections (a strong target with sidelobes, 3000 strong cells) gives exactly the cells of the direct pairwise rules |
+| `cfar_1ch` | the same CFAR test with `config/radar_config_1ch.bin` |
 | `udp_input` | reassembly with shuffled, duplicate, missing and foreign datagrams; timeouts; record and replay; fuzzing |
 | `ddc_files` (`tests/test_ddc_files.c`) | MAT-file reader with files written as MATLAB writes them (data in smaller storage types, small elements, skipped char field, compressed `-v7` with zlib); folder listing; the datagrams of a DDC file are accepted by `udp_input.c` and give back the same PRI; corrupted, truncated, `-v7.3` and big-endian files are refused |
 | `serial` | frame encoding and CRC; real output to a pseudo-terminal (Linux): exact bytes, 200-detection split, non-blocking drops, close |

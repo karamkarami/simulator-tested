@@ -96,8 +96,10 @@ take it into account:
   after the CFAR, and with them possibly a real target behind a near one).
   `stc_demo.m` shows the curves, the ADC samples of a PRI, the clipping,
   the SNR against range and the eclipsed echo with and without the STC
-  (`output/stc_demo/*.png`). `cfg.rx.stc.enable = false` switches it off
-  (then lower `cfg.rx.gain_dB` to 30 dB).
+  (`output/stc_demo/*.png`). `cfg.rx.stc.enable` (section "STC" of
+  `radar_config.m`) switches it on or off; without it lower
+  `cfg.rx.gain_dB` to 30 dB (the run summary says whether the STC is on, and
+  the ADC overload warning says to switch it on when it is off).
 * **Doppler.** With the fixed PRF (1 kHz, 128 bins) a Doppler bin is
   6.9 m/s and the radial velocity is unambiguous within +-441 m/s (blind
   speed 882 m/s); the MTI notch is +-2 bins (+-13.8 m/s). With the staggered
@@ -120,12 +122,21 @@ take it into account:
   matrix are the same as before. The internal clutter motion (0.1 m/s) is
   0.1 Hz; the clutter spectrum is set by the scan modulation, as before.
 * **Processing time.** False detections (clutter residue, sidelobes of
-  very strong targets, a CFAR threshold lowered in the PPI) do not slow the
-  processing down: the CA-CFAR costs the same at any threshold, and the
-  pruning takes maxima over the whole map when there are many detections,
-  so its time is bounded by the map size (see Pruning below). The
-  simulator sends the DDC output of one PRI per loop, so its UDP rate is the
-  loop rate: `results.priTime_s` is the time of every PRI.
+  very strong targets, a CFAR threshold lowered in the PPI) slow the
+  processing down only a little: the CA-CFAR costs the same at any
+  threshold, the pruning takes maxima over the whole map when there are
+  many detections, so its time is bounded by the map size (see Pruning
+  below), and the C receiver does the local peak test inside its CFAR,
+  finds the plot extractor groups in a hash grid and selects the noise
+  floor median among a few values (`radar_receiver/README.md`, Speed: one
+  element, 80 km, 0.35 ms instead of 1.44 ms per PRI at the default
+  threshold with 3 threads of a small VM, 0.87 ms instead of 2.33 ms at
+  6 dB). With a CFAR
+  threshold so low that a large part of the cells are false alarms
+  (Pfa 1e-2 and more) the plot extractor and above all the tracker still
+  get thousands of false plots. The simulator sends the DDC output of one
+  PRI per loop, so its UDP rate is the loop rate: `results.priTime_s` is
+  the time of every PRI.
 * **Console output.** With a low CFAR threshold printing every plot and
   track can take longer than the processing. `cfg.console.enable` switches
   the console output of MATLAB on or off, `cfg.console.plots` only the
@@ -194,7 +205,8 @@ file was built for other values (for example after you change
 | `src/setup_radar.m` | derives the PRI timeline, NCO, DDC segments, pulse compression filters (matched / mismatch), axes, CPI length, FFT length, CFAR factor ... |
 | `src/mismatch_filter.m`, `ddc_pulse.m` | mismatch filter with the smallest peak sidelobe for a code or a sampled pulse; the pulse after the DDC filters |
 | `src/generate_rx_signal.m`, `clutter_init.m`, `clutter_signal.m`, `adc_sample.m` | signal generation |
-| `src/stc_gain.m` | STC: gain of the attenuator in front of the receiver over the PRI (`cfg.rx.stc`) |
+| `src/stc_gain.m` | STC: gain of the attenuator in front of the receiver over the PRI (`cfg.rx.stc`; 1 with `cfg.rx.stc.enable = false`) |
+| `src/stc_advice.m` | the hint of the ADC overload warnings: switch the STC on, or raise its attenuation |
 | `stc_demo.m` | STC demonstration: curves, ADC samples of a PRI, clipping, SNR against range, eclipsed echo of a near target (figures in `output/stc_demo`) |
 | `src/adc_overload.m` | fraction of the ADC samples of the receive intervals at full scale (receiver gain too high, STC off) |
 | `src/target_rcs.m`, `draw_target_rcs.m` | Swerling 1 target RCS (a new value every scan) |

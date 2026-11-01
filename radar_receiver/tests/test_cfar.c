@@ -3,11 +3,15 @@
  *
  * White-box test: it includes processor.c to call its static cfar(). On maps
  * of exponential noise (one per method), every decision of cfar() must equal
- * that of the direct sums over the training cells, for the 2-D, the 1-D range
- * and the 1-D Doppler window and for tested range intervals in the middle, at
- * both range edges (shifted windows, also when the whole interval lies within
- * the first or last guard+training cells) and over all cells. The window of
- * the configuration (argv[1]) gives the sizes. Then the pruning of thousands
+ * that of the direct sums over the training cells combined with the direct
+ * local peak test (cfar() keeps only the detections that are the maximum of
+ * their 3 x 3 x 3 neighbourhood), for the 2-D, the 1-D range and the 1-D
+ * Doppler window and for tested range intervals in the middle, at both range
+ * edges (shifted windows, also when the whole interval lies within the first
+ * or last guard+training cells) and over all cells; with the beams of the
+ * configuration (argv[1], which gives the window sizes) and with one beam
+ * split into range chunks over several threads. Then the exact noise floor
+ * median (check_median) against a sorted copy, and the pruning of thousands
  * of detections (check_pruning) against the direct pairwise rules.
  */
 #include "../src/processor.c"
@@ -36,14 +40,31 @@ static double direct_noise(const RadarConfig *cfg, const PulseState *s, int b, i
     return sum / n;
 }
 
-/* One CFAR window (guard and training cells per side in range and Doppler). */
-static void check_window(RadarConfig cfg, const char *name, int gR, int tR, int gD, int tD)
+/* Local peak from direct comparisons with the 26 neighbours (Doppler circular). */
+static int direct_peak(const RadarConfig *cfg, const PulseState *s, int b, int r, int d)
 {
+    const float v = P_at(s, d, b, r);
+    for (int dd = -1; dd <= 1; dd++)
+        for (int bb = b - 1; bb <= b + 1; bb++)
+            for (int rr = r - 1; rr <= r + 1; rr++)
+                if (bb >= 0 && bb < cfg->nBeams && rr >= 0 && rr < s->nR &&
+                    P_at(s, (d + dd + cfg->nfft) % cfg->nfft, bb, rr) > v) return 0;
+    return 1;
+}
+
+/* One CFAR window (guard and training cells per side in range and Doppler),
+ * with nBeams beams (0: those of the configuration) and nThreads threads (0:
+ * the default). */
+static void check_window(RadarConfig cfg, const char *name, int gR, int tR, int gD, int tD, int nBeams, int nThreads)
+{
+    char label[64];
     cfg.guardRange = gR;  cfg.trainRange = tR;  cfg.guardDoppler = gD;  cfg.trainDoppler = tD;
     cfg.nTrain = (2 * (gR + tR) + 1) * (2 * (gD + tD) + 1) - (2 * gR + 1) * (2 * gD + 1);
-    Processor *p = processor_create(&cfg, 0);
+    if (nBeams > 0) cfg.nBeams = nBeams;                /* the CFAR only needs the maps */
+    Processor *p = processor_create(&cfg, nThreads);
     PulseState *s = &p->ps[PULSE_LONG];
     const int nR = s->nR, oR = gR + tR, nfft = cfg.nfft, failuresBefore = failures;
+    snprintf(label, sizeof label, "%s, %d beam(s), %d thread(s)", name, cfg.nBeams, p->nThreads);
     srand(11);
     for (size_t i = 0; i < (size_t)nfft * s->nCells; i++)
         s->P[i] = (float)-log((rand() + 1.0) / (RAND_MAX + 2.0));     /* exponential, mean 1 */
@@ -66,26 +87,74 @@ static void check_window(RadarConfig cfg, const char *name, int gR, int tR, int 
                     if (!tested) { wrong += got; continue; }
                     if (b != 0 && b != cfg.nBeams - 1) continue;        /* direct sums: first and last beam */
                     const double thr = p->alpha * direct_noise(&cfg, s, b, r, d), v = P_at(s, d, b, r);
-                    if (fabs(v - thr) > 1e-5 * thr && got != (v > thr)) wrong++;   /* (ties: float sums) */
+                    if (fabs(v - thr) > 1e-5 * thr && got != (v > thr && direct_peak(&cfg, s, b, r, d)))
+                        wrong++;                                        /* (ties: float sums) */
                 }
         if (wrong) {
             failures++;
-            printf("FAIL %s CFAR, tested cells %d ... %d of %d: %d wrong decisions (%d detections)\n", name,
+            printf("FAIL %s CFAR, tested cells %d ... %d of %d: %d wrong decisions (%d detections)\n", label,
                    pc.testFirst, pc.testFirst + pc.testCount - 1, nR, wrong, detected);
         }
     }
-    printf("%-12s window (range %d+%d, Doppler %d+%d): %s\n", name, gR, tR, gD, tD,
-           failures > failuresBefore ? "FAIL" : "every decision equals the direct sums");
+    printf("%-32s window (range %d+%d, Doppler %d+%d): %s\n", label, gR, tR, gD, tD,
+           failures > failuresBefore ? "FAIL" : "every decision equals the direct sums and peak test");
     processor_destroy(p);
+}
+
+/* The noise floor median against a sorted copy: maps of several sizes (odd,
+ * even, one value), with ties, zeros and a structured half, twice each (the
+ * second time with the bracket from the first median), and once with a
+ * wrong guess. */
+static int cmp_float(const void *a, const void *b)
+{
+    const float x = *(const float *)a, y = *(const float *)b;
+    return (x > y) - (x < y);
+}
+
+static void check_median(void)
+{
+    const int failuresBefore = failures;
+    float *map = malloc(sizeof(float) * 200000), *work = malloc(sizeof(float) * (200000 + 8));
+    float *sorted = malloc(sizeof(float) * 200000);
+    srand(3);
+    for (int t = 0; t < 400; t++) {
+        const int rows = 1 + rand() % 128, len = 1 + rand() % (t % 4 == 0 ? 8 : 800), stride = len + rand() % 4;
+        int n = 0;
+        for (int d = 0; d < rows; d++)
+            for (int r = 0; r < stride; r++) {
+                float v = (float)-log((rand() + 1.0) / (RAND_MAX + 2.0));
+                if (t % 5 == 1) v = (float)(rand() % 4);                 /* many ties */
+                if (t % 5 == 2 && rand() % 3 == 0) v = 0.0f;              /* zeros */
+                if (t % 5 == 3 && d < rows / 2) v *= 1e5f;                /* structured */
+                map[d * stride + r] = v;
+                if (r < len) sorted[n++] = v;
+            }
+        qsort(sorted, n, sizeof(float), cmp_float);
+        const double want = (n % 2) ? sorted[n / 2] : 0.5 * ((double)sorted[n / 2 - 1] + sorted[n / 2]);
+        float guess = 0.0f;
+        for (int k = 0; k < 3; k++) {
+            if (k == 2) guess = 1e3f;                                    /* far from the median */
+            const double got = map_median(map, rows, len, (size_t)stride, work, &guess);
+            if (got != want) {
+                failures++;
+                if (failures - failuresBefore <= 5)
+                    printf("FAIL median of %d x %d values (call %d): %.9g, sorted %.9g\n", rows, len, k, got, want);
+            }
+        }
+    }
+    printf("noise floor median: %s\n", failures > failuresBefore ? "FAIL" : "equals the sorted copy on 400 maps");
+    free(map);
+    free(work);
+    free(sorted);
 }
 
 /* Pruning under load: a long-pulse map with a strong target (range
  * sidelobes along its line) and a low threshold gives thousands of CFAR
- * detections; prune_and_report() must keep exactly the cells of the direct
- * rules (local peak, sidelobe blanking pair by pair). nStrong more strong
- * cells (like clutter residue) make the pairwise comparisons expensive: the
- * pruning then takes the map maxima (blank_dense), with the same result and
- * a time bounded by the map size. */
+ * detections (local peaks); prune_and_report() must keep exactly the cells
+ * of the direct rules (local peak, sidelobe blanking pair by pair). nStrong
+ * more strong cells (like clutter residue) make the pairwise comparisons
+ * expensive: the pruning then takes the map maxima (blank_dense), with the
+ * same result and a time bounded by the map size. */
 static void check_pruning(RadarConfig cfg, const char *name, int nStrong, double alpha)
 {
     Processor *p = processor_create(&cfg, 0);
@@ -146,8 +215,8 @@ static void check_pruning(RadarConfig cfg, const char *name, int nStrong, double
         failures++;
         printf("FAIL pruning (%s): %d reports, %d expected, %d different, %.3f s\n", name, s->nReports, nKeep, wrong, dt);
     }
-    printf("pruning (%s): %d CFAR detections, %d peaks, %d kept (the direct rules: %d) in %.1f ms: %s\n", name, nDet, n,
-           s->nReports, nKeep, dt * 1e3, wrong || k != s->nReports || dt > 0.5 ? "FAIL" : "ok");
+    printf("pruning (%s): %d CFAR detections (local peaks: %d), %d kept (the direct rules: %d) in %.1f ms: %s\n", name,
+           nDet, n, s->nReports, nKeep, dt * 1e3, wrong || k != s->nReports || dt > 0.5 ? "FAIL" : "ok");
     free(c);
     processor_destroy(p);
 }
@@ -164,10 +233,14 @@ int main(int argc, char **argv)
         printf("configuration %s: %s\n", argv[1], err);
         return 1;
     }
-    check_window(cfg, "2-D", 3, 8, 3, 4);
-    check_window(cfg, "1-D range", 3, 16, 0, 0);
-    check_window(cfg, "1-D Doppler", 0, 0, 2, 8);
-    check_window(cfg, "configured", cfg.guardRange, cfg.trainRange, cfg.guardDoppler, cfg.trainDoppler);
+    for (int one = 0; one < 2; one++) {                 /* the configured beams; one beam in 4 threads */
+        const int nB = one ? 1 : 0, nThr = one ? 4 : 0;
+        check_window(cfg, "2-D", 3, 8, 3, 4, nB, nThr);
+        check_window(cfg, "1-D range", 3, 16, 0, 0, nB, nThr);
+        check_window(cfg, "1-D Doppler", 0, 0, 2, 8, nB, nThr);
+        check_window(cfg, "configured", cfg.guardRange, cfg.trainRange, cfg.guardDoppler, cfg.trainDoppler, nB, nThr);
+    }
+    check_median();
     check_pruning(cfg, "strong target, low threshold", 0, 2.5);
     check_pruning(cfg, "3000 strong cells, very low threshold", 3000, 1.2);
     radar_config_free(&cfg);

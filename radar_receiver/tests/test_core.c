@@ -1,7 +1,8 @@
 /*
  * test_core.c - unit tests of the processing core:
  *   1) batched FFT against a direct DFT,
- *   2) plot extractor (azimuth grouping, minimum hits, flush),
+ *   2) plot extractor (azimuth grouping, minimum hits, flush; random dense
+ *      streams against the linear search of plot_extractor.m),
  *   3) the exported configuration (argv[1]) and a synthetic moving target
  *      processed end to end (DBF, matched filter, MTI, Doppler, CFAR,
  *      pruning, extraction): exactly one plot at the right range, radial
@@ -110,6 +111,104 @@ static void test_extractor(void)
     extractor_update(&e, NULL, 0, 1, collect_plot, &l);
     CHECK(l.n == 1, "flush: expected 1 plot, got %d", l.n);
     extractor_free(&e);
+}
+
+/* The extractor (hash grid) against the linear search of plot_extractor.m on
+ * random dense detection streams: thousands of open groups, detections that
+ * fit several groups (the first, i.e. oldest, one must get them), Doppler
+ * wrap-around, skipped-update weights and flushes: the same plots in the
+ * same order. */
+typedef struct { int beam, rIdx, dIdx, hits, miss; Detection best; } RefGroup;
+typedef struct { Detection *p; int n, cap; } PlotVec;
+
+static void vec_plot(void *user, const Detection *plot)
+{
+    PlotVec *v = user;
+    if (v->n == v->cap) {
+        v->cap = v->cap ? 2 * v->cap : 256;
+        v->p = realloc(v->p, sizeof(Detection) * v->cap);
+        if (!v->p) abort();
+    }
+    v->p[v->n++] = *plot;
+}
+
+static void ref_update(RefGroup **gp, int *ng, int *cap, int nDop, int minHits, int maxMiss, int weight,
+                       const Detection *dets, int n, int flush, PlotVec *out)
+{
+    RefGroup *g = *gp;
+    const int nOld = *ng;
+    char *updated = calloc((size_t)nOld + n + 1, 1);
+    for (int i = 0; i < n; i++) {
+        const Detection *d = &dets[i];
+        int j = -1;
+        for (int k = 0; k < *ng && j < 0; k++) {
+            int dDop = abs(g[k].dIdx - d->dIdx);
+            if (nDop - dDop < dDop) dDop = nDop - dDop;
+            if (abs(g[k].beam - d->beam) <= 1 && abs(g[k].rIdx - d->rIdx) <= 2 && dDop <= 1) j = k;
+        }
+        if (j < 0) {
+            if (*ng == *cap) { *cap = *cap ? 2 * *cap : 64; g = realloc(g, sizeof(RefGroup) * *cap); }
+            j = (*ng)++;
+            g[j].hits = weight;  g[j].best = *d;
+        } else {
+            g[j].hits += weight;
+            if (d->power > g[j].best.power) g[j].best = *d;
+        }
+        g[j].beam = d->beam;  g[j].rIdx = d->rIdx;  g[j].dIdx = d->dIdx;  g[j].miss = 0;
+        updated[j] = 1;
+    }
+    int kept = 0;
+    for (int k = 0; k < *ng; k++) {
+        if (!updated[k]) g[k].miss++;
+        if (g[k].miss > maxMiss || flush) {
+            if (g[k].hits >= minHits) { Detection p = g[k].best; p.hits = g[k].hits; vec_plot(out, &p); }
+        } else {
+            g[kept++] = g[k];
+        }
+    }
+    *ng = kept;
+    *gp = g;
+    free(updated);
+}
+
+static void test_extractor_random(void)
+{
+    const int nDop = 32, minHits = 3, maxMiss = 2;
+    Extractor e;
+    extractor_init(&e, nDop, minHits, maxMiss);
+    RefGroup *g = NULL;
+    int ng = 0, cap = 0, maxOpen = 0;
+    PlotVec a = { NULL, 0, 0 }, b = { NULL, 0, 0 };
+    Detection *dets = malloc(sizeof(Detection) * 400);
+    char *used = calloc(6 * 60 * 32, 1);
+    srand(99);
+    for (int u = 0; u < 600; u++) {
+        const int n = u % 97 == 50 ? 0 : rand() % 400;          /* dense: many groups per cell neighbourhood */
+        int m = 0;
+        memset(used, 0, 6 * 60 * 32);
+        for (int i = 0; i < n; i++) {
+            const int beam = rand() % 6, r = rand() % 60, d = rand() % nDop;
+            if (used[(beam * 60 + r) * 32 + d]) continue;       /* one detection per cell */
+            used[(beam * 60 + r) * 32 + d] = 1;
+            dets[m] = det_at(beam, r, d, rand() / (double)RAND_MAX, 0.1 * u);
+            dets[m].pulseNumber = (uint32_t)u;
+            m++;
+        }
+        const int weight = u % 13 == 7 ? 3 : 1, flush = u % 150 == 149;
+        e.weight = weight;
+        extractor_update(&e, dets, m, flush, vec_plot, &a);
+        ref_update(&g, &ng, &cap, nDop, minHits, maxMiss, weight, dets, m, flush, &b);
+        if (e.n > maxOpen) maxOpen = e.n;
+        CHECK(e.n == ng, "update %d: %d open groups, the reference has %d", u, e.n, ng);
+    }
+    int same = a.n == b.n;
+    for (int i = 0; same && i < a.n; i++)
+        same = a.p[i].beam == b.p[i].beam && a.p[i].rIdx == b.p[i].rIdx && a.p[i].dIdx == b.p[i].dIdx &&
+               a.p[i].hits == b.p[i].hits && a.p[i].power == b.p[i].power && a.p[i].pulseNumber == b.p[i].pulseNumber;
+    CHECK(same, "extractor: %d plots, the linear search gives %d (or they differ)", a.n, b.n);
+    printf("extractor: %d plots from random streams (up to %d open groups), as the linear search\n", a.n, maxOpen);
+    extractor_free(&e);
+    free(g); free(a.p); free(b.p); free(dets); free(used);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -318,6 +417,7 @@ int main(int argc, char **argv)
 {
     test_fft();
     test_extractor();
+    test_extractor_random();
     if (argc > 1) {
         /* fast convolution (where cheaper) and direct matched filter: same plot */
         Detection a, b;

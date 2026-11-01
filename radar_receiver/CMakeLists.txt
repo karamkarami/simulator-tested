@@ -156,6 +156,11 @@ endif()
 add_executable(radar_stream_send tools/stream_send.c)
 target_link_libraries(radar_stream_send PRIVATE radar_core radar_ddc_files)
 
+# Processing time per block on synthetic PRIs (no network, display or console):
+# radar_bench --config FILE [--threads N] [--thresholds DB,DB,...]
+add_executable(radar_bench tools/bench_processor.c)
+target_link_libraries(radar_bench PRIVATE radar_core)
+
 # Windows: copy the Qt DLLs and plugins next to a program that uses the PPI,
 # so it starts without Qt's bin folder on PATH.
 function(radar_deploy_qt target)
@@ -185,6 +190,8 @@ if(RADAR_BUILD_TESTS)
     add_test(NAME core COMMAND test_core ${CMAKE_CURRENT_SOURCE_DIR}/config/radar_config.bin)
     # phase codes with mismatch filters (export_receiver_config.m, see README)
     add_test(NAME core_phasecode COMMAND test_core ${CMAKE_CURRENT_SOURCE_DIR}/config/radar_config_phasecode.bin)
+    # one receive element (no DBF): four-step FFT matched filter, CFAR split into range chunks
+    add_test(NAME core_1ch COMMAND test_core ${CMAKE_CURRENT_SOURCE_DIR}/config/radar_config_1ch.bin)
 
     # the CFAR against direct sums (white-box: the test includes processor.c)
     add_executable(test_cfar tests/test_cfar.c src/config.c src/fft.c src/extractor.c src/tracker.c src/platform.c)
@@ -197,6 +204,7 @@ if(RADAR_BUILD_TESTS)
         target_link_libraries(test_cfar PRIVATE m)
     endif()
     add_test(NAME cfar COMMAND test_cfar ${CMAKE_CURRENT_SOURCE_DIR}/config/radar_config.bin)
+    add_test(NAME cfar_1ch COMMAND test_cfar ${CMAKE_CURRENT_SOURCE_DIR}/config/radar_config_1ch.bin)
 
     add_executable(test_tracker tests/test_tracker.c)
     target_link_libraries(test_tracker PRIVATE radar_core)

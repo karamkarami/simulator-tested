@@ -149,8 +149,7 @@ for k = 1:sched.nPulses
     if clip > cfg.adc.overloadWarn && ~clipWarned
         warning(['ADC overload: %.1f%% of the receive samples of PRI %d (az %.1f deg) are at full scale; ', ...
                  'clipped clutter and targets give false plots. Reduce cfg.rx.gain_dB (%g dB at %g MHz) ', ...
-                 'or raise the STC (cfg.rx.stc).'], ...
-                100*clip, k, az, cfg.rx.gain_dB, cfg.fc/1e6);
+                 'or %s.'], 100*clip, k, az, cfg.rx.gain_dB, cfg.fc/1e6, stc_advice(cfg));
         clipWarned = true;
     end
 
@@ -308,6 +307,14 @@ fprintf(['Receiver gain %.0f dB: thermal noise at the ADC %.1f LSB rms (%.1f dBF
     sys.adc.sigmaTh, 20*log10(sys.adc.sigmaTh*sqrt(2)/sys.adc.fullScale), sys.adc.sigmaAdc, ...
     10*log10(sys.rx.leakAmp^2/2 * sys.rx.voltGain^2 * 1e3), sys.ddc.noiseLsb, 10*log10(sys.N0eff/sys.N0), ...
     10*log10(sys.N0ddc/sys.N0eff));
+if cfg.rx.stc.enable
+    stc = cfg.rx.stc;
+    if isfield(stc, 'curveLong') && ~isempty(stc.curveLong), cl = stc.curveLong; else, cl = stc.curve; end
+    fprintf('STC on (cfg.rx.stc.enable): short-pulse window %.0f dB at first, 0 dB from %.1f km; long-pulse window %.0f dB, 0 dB from %.1f km\n', ...
+        stc.curve(1, 2), stc.curve(end, 1)/1e3, cl(1, 2), cl(end, 1)/1e3);
+else
+    fprintf('STC off (cfg.rx.stc.enable = false)\n');
+end
 names = {'short', 'long'};
 for i = 1:2
     wv = sys.wave.(names{i});

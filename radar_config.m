@@ -50,15 +50,22 @@ cfg.rx.gain_dB         = 60;     % gain of the receiver path from the antenna to
                                  % the 16-bit DDC output); the STC below keeps the near clutter
                                  % (+32 dB above full scale without it) within the ADC range
 cfg.rx.txIsolation_dB  = 40;     % transmitter-to-receiver isolation (leakage while transmitting) [dB]
-% STC (sensitivity time control): an attenuator in front of the receiver that
-% attenuates the echoes (not the receiver noise) early in each receive window.
-% The attenuation depends on the time dt since the end of the transmitted
-% pulse, as the equivalent range c*dt/2: the nearest range from which echoes
-% still arrive then, where the strongest clutter comes from (at the start of
-% the long-pulse window the eclipsed clutter of 1 - 10 km). Rows [range_m
-% attenuation_dB], linear in dB, none beyond the last row; see stc_demo.m
-% (it also derives the attenuation the clutter needs).
-cfg.rx.stc.enable = true;
+cfg.rx.maxRange_m      = 80e3;   % instrumented range of the long pulse: sets the receive window [m]
+cfg.rx.addThermalNoise = true;   % false only for debugging / SNR measurements
+cfg.rx.addLeakage      = true;   % false only for debugging / SNR measurements
+
+%% STC (sensitivity time control)
+cfg.rx.stc.enable = true;        % true: STC on; false: STC off (no attenuation). Without the STC lower
+                                 % cfg.rx.gain_dB to 30 dB, otherwise the near clutter clips the ADC
+                                 % (6 - 9 % of the receive samples at 60 dB: false plots; run_radar_sim warns)
+% An attenuator in front of the receiver that attenuates the echoes (not the
+% receiver noise) early in each receive window. The attenuation depends on
+% the time dt since the end of the transmitted pulse, as the equivalent range
+% c*dt/2: the nearest range from which echoes still arrive then, where the
+% strongest clutter comes from (at the start of the long-pulse window the
+% eclipsed clutter of 1 - 10 km). Rows [range_m attenuation_dB], linear in
+% dB, none beyond the last row; see stc_demo.m (it also derives the
+% attenuation the clutter needs, and compares with and without the STC).
 % short-pulse window (and while transmitting): the clutter up to the horizon (10 km)
 cfg.rx.stc.curve  = [    0 40;  1000 40;  2000 32;  4000 25;  6000 22;  8000 16;  9000 12;  10000 5;  10500 0];
 % long-pulse window ([] = the curve above): its start also holds the eclipsed
@@ -69,9 +76,6 @@ cfg.rx.stc.curve  = [    0 40;  1000 40;  2000 32;  4000 25;  6000 22;  8000 16;
 % tapers their echo: range sidelobes -26 dB with the LFM pulse (pruned), but
 % -11 ... -24 dB with phase codes (see README "170 MHz").
 cfg.rx.stc.curveLong = [0 60;  3000 60;  6000 45;  9000 30;  12000 18;  15000 10;  18000 5;  22500 0];
-cfg.rx.maxRange_m      = 80e3;   % instrumented range of the long pulse: sets the receive window [m]
-cfg.rx.addThermalNoise = true;   % false only for debugging / SNR measurements
-cfg.rx.addLeakage      = true;   % false only for debugging / SNR measurements
 
 %% ADC
 cfg.adc.fs_Hz            = 120e6;  % sampling frequency [Hz]
