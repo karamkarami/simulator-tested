@@ -157,6 +157,10 @@ plots of both programs.
 | `--print-plots` | print them (overrides `cfg.console.plots = false`) |
 | `--queue N` | PRIs buffered between the input thread and the processing (default 64) |
 | `--no-skip` | never skip Doppler/CFAR updates when the processing falls behind (see Speed) |
+| `--rt-priority N` | Linux: SCHED_FIFO priority N (1 ... 98) of the processing thread and its OpenMP workers, N + 1 for the UDP input thread (the PPI stays at normal priority); see "Linux and real time" |
+| `--cpus LIST` | Linux: CPUs of the processing threads, e.g. `2-7` or `2,4,6`; without `--threads` one thread per CPU |
+| `--input-cpus LIST` | Linux: CPUs of the UDP input thread (default: those of `--cpus`) |
+| `--mlock` | Linux: lock all memory of the process (`mlockall`), so the processing gets no page faults |
 
 Ctrl+C (or closing the PPI window) stops the receiver. The open plots are
 closed and the processing times are printed.
@@ -425,6 +429,83 @@ ways:
 Without skipped updates the plots are exactly those of MATLAB. The stream of
 the default radar is 340 MB/s (2.7 Gbit/s). It needs 10 Gbit Ethernet and a
 receive buffer of at least 32 MB (see "Input: UDP packets").
+
+## Linux and real time
+
+The receiver builds and runs on Linux as it is (all tests run on Linux);
+nothing has to be changed. For CLion and Qt on Ubuntu 24.04 / Debian 12:
+
+```sh
+sudo apt install build-essential cmake qt6-base-dev zlib1g-dev
+```
+
+(OpenMP comes with GCC; Qt 5 works too: `qtbase5-dev`.) In CLion open the
+`radar_receiver` folder and choose the Release profile. Allow the large UDP
+receive buffer (2.7 Gbit/s with 48 elements) and, for `--serial`, the serial
+port:
+
+```sh
+echo 'net.core.rmem_max=33554432' | sudo tee /etc/sysctl.d/90-radar.conf
+sudo sysctl --system
+sudo usermod -aG dialout $USER
+```
+
+**PREEMPT_RT kernel.** A real-time kernel (mainline Linux 6.12 and newer has
+PREEMPT_RT built in; Ubuntu: `sudo pro enable realtime-kernel`; Debian:
+`linux-image-rt-amd64`) bounds the time until a thread of high priority
+runs, but only threads with a real-time priority profit from it. The
+receiver therefore sets it itself:
+
+```sh
+radar_receiver --config cfg.bin --ppi --rt-priority 40 --cpus 2-7 --input-cpus 1 --mlock
+```
+
+* `--rt-priority 40`: the processing thread and its OpenMP workers run with
+  SCHED_FIFO 40, the UDP input thread with 41 (it must empty the socket
+  even while an update runs). Stay below 50: the interrupt threads of a
+  PREEMPT_RT kernel (network card, timer) run at 50 and must not wait for
+  the processing. The PPI (Qt GUI thread) keeps the normal priority, so a
+  slow redraw never delays the processing.
+* `--cpus 2-7`, `--input-cpus 1`: the processing threads only on CPUs 2-7,
+  the input thread on CPU 1; the PPI, the network interrupts and the rest of
+  the system use the others. The thread count is the number of CPUs given.
+  The OpenMP workers inherit priority and CPUs (do not also set
+  `OMP_PLACES` / `OMP_PROC_BIND`). On a CPU with performance and efficiency
+  cores give the processing the performance cores: `lscpu --extended` shows
+  them (the larger `MAXMHZ`; on a Core i5-13420H usually CPUs 0-7 are the
+  4 performance cores with their two hardware threads each and CPUs 8-11
+  the efficiency cores). Measure the choice with `radar_bench`.
+* `--mlock`: all memory is locked (`mlockall`) and freed memory stays in the
+  process, so no buffer causes a page fault during the processing.
+
+Without the permission the receiver prints a warning and runs with normal
+priority (or unlocked memory). Allow it once for the user (log in again):
+
+```sh
+echo "$USER - rtprio 95"          | sudo tee -a /etc/security/limits.d/90-radar.conf
+echo "$USER - memlock unlimited"  | sudo tee -a /etc/security/limits.d/90-radar.conf
+```
+
+or for the program: `sudo setcap cap_sys_nice,cap_ipc_lock+ep radar_receiver`
+(again after every build). Further settings of the system that make the
+timing steadier (none is needed to run the receiver):
+
+* keep the processing CPUs free of other work: kernel parameters
+  `isolcpus=2-7 nohz_full=2-7 rcu_nocbs=2-7` (in `GRUB_CMDLINE_LINUX`,
+  then `sudo update-grub`); the receiver's `--cpus 2-7` still uses them;
+* the interrupts of the network card on the CPU of the input thread or next
+  to it: `/proc/irq/<n>/smp_affinity_list` (stop `irqbalance`);
+* CPU frequency governor `performance` (`cpupower frequency-set -g
+  performance`), and in the BIOS/UEFI deep C-states off when the latency
+  still varies;
+* idle OpenMP workers wait actively for a while (GNU OpenMP: about 0.1 -
+  0.3 ms) and with SCHED_FIFO nothing of lower priority runs on their CPU
+  meanwhile; on CPUs that are not isolated set `OMP_WAIT_POLICY=passive`
+  (they then sleep at once, and waking them costs a few microseconds).
+
+The kernel stops real-time threads for 50 ms in every second when they would
+take more than 95 % of a CPU (`kernel.sched_rt_runtime_us`); with the
+processing well below the PRI this never happens.
 
 ## Sending DDC files or a recording with the PRI timing (`radar_stream_send`)
 

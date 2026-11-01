@@ -30,6 +30,13 @@
  *     --print-plots          print them (the default comes from the configuration,
  *                            cfg.console.plots; printing can take longer than the
  *                            processing when a low CFAR threshold gives many plots)
+ *   real time (Linux, e.g. with a PREEMPT_RT kernel; see README "Linux and real time"):
+ *     --rt-priority N        SCHED_FIFO priority N (1 ... 98) of the processing threads
+ *                            (with their OpenMP workers), N + 1 for the UDP input thread
+ *     --cpus LIST            CPUs of the processing threads, e.g. 2-7 (default thread
+ *                            count: their number)
+ *     --input-cpus LIST      CPUs of the UDP input thread (default: those of --cpus)
+ *     --mlock                lock the memory of the process (no page faults)
  */
 #include "radar_rx.h"
 
@@ -43,6 +50,8 @@ typedef struct {
     const char *configPath, *recordPath, *replayPath, *snapshotPath;
     const char *serialDevice, *serialContent, *plotsCsv, *detectionsCsv, *tracksCsv, *mf, *ppiShow;
     int port, baud, threads, updateEvery, ppi, quiet, queue, noSkip;
+    int rtPriority, mlock;        /* real time (Linux) */
+    const char *cpus, *inputCpus;
     double idleTimeout_s;
     double cfarThreshold_dB;      /* NAN: from the configuration */
 } Options;
@@ -75,7 +84,8 @@ static void usage(void)
          "                      [--update-every N]\n"
          "                      [--plots-csv FILE] [--detections-csv FILE] [--tracks-csv FILE]\n"
          "                      [--idle-timeout S] [--quiet | --print-plots]\n"
-         "                      [--queue N] [--no-skip] [--cfar-threshold DB]");
+         "                      [--queue N] [--no-skip] [--cfar-threshold DB]\n"
+         "                      [--rt-priority N] [--cpus LIST] [--input-cpus LIST] [--mlock]");
 }
 
 static int parse_options(int argc, char **argv, Options *o)
@@ -117,6 +127,10 @@ static int parse_options(int argc, char **argv, Options *o)
         else if (!strcmp(a, "--queue"))          TAKE(o->queue = atoi(v));
         else if (!strcmp(a, "--no-skip"))        o->noSkip = 1;
         else if (!strcmp(a, "--cfar-threshold")) TAKE(o->cfarThreshold_dB = atof(v));
+        else if (!strcmp(a, "--rt-priority"))    TAKE(o->rtPriority = atoi(v));
+        else if (!strcmp(a, "--cpus"))           TAKE(o->cpus = v);
+        else if (!strcmp(a, "--input-cpus"))     TAKE(o->inputCpus = v);
+        else if (!strcmp(a, "--mlock"))          o->mlock = 1;
         else if (!strcmp(a, "--help") || !strcmp(a, "-h")) { usage(); return 1; }
         else { fprintf(stderr, "unknown option %s\n", a); usage(); return -1; }
 #undef TAKE
@@ -127,6 +141,10 @@ static int parse_options(int argc, char **argv, Options *o)
     }
     if (!isnan(o->cfarThreshold_dB) && !(o->cfarThreshold_dB >= 0.0 && o->cfarThreshold_dB <= 50.0)) {
         fprintf(stderr, "--cfar-threshold must be 0 ... 50 dB\n");
+        return -1;
+    }
+    if (o->rtPriority < 0 || o->rtPriority > 98) {
+        fprintf(stderr, "--rt-priority must be 1 ... 98 (0 = normal scheduling)\n");
         return -1;
     }
     if (strcmp(o->ppiShow, "plots") && strcmp(o->ppiShow, "detections") && strcmp(o->ppiShow, "both")) {
@@ -309,7 +327,23 @@ static int worker(void *arg)
         app->exitCode = 1;
         return 1;
     }
-    Processor *proc = processor_create(&app->cfg, app->opt.threads);
+    /* real time (Linux): the processing thread gets its priority and CPUs before
+     * the OpenMP workers exist, so they inherit them */
+    char rtErr[512];
+    int nCpus = 0, threads = app->opt.threads;
+    const int rt = app->opt.rtPriority > 0 || (app->opt.cpus && app->opt.cpus[0]);
+    if (rt) {
+        const int r = rt_thread_setup(app->opt.rtPriority, app->opt.cpus, &nCpus, rtErr, sizeof rtErr);
+        if (r == -2) {
+            fprintf(stderr, "--cpus: %s\n", rtErr);
+            udp_input_close(in);
+            app->exitCode = 2;
+            return 2;
+        }
+        if (r != 0) fprintf(stderr, "warning: real-time settings of the processing threads: %s\n", rtErr);
+        if (threads <= 0 && nCpus > 0) threads = nCpus;     /* one thread per CPU of --cpus */
+    }
+    Processor *proc = processor_create(&app->cfg, threads);
     if (!proc) {
         fprintf(stderr, "cannot create the processor\n");
         udp_input_close(in);
@@ -331,7 +365,37 @@ static int worker(void *arg)
     report_cfar(app, proc, default_dB, 0);
     /* live stream: a full queue drops PRIs; replay: the reader waits */
     const int live = app->opt.replayPath == NULL;
+    /* the input thread inherits priority + 1 and its CPUs from this thread */
+    const int rtInput = app->opt.rtPriority > 0 || (app->opt.inputCpus && app->opt.inputCpus[0]);
+    if (rtInput) {
+        const int r = rt_thread_setup(app->opt.rtPriority > 0 ? app->opt.rtPriority + 1 : 0, app->opt.inputCpus,
+                                      NULL, rtErr, sizeof rtErr);
+        if (r == -2) {
+            fprintf(stderr, "--input-cpus: %s\n", rtErr);
+            processor_destroy(proc);
+            udp_input_close(in);
+            app->exitCode = 2;
+            return 2;
+        }
+        if (r != 0) fprintf(stderr, "warning: real-time settings of the input thread: %s\n", rtErr);
+    }
     InputThread *input = input_thread_start(in, app->opt.queue, live);
+    if (rtInput && rt_thread_setup(app->opt.rtPriority, app->opt.cpus && app->opt.cpus[0] ? app->opt.cpus : NULL,
+                                   NULL, rtErr, sizeof rtErr) != 0 && app->opt.cpus)
+        fprintf(stderr, "warning: real-time settings of the processing threads: %s\n", rtErr);
+    if (app->opt.mlock && rt_lock_memory(rtErr, sizeof rtErr) != 0)
+        fprintf(stderr, "warning: %s\n", rtErr);
+    if (rt || rtInput || app->opt.mlock) {
+        char prio[32] = "normal scheduling", prioIn[32] = "normal scheduling";
+        if (app->opt.rtPriority > 0) {
+            snprintf(prio, sizeof prio, "SCHED_FIFO %d", app->opt.rtPriority);
+            snprintf(prioIn, sizeof prioIn, "SCHED_FIFO %d", app->opt.rtPriority + 1);
+        }
+        fprintf(stderr, "Real time: processing %s, %d thread(s), CPUs %s; input %s, CPUs %s; memory %s\n", prio,
+                processor_threads(proc), app->opt.cpus ? app->opt.cpus : "all", prioIn,
+                app->opt.inputCpus ? app->opt.inputCpus : app->opt.cpus ? app->opt.cpus : "all",
+                app->opt.mlock ? "locked" : "not locked");
+    }
     if (!input) {
         fprintf(stderr, "cannot start the input thread\n");
         processor_destroy(proc);

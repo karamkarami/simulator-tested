@@ -268,6 +268,7 @@ double processor_cfar_alpha(const Processor *p);
  * nLooks <= 0. */
 double cfar_pfa(double alpha, int nTrain, double nLooks);
 void processor_timing(const Processor *p, ProcessorTiming *t);
+int  processor_threads(const Processor *p);    /* processing threads (OpenMP team size) */
 void processor_destroy(Processor *p);
 
 /* ------------------------------------------------------------------------ */
@@ -334,6 +335,19 @@ void ppi_post_timing(const ProcessorTiming *timing, const char *detectionName, c
 /* ------------------------------------------------------------------------ */
 
 double now_seconds(void);   /* monotonic clock */
+
+/* Real-time settings of the calling thread (Linux; elsewhere -1 when
+ * something is requested): SCHED_FIFO with priority 1 ... 99 (0 = keep the
+ * scheduling) and CPU affinity "2-5,7" (NULL or "" = keep; *nCpus gets the
+ * number of CPUs, nCpus may be NULL). Threads created later by this thread
+ * (the OpenMP workers, the input thread) inherit both. Returns 0, -2 for an
+ * invalid CPU list (nothing changed), or -1 with the reason in err (the
+ * settings that worked stay). */
+int rt_thread_setup(int priority, const char *cpus, int *nCpus, char *err, size_t errLen);
+/* Locks all present and future pages of the process in memory (mlockall)
+ * and keeps freed memory in the heap, so the processing gets no page faults
+ * (Linux). Returns 0, or -1 with the reason in err. */
+int rt_lock_memory(char *err, size_t errLen);
 
 #ifdef __cplusplus
 }

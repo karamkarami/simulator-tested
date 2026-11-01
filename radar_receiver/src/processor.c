@@ -407,6 +407,11 @@ void processor_timing(const Processor *p, ProcessorTiming *t)
     *t = p->timing;
 }
 
+int processor_threads(const Processor *p)
+{
+    return p->nThreads;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Fast time: DBF and matched filter                                        */
 /* ------------------------------------------------------------------------ */
