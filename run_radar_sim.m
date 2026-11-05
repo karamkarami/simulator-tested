@@ -307,6 +307,17 @@ fprintf(['Receiver gain %.0f dB: thermal noise at the ADC %.1f LSB rms (%.1f dBF
     sys.adc.sigmaTh, 20*log10(sys.adc.sigmaTh*sqrt(2)/sys.adc.fullScale), sys.adc.sigmaAdc, ...
     10*log10(sys.rx.leakAmp^2/2 * sys.rx.voltGain^2 * 1e3), sys.ddc.noiseLsb, 10*log10(sys.N0eff/sys.N0), ...
     10*log10(sys.N0ddc/sys.N0eff));
+if cfg.clutter.enable
+    cl = sys.clutter;
+    txt = 'uniform land';
+    tm = 'uniform';  if isfield(cfg.clutter, 'terrain'), tm = cfg.clutter.terrain; end
+    if isfield(cl, 'typeNames') && numel(cl.typeNames) > 1, txt = ['land, ' strjoin(cl.typeNames(2:end), ', ')]; end
+    fprintf(['Clutter (%s terrain: %s, up to %.1f km): CNR of land %.1f dB at %.1f km (cfg.clutter.cnr_dB; ', ...
+             'matched filter output of one element) -> land sigma0 %.1f dB\n'], tm, txt, ...
+            cl.maxRange_m/1e3, cl.cnr_dB, cl.cnrRange_m/1e3, cl.sigma0_dB);
+else
+    fprintf('Clutter off (cfg.clutter.enable = false)\n');
+end
 if cfg.rx.stc.enable
     stc = cfg.rx.stc;
     if isfield(stc, 'curveLong') && ~isempty(stc.curveLong), cl = stc.curveLong; else, cl = stc.curve; end

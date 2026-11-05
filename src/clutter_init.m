@@ -1,10 +1,17 @@
 function clut = clutter_init(sys)
 %CLUTTER_INIT  Static ground clutter map around the radar.
-%   clut = CLUTTER_INIT(sys) builds a grid of clutter cells (azimuth x range)
-%   with complex Gaussian (Rayleigh amplitude) reflectivity of constant sigma0,
-%   a random internal-motion Doppler per cell, and precomputes what
-%   clutter_signal.m needs to synthesise the clutter echo of every PRI.
-%   Internal clutter motion (cfg.clutter.spectrum):
+%   clut = CLUTTER_INIT(sys) builds the clutter cells (azimuth x range) of
+%   the terrain map (clutter_terrain.m: uniform land, or land with regions
+%   of mountains, hills, desert and sea) with complex Gaussian (Rayleigh
+%   amplitude) reflectivity of the sigma0 of their terrain type, a random
+%   internal-motion Doppler per cell, and precomputes what clutter_signal.m
+%   needs to synthesise the clutter echo of every PRI. The power of every
+%   cell follows the radar equation with the elevation pattern at the
+%   elevation of the cell; the reflectivity of land is set by
+%   cfg.clutter.cnr_dB (sys.clutter.sigma0_dB, clutter_cnr.m). Only the
+%   visible cells are kept, sorted by azimuth (clut.rowStart).
+%   Internal clutter motion of a cell (type with icmStd_mps = []: the
+%   spectrum of cfg.clutter.spectrum):
 %     'gaussian'    every cell moves with a radial velocity drawn from
 %                   N(0, icmStd_mps^2): a Gaussian clutter spectrum
 %     'exponential' Billingsley's land clutter model: every cell has a
@@ -13,50 +20,74 @@ function clut = clutter_init(sys)
 %                   drawn from the exponential (Laplace) density
 %                   beta/2*exp(-beta*|v|). beta and r follow from the wind
 %                   speed unless cfg.clutter.expBeta_spm / dcToAc are given.
+%   A type with its own icmStd_mps (mountain, desert, sea) moves with
+%   N(meanVel, icmStd_mps^2), meanVel the radial component of its drift
+%   (sea: the waves).
 
 cfg = sys.cfg;
 cc  = cfg.clutter;
 c   = cfg.const.c;
 fs  = sys.fs;
 
-% Range grid: cell size is a whole number of ADC samples so delays fall on samples
-dR = cc.rangeStepSamples * c / (2*fs);
-rMax = cc.maxRange_m;
-if isempty(rMax)
-    rMax = sqrt(2 * 4/3 * 6371e3 * cfg.ant.height_m);       % radar horizon (4/3 earth)
-end
-clut.range_m = (ceil(cc.minRange_m/dR):floor(rMax/dR)) * dR;
+T = clutter_terrain(cfg, sys);
+clut.range_m = T.range_m;
 clut.delaySamples = round(2*clut.range_m/c*fs);           % two-way delay [ADC samples]
-clut.az_deg = (0:cc.azStep_deg:360-cc.azStep_deg)';
+clut.az_deg = T.az_deg;
+clut.nGroups = numel(T.groupEl_deg);
 nAz = numel(clut.az_deg);
 nR  = numel(clut.range_m);
 
 % Mean power of a cell at the ADC (antenna boresight in azimuth) and its rms IF amplitude
-[~, u] = steering_vector(sys, 0, cc.elevation_deg);
-elRel  = asind(u);
+tilt   = sys.ant.tilt_deg;                                % as steering_vector.m at the boresight azimuth
+elRel  = asind(-sind(tilt)*cosd(T.el_deg) + cosd(tilt)*sind(T.el_deg));
 gEl    = pattern_gain(sys.ant.elRel_deg, sys.ant.txElGain_dB, elRel) ...
-       * pattern_gain(sys.ant.elRel_deg, sys.ant.elElemGain_dB, elRel);
-area   = clut.range_m * deg2rad(cc.azStep_deg) * dR;      % cell area [m^2]
-power  = sys.radarConst * 10^(cc.sigma0_dB/10) * area ./ clut.range_m.^4 * gEl;  % [W]
+       .* pattern_gain(sys.ant.elRel_deg, sys.ant.elElemGain_dB, elRel);
+area   = clut.range_m * deg2rad(cc.azStep_deg) * T.dR_m;  % cell area [m^2]
+power  = sys.radarConst * T.sigma0 .* (area ./ clut.range_m.^4) .* gEl;  % [W]
 ampRms = sqrt(2*power);                                   % rms IF amplitude at the receiver input [sqrt(W)]
 rho = ampRms .* (randn(nAz, nR) + 1j*randn(nAz, nR)) / sqrt(2);
-switch lower(cc.spectrum)                                 % internal clutter motion
-    case 'gaussian'
-        v = cc.icmStd_mps * randn(nAz, nR);
-        clut.dc  = [];                                    % no separate stationary part
-        clut.rho = rho;
-    case 'exponential'
-        [beta, r] = billingsley(cc, cfg.fc);
-        u = rand(nAz, nR) - 0.5;
-        v = -sign(u) .* log(1 - 2*abs(u)) / beta;         % Laplace: density beta/2*exp(-beta*|v|)
-        clut.dc  = rho * sqrt(r/(1 + r));                 % stationary part
-        clut.rho = rho * sqrt(1/(1 + r));                 % moving part
-        clut.beta_spm = beta;
-        clut.dcToAc = r;
-    otherwise
-        error('cfg.clutter.spectrum must be ''gaussian'' or ''exponential''.');
+own = ~isnan(T.icmStd);                                   % types with their own Gaussian motion
+cfgGauss = strcmpi(cc.spectrum, 'gaussian');
+if ~cfgGauss && ~strcmpi(cc.spectrum, 'exponential')
+    error('cfg.clutter.spectrum must be ''gaussian'' or ''exponential''.');
 end
-clut.fd_Hz = 2*v/sys.lambda;
+v = zeros(nAz, nR);
+dc = [];
+if any(own(:)) || (cfgGauss && ~all(own(:)))
+    z = randn(nAz, nR);
+    sd = T.icmStd;
+    if cfgGauss, sd(~own) = cc.icmStd_mps; end
+    g = own | cfgGauss;
+    v(g) = T.meanVel(g) + sd(g) .* z(g);
+end
+if ~cfgGauss && ~all(own(:))                              % Billingsley for the other types
+    [beta, r] = billingsley(cc, cfg.fc);
+    uu = rand(nAz, nR) - 0.5;
+    e = ~own;
+    v(e) = T.meanVel(e) - sign(uu(e)) .* log(1 - 2*abs(uu(e))) / beta;   % Laplace: beta/2*exp(-beta*|v|)
+    dc = zeros(nAz, nR);
+    dc(e)  = rho(e) * sqrt(r/(1 + r));                    % stationary part
+    rho(e) = rho(e) * sqrt(1/(1 + r));                    % moving part
+    clut.beta_spm = beta;
+    clut.dcToAc = r;
+end
+
+% keep the visible cells, sorted by azimuth row
+keep = (T.sigma0 > 0).';                                  % [nR x nAz]: column-major order = by azimuth
+idx = find(keep);
+[ir, ia] = ind2sub([nR nAz], idx);
+lin = sub2ind([nAz nR], ia, ir);
+clut.cellRow   = int32(ia);
+clut.cellRange = ir;
+clut.cellGroup = double(T.group(lin));
+clut.rho   = rho(lin);
+clut.fd_Hz = 2*v(lin)/sys.lambda;
+clut.dc    = [];
+if ~isempty(dc), clut.dc = dc(lin); end
+clut.rowStart = [0; cumsum(accumarray(ia, 1, [nAz 1]))] + 1;   % cells of row a: rowStart(a) ... rowStart(a+1)-1
+clut.cellType = T.type(lin);                             % index into clut.typeNames
+clut.typeNames = T.typeNames;
+clut.nCells = numel(idx);
 
 % IF transmit waveforms at the ADC rate and their FFTs (for the fast convolution)
 names = {'short', 'long'};

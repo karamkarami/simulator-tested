@@ -212,6 +212,8 @@ file was built for other values (for example after you change
 | `src/setup_radar.m` | derives the PRI timeline, NCO, DDC segments, pulse compression filters (matched / mismatch), axes, CPI length, FFT length, CFAR factor ... |
 | `src/mismatch_filter.m`, `ddc_pulse.m` | mismatch filter with the smallest peak sidelobe for a code or a sampled pulse; the pulse after the DDC filters |
 | `src/generate_rx_signal.m`, `clutter_init.m`, `clutter_signal.m`, `adc_sample.m` | signal generation |
+| `src/clutter_terrain.m` | terrain map of the clutter: land, mountains, hills, desert, sea; shadowing and horizon, elevation groups |
+| `src/clutter_cnr.m` | CNR of uniform clutter at the matched filter output (`cfg.clutter.cnr_dB` -> sigma0) |
 | `src/stc_gain.m` | STC: gain of the attenuator in front of the receiver over the PRI (`cfg.rx.stc`; 1 with `cfg.rx.stc.enable = false`) |
 | `src/stc_advice.m` | the hint of the ADC overload warnings: switch the STC on, or raise its attenuation |
 | `stc_demo.m` | STC demonstration: curves, ADC samples of a PRI, clipping, SNR against range, eclipsed echo of a near target (figures in `output/stc_demo`) |
@@ -233,7 +235,7 @@ file was built for other values (for example after you change
 | `src/cfar_pfa.m` | false alarm probability of a CFAR threshold (inverse of `cfar_alpha.m`) |
 | `src/snr_budget.m`, `print_snr_budget.m` | expected SNR after every block (incl. STC, ADC noise and DDC rounding; blind speeds marked) |
 | `src/target_scenario.m` | targets of the scenario selected by `cfg.scenario.type`: `'six'`, `'challenge'` or `'random'` |
-| `src/challenge_targets_scenario.m` | ten targets hard for the radar: 0.1 m^2 at 65 km, slow (17 m/s) in the clutter, tangential (in the MTI notch), a 1 m^2 target at 23 km behind a 10 m^2 target at 5 km (pulse handover, STC), two targets 300 m apart, 420 m/s, 37 deg elevation, 100 m altitude at 45 km |
+| `src/challenge_targets_scenario.m` | ten targets hard for the radar: 0.3 m^2 at 48 km over the mountains, slow (25 m/s) over the hills, tangential (in the MTI notch), a 1 m^2 target at 23 km behind a 10 m^2 target at 5 km (pulse handover, STC), two targets 300 m apart, 420 m/s, 37 deg elevation, 100 m altitude at 45 km |
 | `src/random_targets_scenario.m` | `cfg.scenario.random.n` (10) targets with random RCS, position, altitude, speed and heading in the limits of `cfg.scenario.random` (reproducible: seed) |
 | `src/six_targets_scenario.m`, `make_target.m`, `target_geometry.m`, `illumination_time.m`, `target_sectors.m` | targets |
 | `tests/` | tests (see below) |
@@ -332,10 +334,49 @@ there, at the same beam and Doppler, behind very strong far targets.
   number changes when the antenna points away from the target
   (`target_look.m`), so a target near North does not change its RCS in the
   middle of a dwell.
-* **Clutter:** constant sigma0 (-30 dB) Rayleigh cells (0.25 deg x 15 m) from
-  1 km to the radar horizon, with internal motion. Scan modulation
+* **Clutter power (CNR):** `cfg.clutter.cnr_dB` (72.7 dB) is the
+  clutter-to-noise ratio of land at `cfg.clutter.cnrRange_m` (5 km): the
+  mean clutter power over the noise power at the matched filter output of
+  one element (short pulse, one pulse, no STC, before the MTI), averaged
+  over the antenna azimuth (`clutter_cnr.m`). The pulse compression gives
+  distributed clutter and noise the same gain, so this is the CNR of a range
+  cell; it falls with R^3. The CNR sets the reflectivity of land (72.7 dB =
+  sigma0 -30 dB, printed in the run summary), and every other terrain type
+  is `sigma0Rel_dB` above or below it, so `cnr_dB` scales all the clutter.
+  `cnr_dB = []` uses `cfg.clutter.sigma0_dB`. `test_clutter` measures the
+  CNR in the simulated chain (60, 72.7 and 85 dB: within 0.1 dB). The STC
+  is designed for the default: 15 dB more CNR clips 8% of the receive
+  samples behind the mountains and hills (`run_radar_sim` warns; raise
+  `cfg.rx.stc.curve`/`curveLong` or lower `cfg.rx.gain_dB`).
+* **Terrain (`cfg.clutter.terrain`, `clutter_terrain.m`):** `'regions'`
+  (default) is land with four regions on top (`cfg.clutter.regions`, rows
+  {type, [az1 az2], [r1 r2], height}):
+
+  | Region | Azimuth | Range | Height | sigma0 vs. land | Internal motion |
+  |---|---|---|---|---|---|
+  | mountain range (ridge) | 30 - 75 deg | 42 - 62 km | 2500 m | +4 dB | Gaussian 0.05 m/s |
+  | hills (rolling, on rising ground) | 100 - 160 deg | 3 - 12 km | 200 m | +3 dB | as land |
+  | desert (flat) | 180 - 250 deg | 1 - 20 km | 0 | -15 dB | Gaussian 0.02 m/s |
+  | sea (flat) | 280 - 340 deg | 3 - 30 km | 0 | -15 dB | Gaussian 1 m/s around a 2 m/s drift toward the East |
+  | land (elsewhere) | | 1 km - horizon | 0 | 0 (CNR) | `cfg.clutter.spectrum` |
+
+  The types (`cfg.clutter.types`: `sigma0Rel_dB`, `icmStd_mps`,
+  `meanVel_mps`, `meanDir_deg`, `shape`) and the regions are free to
+  change. A cell is seen when no nearer cell of its azimuth is higher in
+  elevation (4/3 earth): flat land, desert and sea end at the 10.1 km
+  horizon, the hills show their front slopes (valleys shadowed), the
+  mountains are seen at 42 - 62 km (78% of the front slopes, 4% of the
+  back slopes). Hills and mountains return from their own elevation (one
+  steering vector per elevation group: `sys.clutterSteer`, one column of
+  `clutter_signal` per group) and with the elevation pattern at it. The
+  sea drift gives its clutter a mean radial velocity (-1.5 to -2 m/s on the
+  West side), still inside the MTI notch. `'uniform'` is land everywhere,
+  the model before the terrain types (the same cells and random numbers).
+* **Clutter cells:** Rayleigh cells (0.25 deg x 15 m) from
+  1 km on, with internal motion. Scan modulation
   comes from the two-way azimuth pattern. Two Doppler spectra of the internal
-  motion (`cfg.clutter.spectrum`):
+  motion of land (`cfg.clutter.spectrum`; the types with their own
+  `icmStd_mps` are Gaussian):
   * `'gaussian'` (default): every cell moves with a random radial velocity
     of std `icmStd_mps` (0.1 m/s), a Gaussian spectrum;
   * `'exponential'`: Billingsley's model of wind-blown land clutter. Every
@@ -862,8 +903,12 @@ PPI use a virtual display: `xvfb-run octave --no-gui --eval run_all_tests`.
 
 ## Assumptions and limits
 
-* Flat earth for target geometry. The clutter extends to the 4/3-earth
-  radar horizon, and all clutter arrives from one elevation (0 deg).
+* Flat earth for target geometry (terrain does not mask targets). The
+  clutter of flat terrain extends to the 4/3-earth radar horizon, elevated
+  terrain beyond it; the shadowing is along each azimuth only. Flat terrain
+  returns from one elevation (0 deg), every hill or mountain region from
+  one mean elevation (its steering vector); sigma0 does not depend on the
+  grazing angle.
 * The transmitter uses the wide element pattern in elevation. Every
   receive element sees the full azimuth pattern.
 * Swerling 1 targets (constant RCS within a scan), no multipath, no echoes

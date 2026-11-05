@@ -277,8 +277,36 @@ else
 end
 sys.nBeams = numel(sys.dbf.beamEl_deg);
 
-% All clutter arrives from (about) the same elevation: one steering vector
-sys.clutterSteer = steering_vector(sys, 0, cfg.clutter.elevation_deg);
+%% Ground clutter: reflectivity from the CNR, elevation groups of the terrain
+% cfg.clutter.cnr_dB is the CNR of land at cfg.clutter.cnrRange_m at the
+% matched filter output of one element (clutter_cnr.m): it sets the
+% reflectivity sigma0 of land, the other terrain types are relative to it.
+% Without cnr_dB ([]) sigma0 is cfg.clutter.sigma0_dB. Every elevation group
+% of the terrain (clutter_terrain.m: flat ground, each hill or mountain
+% region) has its own steering vector (columns of sys.clutterSteer).
+cc = cfg.clutter;
+if ~isfield(cc, 'cnrRange_m') || isempty(cc.cnrRange_m), cc.cnrRange_m = 5000; end
+if ~(cc.cnrRange_m > 0), error('cfg.clutter.cnrRange_m must be a positive range [m].'); end
+cnrPerSigma0 = clutter_cnr(sys, 1, cc.cnrRange_m, cc.elevation_deg);   % CNR of sigma0 = 1 (0 dB)
+if isfield(cc, 'cnr_dB') && ~isempty(cc.cnr_dB)
+    sys.clutter.sigma0_dB = cc.cnr_dB - 10*log10(cnrPerSigma0);
+else
+    sys.clutter.sigma0_dB = cc.sigma0_dB;
+end
+sys.clutter.cnr_dB = sys.clutter.sigma0_dB + 10*log10(cnrPerSigma0);
+sys.clutter.cnrRange_m = cc.cnrRange_m;
+sys.clutter.groupEl_deg = cc.elevation_deg;
+if cc.enable
+    T = clutter_terrain(cfg, sys);
+    sys.clutter.groupEl_deg = T.groupEl_deg;
+    sys.clutter.typeNames = T.typeNames;
+    sys.clutter.maxRange_m = T.range_m(end);
+    clear T
+end
+sys.clutterSteer = zeros(sys.nCh, numel(sys.clutter.groupEl_deg));
+for g = 1:numel(sys.clutter.groupEl_deg)
+    sys.clutterSteer(:, g) = steering_vector(sys, 0, sys.clutter.groupEl_deg(g));
+end
 
 %% CPI buffer and Doppler processing
 % CPI = time a target stays inside the 3 dB azimuth beam; the buffer holds

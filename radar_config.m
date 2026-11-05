@@ -249,9 +249,44 @@ cfg.track.minSpeed_mps    = 5;       % minimum speed of a track when minSpeedEna
 
 %% Ground clutter
 cfg.clutter.enable           = true;
-cfg.clutter.sigma0_dB        = -30;   % land clutter reflectivity [dB m^2/m^2]
+% Clutter power: CNR (clutter-to-noise ratio) of land at the reference range:
+% the mean clutter power over the noise power at the matched filter output of
+% one element (short pulse, one pulse, no STC, before the MTI), averaged over
+% the antenna azimuth (clutter_cnr.m; the pulse compression gives clutter and
+% noise the same gain, so it is also the CNR of a range cell). It sets the
+% reflectivity sigma0 of land (printed in the run summary); every other
+% terrain type is sigma0Rel_dB above or below it, so cnr_dB scales all the
+% clutter. 72.7 dB at 5 km = sigma0 -30 dB. A higher CNR may need more STC
+% attenuation (run_radar_sim warns about an ADC overload).
+cfg.clutter.cnr_dB           = 72.7;  % CNR of land at cnrRange_m [dB] ([] = sigma0_dB below)
+cfg.clutter.cnrRange_m       = 5000;  % reference range of the CNR [m]
+cfg.clutter.sigma0_dB        = -30;   % land reflectivity [dB m^2/m^2], used only when cnr_dB = []
 cfg.clutter.minRange_m       = 1000;  % clutter starts here [m]
-cfg.clutter.maxRange_m       = [];    % [] = radar horizon (4/3 earth model)
+cfg.clutter.maxRange_m       = [];    % [] = radar horizon (4/3 earth model) of the flat ground; elevated
+                                      % terrain (hills, mountains) is seen beyond it
+% Terrain around the radar (clutter_terrain.m):
+%   'uniform'  land everywhere, to the horizon (the model before the terrain types)
+%   'regions'  land, and the regions below on top of it (later rows win). Rows:
+%              {type, [az1 az2] sector clockwise from az1 to az2 [deg, from North],
+%               [r1 r2] ground range [m], height_m (mountain: of the ridge, hill: of the crests)}.
+%              A cell is seen only when no nearer terrain on its azimuth is higher
+%              in elevation (4/3 earth): back slopes are shadowed, sea and desert
+%              end at the radar horizon (10 km), mountains are seen far beyond it.
+cfg.clutter.terrain = 'regions';
+cfg.clutter.regions = {
+    'mountain', [ 30  75], [42e3 62e3], 2500   % mountain range in the North-East (strong, seen beyond the horizon)
+    'hill',     [100 160], [ 3e3 12e3],  200   % hills in the East-South-East (patchy: shadowed valleys)
+    'desert',   [180 250], [ 1e3 20e3],    0   % desert in the South-West (weak, nearly no motion)
+    'sea',      [280 340], [ 3e3 30e3],    0   % sea in the West-North-West (waves: moving clutter)
+};
+% Terrain types: reflectivity relative to land [dB], internal motion (icmStd_mps = []: the spectrum
+% of cfg.clutter.spectrum below, else Gaussian with this std around the mean radial velocity
+% meanVel_mps*cos(az - meanDir_deg) of a drift toward meanDir_deg), shape: 'flat', 'ridge', 'rolling'.
+cfg.clutter.types.land     = struct('sigma0Rel_dB',   0, 'icmStd_mps', [],   'meanVel_mps', 0, 'meanDir_deg',  0, 'shape', 'flat');
+cfg.clutter.types.hill     = struct('sigma0Rel_dB',   3, 'icmStd_mps', [],   'meanVel_mps', 0, 'meanDir_deg',  0, 'shape', 'rolling');
+cfg.clutter.types.mountain = struct('sigma0Rel_dB',   4, 'icmStd_mps', 0.05, 'meanVel_mps', 0, 'meanDir_deg',  0, 'shape', 'ridge');
+cfg.clutter.types.desert   = struct('sigma0Rel_dB', -15, 'icmStd_mps', 0.02, 'meanVel_mps', 0, 'meanDir_deg',  0, 'shape', 'flat');
+cfg.clutter.types.sea      = struct('sigma0Rel_dB', -15, 'icmStd_mps', 1.0,  'meanVel_mps', 2, 'meanDir_deg', 90, 'shape', 'flat');
 cfg.clutter.azStep_deg       = 0.25;  % azimuth size of a clutter cell [deg]
 cfg.clutter.rangeStepSamples = 12;    % range size of a clutter cell in ADC samples (12 -> 15 m)
 % Doppler spectrum of the internal clutter motion (wind-blown vegetation):
@@ -267,7 +302,8 @@ cfg.clutter.icmStd_mps       = 0.1;   % 'gaussian': std of internal clutter moti
 cfg.clutter.windSpeed_mps    = 4.5;   % 'exponential': wind speed [m/s] (4.5 m/s = 10 mph, breezy)
 cfg.clutter.expBeta_spm      = [];    % 'exponential': beta [s/m] ([] = from the wind speed)
 cfg.clutter.dcToAc           = [];    % 'exponential': DC/AC power ratio r ([] = from the wind speed)
-cfg.clutter.elevation_deg    = 0;     % elevation of the clutter returns [deg]
+cfg.clutter.elevation_deg    = 0;     % elevation of the returns of flat terrain (land, desert, sea) [deg];
+                                      % hills and mountains return from their own elevation
 
 %% Simulation length
 cfg.sim.nScans      = 1;      % number of antenna revolutions

@@ -7,7 +7,8 @@ function x = generate_rx_signal(sys, targets, t_s, azAnt_deg, clutterIf)
 %     1. every target: position from its motion, received power from the
 %        radar equation (RCS of this antenna pass, Swerling 1), echo of both
 %        sub-pulses on the 30 MHz IF with the element phases
-%     2. ground clutter (clutterIf from clutter_signal.m, [] = none)
+%     2. ground clutter (clutterIf from clutter_signal.m, [] = none: one
+%        column per elevation group, steering vectors sys.clutterSteer)
 %     3. transmitter leakage while a pulse is transmitted (isolation)
 %     4. the STC attenuator in front of the receiver (sys.rx.stcGain, stc_gain.m)
 %     5. thermal noise of the receiver (k*T0*F over fs/2), after the STC
@@ -53,7 +54,7 @@ for i = 1:numel(targets)
     end
 end
 
-%% 2) Clutter (same echo on all elements, different phase)
+%% 2) Clutter (per elevation group the same echo on all elements, different phase)
 if ~isempty(clutterIf)
     x = x + real(single(clutterIf) * single(sys.clutterSteer).');
 end
