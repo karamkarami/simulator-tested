@@ -28,7 +28,10 @@
  * (zero velocity and acceleration, std sigmaV0, sigmaA0). Confirmation after
  * confirmHits updates; deletion after more than maxMiss (tentative:
  * maxMissTentative) missed scans, a scan being missed when the antenna passed
- * the track half a scan ago without an update.
+ * the track half a scan ago without an update. With minSpeed > 0 a track
+ * with at least minSpeedHits updates whose speed |v| (3-D
+ * sqrt(vx^2+vy^2+vz^2), 2-D sqrt(vx^2+vy^2), velocity of its last update) is
+ * below minSpeed is deleted too (slow clutter residue, birds, vehicles).
  */
 #include "tracker.h"
 
@@ -64,6 +67,8 @@ void tracker_init(Tracker *t, const RadarConfig *cfg)
     t->confirmHits = cfg->trackConfirmHits;
     t->maxMissTentative = cfg->trackMaxMissTentative;
     t->maxMiss = cfg->trackMaxMiss;
+    t->minSpeed = cfg->trackMinSpeed;
+    t->minSpeedHits = 2;
     t->nextId = 1;
     t->pendingFirst = t->pendingLast = -INFINITY;
 }
@@ -536,7 +541,13 @@ void tracker_update(Tracker *t, const Detection *plots, int n, double t_s, int f
         const double m = floor((t_s - s->t) / t->scanTime_s - 0.5);
         s->misses = m > 0.0 ? (int)m : 0;
         const int limit = s->confirmed ? t->maxMiss : t->maxMissTentative;
-        if (s->misses > limit) {
+        int slow = 0;
+        if (t->minSpeed > 0.0 && s->hits >= t->minSpeedHits) {
+            double v2 = 0.0;
+            for (int i = t->dim; i < 2 * t->dim; i++) v2 += s->x[i] * s->x[i];
+            slow = sqrt(v2) < t->minSpeed;
+        }
+        if (s->misses > limit || slow) {
             if (callback) {
                 Track r;
                 tracker_report(t, j, &r);

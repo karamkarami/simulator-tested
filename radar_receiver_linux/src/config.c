@@ -306,10 +306,15 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             cfg->trackConfirmHits = get_int(&rs, "trackConfirmHits");
             cfg->trackMaxMissTentative = get_int(&rs, "trackMaxMissTentative");
             cfg->trackMaxMiss = get_int(&rs, "trackMaxMiss");
+            {                                      /* optional: no speed gate in older files */
+                const Record *r = find_optional(&rs, "trackMinSpeed");
+                cfg->trackMinSpeed = (r && r->rows * r->cols >= 1) ? r->data[0] : 0.0;
+            }
             cfg->scanTime_s = get_scalar(&rs, "scanTime_s");
             if (!rs.failed && ((cfg->trackDim != 2 && cfg->trackDim != 3) || !(cfg->trackGate > 0) ||
                                !(cfg->scanTime_s > 0) || (cfg->trackModel != TRACK_CV && cfg->trackModel != TRACK_CA) ||
-                               !(cfg->trackBatchGap_s >= 0) || !(cfg->trackBatchMax_s >= 0)))
+                               !(cfg->trackBatchGap_s >= 0) || !(cfg->trackBatchMax_s >= 0) ||
+                               !(cfg->trackMinSpeed >= 0)))
                 set_error(&rs, "invalid tracker settings in the configuration");
         }
 

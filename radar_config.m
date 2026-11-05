@@ -241,6 +241,11 @@ cfg.track.gateProb        = 0.999;   % probability that the gate holds the corre
 cfg.track.confirmHits     = 3;       % updates (incl. the first plot) that confirm a tentative track
 cfg.track.maxMissTentative = 1;      % scans without a plot before a tentative track is deleted
 cfg.track.maxMiss         = 3;       % scans without a plot before a confirmed track is deleted
+cfg.track.minSpeedEnable  = false;   % true: delete the tracks slower than minSpeed_mps (clutter residue,
+                                     % birds, ground vehicles). Speed of the state: sqrt(vx^2+vy^2+vz^2) in
+                                     % 3-D, sqrt(vx^2+vy^2) in 2-D. Tested on every track with at least 2
+                                     % updates (a new track has no measured velocity yet), tentative or confirmed
+cfg.track.minSpeed_mps    = 5;       % minimum speed of a track when minSpeedEnable is true [m/s]
 
 %% Ground clutter
 cfg.clutter.enable           = true;
@@ -271,7 +276,25 @@ cfg.sim.seed        = 1;      % random seed
 cfg.sim.swerling    = 1;      % target RCS model: 1 = Swerling 1 (new RCS every scan), 0 = constant
 
 %% Targets (see make_target.m)
-cfg.targets = six_targets_scenario();
+% Test scenario:
+%   'six'       six_targets_scenario.m: six targets around the radar (0.5 - 10 m^2, 8 - 46 km)
+%   'challenge' challenge_targets_scenario.m: ten targets that are hard for the radar
+%               (low SNR, slow in the clutter, tangential in the MTI notch, behind a strong
+%               near target at the pulse handover, two targets 300 m apart, 420 m/s, high
+%               elevation, low altitude near the horizon); some are expected to be missed
+%   'random'    random_targets_scenario.m: cfg.scenario.random.n targets with random position,
+%               RCS and velocity in the limits below (the same seed gives the same targets)
+% cfg.targets is set from the scenario below; after changing cfg.scenario in a
+% script, set cfg.targets = target_scenario(cfg) again (or give cfg.targets directly).
+cfg.scenario.type = 'six';                 % 'six', 'challenge' or 'random'
+cfg.scenario.random.n         = 10;        % number of random targets
+cfg.scenario.random.seed      = [];        % [] = cfg.sim.seed
+cfg.scenario.random.rcs_m2    = [0.5 10];  % mean RCS [min max], log-uniform [m^2]
+cfg.scenario.random.range_m   = [5e3 70e3];% ground range at t = 0 [min max] [m] (at most 95% of cfg.rx.maxRange_m)
+cfg.scenario.random.alt_m     = [300 10000];% altitude [min max] [m]
+cfg.scenario.random.maxEl_deg = 40;        % at most this elevation at t = 0 (limits the altitude of near targets) [deg]
+cfg.scenario.random.speed_mps = [30 300];  % horizontal speed [min max] [m/s], heading uniform 0 - 360 deg
+cfg.targets = target_scenario(cfg);
 
 %% Recording of the raw ADC data and of the DDC output, streaming of the DDC output
 cfg.io.outFolder = fullfile(root, 'output');

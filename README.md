@@ -168,6 +168,11 @@ cfg.io.saveRaw = false;             % recordings per PRI: raw ADC data and/or DD
 cfg.io.saveDdc = true;
 cfg.console.plots = false;          % no list of every plot and track (cfg.console.enable = false: no console output)
 results = run_radar_sim(cfg);
+
+cfg = radar_config;                 % another test scenario (or set cfg.scenario.type in radar_config.m)
+cfg.scenario.type = 'challenge';    % 'six' (default), 'challenge' (10 hard targets) or 'random' (10 random targets)
+cfg.targets = target_scenario(cfg); % the targets of the scenario
+results = run_radar_sim(cfg);
 replay_ddc_udp;                     % send the DDC files over UDP with the PRI timing
 
 cfg = radar_config;                 % only the DDC files, in parallel (parfor, Parallel Computing Toolbox)
@@ -227,6 +232,9 @@ file was built for other values (for example after you change
 | `src/detection_log_init.m`, `detection_log_add.m` | CFAR detections kept for the PPI |
 | `src/cfar_pfa.m` | false alarm probability of a CFAR threshold (inverse of `cfar_alpha.m`) |
 | `src/snr_budget.m`, `print_snr_budget.m` | expected SNR after every block (incl. STC, ADC noise and DDC rounding; blind speeds marked) |
+| `src/target_scenario.m` | targets of the scenario selected by `cfg.scenario.type`: `'six'`, `'challenge'` or `'random'` |
+| `src/challenge_targets_scenario.m` | ten targets hard for the radar: 0.1 m^2 at 65 km, slow (17 m/s) in the clutter, tangential (in the MTI notch), a 1 m^2 target at 23 km behind a 10 m^2 target at 5 km (pulse handover, STC), two targets 300 m apart, 420 m/s, 37 deg elevation, 100 m altitude at 45 km |
+| `src/random_targets_scenario.m` | `cfg.scenario.random.n` (10) targets with random RCS, position, altitude, speed and heading in the limits of `cfg.scenario.random` (reproducible: seed) |
 | `src/six_targets_scenario.m`, `make_target.m`, `target_geometry.m`, `illumination_time.m`, `target_sectors.m` | targets |
 | `tests/` | tests (see below) |
 | `radar_receiver_windows/`, `radar_receiver_linux/` | the receiver processing in C (CMake/CLion, Qt PPI, serial output), one project per operating system with the same `src`, `tests`, `tools` and `config` (test `same_sources`; the Linux one also has real-time options) |
@@ -533,7 +541,14 @@ there, at the same beam and Doppler, behind very strong far targets.
   close targets keep their own tracks (`test_tracker`: two targets 200 m
   apart). A plot without a track starts a tentative track (zero velocity
   and acceleration, velocity std `maxSpeed_mps`/sqrt(3)). A track is confirmed after
-  3 updates and deleted after more than 3 missed scans (tentative: 1). The
+  3 updates and deleted after more than 3 missed scans (tentative: 1).
+  Speed gate (off by default): with `cfg.track.minSpeedEnable = true` a
+  track (tentative or confirmed) with at least 2 updates whose speed
+  sqrt(vx^2+vy^2+vz^2) (2-D: sqrt(vx^2+vy^2)) is below
+  `cfg.track.minSpeed_mps` (default 5 m/s) is deleted: slow clutter
+  residue, birds, ground vehicles (a new track has no measured velocity yet,
+  so it is tested from its second update on). The C receiver does the same
+  (`trackMinSpeed` in its configuration file). The
   tracks are in `results.tracker` and on the PPI.
 * **Pruning and plots:** only local maxima in beam x range x Doppler are
   kept. Range, elevation and Doppler sidelobes more than 20 dB below a

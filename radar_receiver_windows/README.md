@@ -281,7 +281,9 @@ well (`cfg.track.useRadialVelocity`): unambiguous when no target can be
 faster than half the span of the Doppler axis (fixed PRF at 170 MHz:
 +-441 m/s), otherwise unfolded with the range rate the track predicts. Once
 per PRI it gets the plots of that PRI, associates a complete batch and
-deletes old tracks, as `run_radar_sim.m` does; a gap in the pulse numbers
+deletes old tracks (and, with `trackMinSpeed` > 0 from
+`cfg.track.minSpeedEnable`, the tracks with 2+ updates slower than
+`cfg.track.minSpeed_mps`), as `run_radar_sim.m` does; a gap in the pulse numbers
 and the end of the data associate the open batch. Confirmations are printed
 on the console (with their radial velocity; `cfg.console.plots`,
 `--quiet`), and the number of updates at the end.
@@ -507,7 +509,7 @@ Timing:
 
 | Test | What it checks |
 |---|---|
-| `tracker` (`tests/test_tracker.c`) | two crossing targets over 6 scans, 3-D and 2-D (plots with radial velocity): two confirmed tracks that stay on their targets; GNN with two targets 200 m apart: each track stays on its own target; with plots, a configuration and the track log from `../tests/test_tracker.m` (CV and CA, 2-D and 3-D, with and without the radial velocity, staggered PRF with folded plot velocities), every C track update equals MATLAB's (same plot, state within 1e-6) |
+| `tracker` (`tests/test_tracker.c`) | two crossing targets over 6 scans, 3-D and 2-D (plots with radial velocity): two confirmed tracks that stay on their targets; GNN with two targets 200 m apart: each track stays on its own target; speed gate: a 3 m/s track is deleted at its second update with `trackMinSpeed` = 5 m/s, a 100 m/s one kept; with plots, a configuration and the track log from `../tests/test_tracker.m` (CV and CA, 2-D and 3-D, with and without the radial velocity, staggered PRF with folded plot velocities), every C track update equals MATLAB's (same plot, state within 1e-6) |
 | `core` (`tests/test_core.c`) | batched FFT against a direct DFT; plot extractor, also on random dense detection streams (hundreds of open groups) against the linear search of `plot_extractor.m`: the same plots in the same order; a moving target through the whole chain with the exported configuration (its velocity a quarter of the Doppler axis from zero, for any carrier frequency; one plot at the right range, velocity and beam); direct and fast-convolution matched filters give the same plot; the same target with the CFAR threshold raised to 45 dB at run time gives no detection; `cfar_pfa()` against the closed form (one look) and the Pfa 1e-8 of the configured threshold |
 | `core_phasecode` | the same core test with `config/radar_config_phasecode.bin` (both sub-pulses P4 phase codes with mismatch filters): the echo is the real code, the plot lies on the target cell |
 | `core_1ch` | the same core test with `config/radar_config_1ch.bin` (the default radar with one receive element, no DBF): four-step FFT and direct matched filter give the same plot |

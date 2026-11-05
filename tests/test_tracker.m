@@ -28,6 +28,11 @@ function ok = test_tracker()
 %      closer than the constant-velocity model. With the radial velocity the
 %      CV track must be closer than without it (this target accelerates
 %      nearly along the line of sight) and CA still better in velocity.
+%   4. Speed gate (cfg.track.minSpeedEnable, minSpeed_mps = 5 m/s): a target
+%      at 3 m/s and one at 100 m/s, plots without errors, 4 scans. Without
+%      the gate both have a track; with it the slow track is deleted at its
+%      second update (a track with one update is kept: its velocity is not
+%      measured yet), the fast one is kept (as the C test_tracker).
 %   When the C receiver is built, radar_receiver_<os>/build/test_tracker runs the
 %   C tracker on the plots of case 1: every track update must match MATLAB.
 
@@ -55,6 +60,7 @@ fprintf(['  3-D CV, staggered PRF (plot velocity folded): radial velocity error 
 ok = good && ok;
 ok = gnn_case() && ok;
 ok = maneuver_case() && ok;
+ok = min_speed_case() && ok;
 fprintf('EKF tracker: %s\n', ternary(ok, 'PASS', 'FAIL'));
 end
 
@@ -273,6 +279,37 @@ for useVr = [false true]
     fprintf(['  Maneuver (4 m/s^2), radial velocity %s: CV position error %.0f m, velocity error %.1f m/s; ' ...
              'CA %.0f m, %.1f m/s, acceleration error %.2f m/s^2: %s\n'], ternary(useVr, 'used', 'not used'), ...
             err(1, 1:2), err(2, :), ternary(good, 'ok', 'FAIL'));
+    ok = ok && good;
+end
+end
+
+function ok = min_speed_case()
+% A slow (3 m/s) and a fast (100 m/s) target receding along the line of sight, without
+% and with the speed gate of 5 m/s.
+ok = true;
+speed = [3 100];  az = [30 120];  R0 = 20e3;
+for gate = [false true]
+    cfg = radar_config();
+    cfg.console.enable = false;
+    cfg.ant.nElements = 1;
+    cfg.track.dim = '2d';
+    cfg.track.minSpeedEnable = gate;
+    cfg.track.minSpeed_mps = 5;
+    sys = setup_radar(cfg);
+    T = sys.track.scanTime_s;
+    tr = track_init(sys.track);
+    for scan = 0:3
+        t = scan*T;
+        pl = [make_plot(t, R0 + speed(1)*t, az(1), NaN, 2, speed(1)), make_plot(t, R0 + speed(2)*t, az(2), NaN, 2, speed(2))];
+        tr = track_update(tr, pl, t, true);
+        if scan == 0, afterFirst = numel(tr.tracks); end
+    end
+    rep = track_report(tr);
+    v = arrayfun(@(r) norm(r.vel_mps(1:2)), rep);
+    nSlow = sum(v < 50);  nFast = sum(v >= 50);
+    good = afterFirst == 2 && nFast == 1 && nSlow == ~gate;
+    fprintf('  Speed gate %s: %d tracks after the first scan, at the end %d slow and %d fast track(s): %s\n', ...
+            ternary(gate, '5 m/s', 'off'), afterFirst, nSlow, nFast, ternary(good, 'ok', 'FAIL'));
     ok = ok && good;
 end
 end

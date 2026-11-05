@@ -126,6 +126,8 @@ typedef struct {
     double  trackVrSpan;    /* the plot velocity is known modulo this (lambda / (2 row PRI)) [m/s] */
     double  trackGateVr;    /* chi-square gate of d^2 with the radial velocity            */
     int     trackConfirmHits, trackMaxMissTentative, trackMaxMiss;
+    double  trackMinSpeed;  /* delete the tracks with 2+ updates slower than this (|v| of the state)
+                               [m/s]; 0 = off (cfg.track.minSpeedEnable; optional in the file: off) */
     double  scanTime_s;     /* antenna revolution                                         */
 
     /* run-time option (not in the file): matched filter method,

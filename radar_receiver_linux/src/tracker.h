@@ -32,6 +32,8 @@ typedef struct {
     double   Rvr, vrSpan, gateVr;
     double   batchGap_s, batchMax_s;     /* GNN batch                               */
     int      confirmHits, maxMissTentative, maxMiss;
+    double   minSpeed;                   /* delete tracks slower than this [m/s], 0 = off */
+    int      minSpeedHits;               /* updates before the speed is tested (2)  */
     TrackState *tracks;
     int      nTracks, capacity;
     uint32_t nextId;
@@ -49,7 +51,8 @@ void tracker_free(Tracker *t);
  * track_update.m: the batch is associated (GNN) when the antenna has turned
  * batchGap_s without a new plot or batchMax_s after its first plot, the new
  * plots join the batch, flush = 1 associates it at once; then the tracks
- * with too many missed scans are deleted. Every update and deletion is
+ * with too many missed scans are deleted, and with minSpeed > 0 the tracks
+ * with at least minSpeedHits updates whose speed |v| is below minSpeed. Every update and deletion is
  * reported through callback (may be NULL). Plots without elevation are not
  * used in 3-D. */
 void tracker_update(Tracker *t, const Detection *plots, int n, double t_s, int flush,

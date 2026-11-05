@@ -108,6 +108,7 @@ r{end+1} = {'trackGateVr', tk.gateVr};
 r{end+1} = {'trackConfirmHits', tk.confirmHits};
 r{end+1} = {'trackMaxMissTentative', tk.maxMissTentative};
 r{end+1} = {'trackMaxMiss', tk.maxMiss};
+r{end+1} = {'trackMinSpeed', tk.minSpeed_mps};                          % delete slower tracks [m/s] (0 = off)
 r{end+1} = {'scanTime_s', tk.scanTime_s};
 
 folder = fileparts(fileName);

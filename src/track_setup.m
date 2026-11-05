@@ -10,6 +10,9 @@ function p = track_setup(cfg, sys)
 %   p.Rvr, the span of the Doppler axis p.vrSpan (lambda/(2*row PRI)),
 %   p.vrUnambiguous (maxSpeed below half the span: the plot velocity is the
 %   true one) and the chi-square gate with the radial velocity p.gateVr.
+%   Speed gate: p.minSpeed_mps (cfg.track.minSpeed_mps with
+%   cfg.track.minSpeedEnable, else 0 = off); a track with at least
+%   p.minSpeedHits updates that is slower is deleted (track_update.m).
 t = cfg.track;
 p.enable = logical(t.enable);
 switch lower(t.dim)
@@ -51,6 +54,14 @@ p.gateVr = 2 * gammaincinv(t.gateProb, (p.dim + 1)/2);
 p.confirmHits = t.confirmHits;
 p.maxMissTentative = t.maxMissTentative;
 p.maxMiss = t.maxMiss;
+p.minSpeed_mps = 0;                                % 0: no deletion of slow tracks
+if isfield(t, 'minSpeedEnable') && t.minSpeedEnable
+    if ~(isscalar(t.minSpeed_mps) && t.minSpeed_mps > 0 && isfinite(t.minSpeed_mps))
+        error('cfg.track.minSpeed_mps must be a positive speed [m/s] when cfg.track.minSpeedEnable is true.');
+    end
+    p.minSpeed_mps = t.minSpeed_mps;
+end
+p.minSpeedHits = 2;                                % updates before the speed is tested
 p.scanTime_s = 360 / sys.ant.rate_dps;
 p.batchGap_s = t.gnnSector_deg / sys.ant.rate_dps;     % GNN batch: time without a new plot
 p.batchMax_s = t.gnnMaxSector_deg / sys.ant.rate_dps;  % GNN batch: longest collection time

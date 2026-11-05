@@ -2,7 +2,8 @@
  * test_tracker.c - the C EKF tracker (tracker.c) against the MATLAB tracker.
  *
  *   test_tracker CONFIG                      self tests: two crossing targets, 3-D and 2-D;
- *                                            GNN with two targets 200 m apart
+ *                                            GNN with two targets 200 m apart;
+ *                                            speed gate (3 m/s deleted, 100 m/s kept)
  *   test_tracker CONFIG PLOTS.csv LOG.csv TEND
  *       CONFIG:    exported for the case (export_receiver_config.m): dimension,
  *                  motion model, gate and GNN batch as in tests/test_tracker.m
@@ -134,6 +135,50 @@ static void gnn_test(RadarConfig *cfg)
     tracker_free(&t);
 }
 
+/* Speed gate: a target at 3 m/s and one at 100 m/s, plots without errors,
+ * 2-D, 4 scans. Without the gate both have a track; with minSpeed = 5 m/s the
+ * slow track is deleted at its second update (with one update it is kept:
+ * its velocity is not measured yet), the fast one is kept. */
+static void min_speed_test(RadarConfig *cfg)
+{
+    const double speed[2] = { 3.0, 100.0 }, R0 = 20e3, az[2] = { 30.0, 120.0 }, T = cfg->scanTime_s;
+    const double saved = cfg->trackMinSpeed;
+    for (int gate = 0; gate < 2; gate++) {
+        cfg->trackDim = 2;
+        cfg->trackMinSpeed = gate ? 5.0 : 0.0;
+        Tracker t;
+        tracker_init(&t, cfg);
+        int afterFirst = -1;
+        for (int scan = 0; scan < 4; scan++) {
+            Detection d[2];
+            memset(d, 0, sizeof d);
+            for (int i = 0; i < 2; i++) {
+                d[i].time_s = scan * T;
+                d[i].range_m = R0 + speed[i] * scan * T;   /* receding along the line of sight */
+                d[i].az_deg = az[i];
+                d[i].el_deg = NAN;
+                d[i].vr_mps = speed[i];
+            }
+            tracker_update(&t, d, 2, scan * T, 1, NULL, NULL);
+            if (scan == 0) afterFirst = t.nTracks;
+        }
+        int nSlow = 0, nFast = 0;
+        for (int j = 0; j < t.nTracks; j++) {
+            Track r;
+            tracker_report(&t, j, &r);
+            const double v = hypot(r.vel_mps[0], r.vel_mps[1]);
+            if (v < 50) nSlow++; else nFast++;
+            printf("  speed gate %s: track %u, %d updates, speed %.1f m/s\n", gate ? "5 m/s" : "off", r.id, r.hits, v);
+        }
+        CHECK(afterFirst == 2, "speed gate %s: %d tracks after the first scan (expected 2)", gate ? "on" : "off",
+              afterFirst);
+        CHECK(nFast == 1 && nSlow == (gate ? 0 : 1), "speed gate %s: %d slow and %d fast tracks (expected %d and 1)",
+              gate ? "on" : "off", nSlow, nFast, gate ? 0 : 1);
+        tracker_free(&t);
+    }
+    cfg->trackMinSpeed = saved;
+}
+
 typedef struct {
     FILE *log;
     double ref[11];
@@ -229,6 +274,7 @@ int main(int argc, char **argv)
         self_test(&cfg, 3);
         self_test(&cfg, 2);
         gnn_test(&cfg);
+        min_speed_test(&cfg);
     }
     radar_config_free(&cfg);
     printf(failures ? "FAIL\n" : "PASS\n");

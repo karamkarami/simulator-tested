@@ -15,6 +15,13 @@ function ok = test_setup()
 %      filters of the default length and of 3x the code), so a receiver set
 %      up with another CFAR method or filter accepts the PRIs; the exported
 %      receiver configuration holds the same receive intervals.
+%   5. Target scenarios (cfg.scenario.type): 'six' gives 6 targets,
+%      'challenge' 10; 'random' gives cfg.scenario.random.n targets inside
+%      its limits, the same ones with the same seed, other ones with another
+%      seed, and leaves the random state of the caller as it was. The speed
+%      gate of the tracker (cfg.track.minSpeedEnable) is off by default, set
+%      from cfg.track.minSpeed_mps when enabled (also in the exported
+%      receiver file), and a negative speed stops with a message.
 
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
@@ -112,6 +119,49 @@ f3 = fullfile(tempdir(), 'test_setup_phase_code_3x.mat');
 if exist(f3, 'file'), delete(f3); end
 ok = report(sprintf('DDC output %d samples, short [%d %d], long [%d %d] for every CFAR method and filter (long: %s)', ...
                     ref, strjoin(txt, ', ')), good) && ok;
+
+%% 5) target scenarios and the speed gate of the tracker
+tg = target_scenario(cfg);
+ok = report(sprintf('scenario ''six'': %d targets', numel(tg)), numel(tg) == 6) && ok;
+c = cfg;  c.scenario.type = 'challenge';
+tg = target_scenario(c);
+ok = report(sprintf('scenario ''challenge'': %d targets (%s)', numel(tg), strjoin({tg.name}, ' ')), numel(tg) == 10) && ok;
+c.scenario.type = 'random';
+rng(5);  before = rand;  rng(5);
+tg = target_scenario(c);
+after = rand;
+tg2 = target_scenario(c);
+c.scenario.random.seed = c.sim.seed + 1;
+tg3 = target_scenario(c);
+r = c.scenario.random;
+P = reshape([tg.pos0_m], 3, []).';  V = reshape([tg.vel_mps], 3, []).';
+rho = hypot(P(:, 1), P(:, 2));  sp = hypot(V(:, 1), V(:, 2));  rcs = [tg.rcs_m2].';
+inLimits = all(rho >= r.range_m(1) - 1e-6 & rho <= r.range_m(2) + 1e-6) && ...
+           all(P(:, 3) >= r.alt_m(1) - 1e-6 & P(:, 3) <= r.alt_m(2) + 1e-6) && ...
+           all(atand(P(:, 3) ./ rho) <= r.maxEl_deg + 1e-6) && ...
+           all(sp >= r.speed_mps(1) - 1e-6 & sp <= r.speed_mps(2) + 1e-6) && ...
+           all(rcs >= r.rcs_m2(1) * (1 - 1e-9) & rcs <= r.rcs_m2(2) * (1 + 1e-9));
+good = numel(tg) == r.n && inLimits && isequal(tg, tg2) && ~isequal(tg, tg3) && before == after;
+ok = report(sprintf(['scenario ''random'': %d targets in the limits, the same with the same seed, others with another ', ...
+                     'seed, random state of the caller kept'], numel(tg)), good) && ok;
+c = cfg;  c.track.minSpeedEnable = true;
+s = setup_radar(c);
+good = s.track.minSpeed_mps == c.track.minSpeed_mps && sys.track.minSpeed_mps == 0;
+fc = [tempname() '.bin'];
+evalc('export_receiver_config(c, fc)');
+v = read_receiver_records(fc, {'trackMinSpeed'});
+delete(fc);
+good = good && v == c.track.minSpeed_mps;
+ok = report(sprintf('speed gate of the tracker: off by default, %g m/s when enabled (also in the receiver file)', ...
+                    c.track.minSpeed_mps), good) && ok;
+c.track.minSpeed_mps = -1;
+msg = '';
+try
+    setup_radar(c);
+catch err
+    msg = err.message;
+end
+ok = report(sprintf('cfg.track.minSpeed_mps = -1 stops: "%s"', msg), ~isempty(strfind(msg, 'minSpeed_mps'))) && ok;
 fprintf('Configuration edge cases: %s\n', ternary(ok, 'PASS', 'FAIL'));
 end
 

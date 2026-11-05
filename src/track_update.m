@@ -47,6 +47,10 @@ function tr = track_update(tr, plots, t_s, flush)
 %   Missed scans: the antenna passed the predicted position half a scan ago
 %   without an update; a track with more than p.maxMiss (tentative:
 %   p.maxMissTentative) missed scans is deleted.
+%   Slow tracks (p.minSpeed_mps > 0): a track with at least p.minSpeedHits
+%   updates whose speed |v| (3-D sqrt(vx^2+vy^2+vz^2), 2-D sqrt(vx^2+vy^2),
+%   the velocity of its last update) is below p.minSpeed_mps is deleted too;
+%   its last update is still in tr.log.
 %   The updates are appended to tr.log ([time id confirmed x y z vx vy vz hits
 %   plotIndex], z = 0 in 2-D; plotIndex counts the plots given to the tracker).
 
@@ -76,7 +80,16 @@ for j = 1:numel(tr.tracks)
 end
 limit = p.maxMissTentative * ones(size(miss));
 limit([tr.tracks.confirmed]) = p.maxMiss;
-tr.tracks(miss > limit) = [];
+del = miss > limit;
+if p.minSpeed_mps > 0                               % slow tracks
+    for j = 1:numel(tr.tracks)
+        tk = tr.tracks(j);
+        if tk.hits >= p.minSpeedHits && norm(tk.x(p.dim+1:2*p.dim)) < p.minSpeed_mps
+            del(j) = true;
+        end
+    end
+end
+tr.tracks(del) = [];
 end
 
 function tr = associate(tr)
