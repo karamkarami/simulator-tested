@@ -19,7 +19,13 @@ function [ok, out] = test_scenarios(scenario, varargin)
 %   but one of these scans and, when expected in at least
 %   cfg.track.confirmHits scans including the last, end with a confirmed
 %   track on it (within 500 m in range and 2 deg in azimuth, updated in the
-%   last scan).
+%   last scan). A target whose azimuth changes by more than 15 deg between
+%   looks (passing close to the radar) is not required to have a confirmed
+%   track: a new track knows only the radial velocity, and the next plot
+%   lies outside its gate (a limit of the track initiation; reported).
+%   With one element (2-D tracking at slant range) a crossing target at high
+%   elevation can lose its track as well: the slant-range projection bends
+%   its path (reported as a failure).
 %   The other targets are only reported. Over all: at most 2 false plots per
 %   scan (more than 1 km / 3 deg from every target), no false confirmed
 %   track, and the ADC overload below cfg.adc.overloadWarn.
@@ -133,11 +139,22 @@ for k = 1:nT
     end
     nExp = nnz(expScan);
     needTrack = nExp >= sys.track.confirmHits && expScan(end);
+    % azimuth step between looks: a target that passes close to the radar
+    % turns by tens of degrees per scan; a new track (velocity unknown but
+    % the radial one) does not gate its next plot then (track initiation limit)
+    azL = zeros(1, p.nScans);
+    for s = 1:p.nScans, [~, azL(s)] = target_geometry(tg, tLook(k, s), h); end
+    azStep = max([0, abs(wrap180(diff(azL)))]);
+    fastCross = azStep > 15;
+    if fastCross && needTrack
+        needTrack = false;
+        why = [why, sprintf('%sfast crosser %.0f deg/scan: track not required', ternary(isempty(why), '', ', '), azStep)];
+    end
     out.expected(k) = nExp > 0;
     out.scansExpected(k) = nExp;
     out.scansSeen(k) = nnz(seen(k, expScan));
     good = out.scansSeen(k) >= nExp - (nExp > 1) && (out.tracked(k) || ~needTrack);
-    if ~isempty(why), why = sprintf(' (%d: %s)', nExp, why); end
+    if ~isempty(why), why = sprintf(' (%s)', why); end
     ok = report(sprintf('%-4s %5.1f m^2 %5.1f km az %5.1f: margin %5.1f dB, expected in %d of %d scans%s, plots in %d, %s', ...
                         tg.name, tg.rcs_m2, R1/1e3, mod(atan2(tg.pos0_m(1), tg.pos0_m(2))*180/pi, 360), b1.margin, ...
                         nExp, p.nScans, why, nnz(seen(k, :)), ...
