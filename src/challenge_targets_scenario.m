@@ -11,7 +11,8 @@ function targets = challenge_targets_scenario()
 %           the fixed PRF)
 %   C3      tangential crosser: radial velocity 4 m/s, inside the MTI notch
 %           (blind while it crosses), 220 m/s across the line of sight
-%   C4, C5  a strong near target (10 m^2 at 5 km over the hills, short pulse, deep STC) and
+%   C4, C5  a strong near target (10 m^2 at 5 km over the hills, receding,
+%           short pulse, deep STC) and
 %           a 1 m^2 target behind it on the same azimuth at 23 km: just behind
 %           the long-pulse blind range (22.5 km), at the short/long-pulse
 %           handover and where the long-window STC ends
@@ -27,7 +28,7 @@ function targets = challenge_targets_scenario()
 targets(1)  = make_target('C1',  0.3,  48e3,    50,   4500,  -150,    50);
 targets(2)  = make_target('C2',  2.0,   8e3,   125,    300,   -25,     4);
 targets(3)  = make_target('C3',  5.0,  28e3,    90,   6000,     4,  -220);
-targets(4)  = make_target('C4', 10,     5e3,   140,    400,  -120,     0);
+targets(4)  = make_target('C4', 10,     5e3,   140,    400,   120,     0);
 targets(5)  = make_target('C5',  1.0,  23e3,   140,   3000,   150,     0);
 targets(6)  = make_target('C6',  2.0,  33e3,   185,   5000,  -200,     0);
 targets(7)  = make_target('C7',  2.0,  33.3e3, 185,   5200,  -160,     0);

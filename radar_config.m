@@ -315,9 +315,10 @@ cfg.sim.swerling    = 1;      % target RCS model: 1 = Swerling 1 (new RCS every 
 % Test scenario:
 %   'six'       six_targets_scenario.m: six targets around the radar (0.5 - 10 m^2, 8 - 46 km)
 %   'challenge' challenge_targets_scenario.m: ten targets that are hard for the radar
-%               (low SNR, slow in the clutter, tangential in the MTI notch, behind a strong
-%               near target at the pulse handover, two targets 300 m apart, 420 m/s, high
-%               elevation, low altitude near the horizon); some are expected to be missed
+%               (low SNR over the mountains, slow over the hills, tangential in the MTI notch,
+%               behind a strong near target at the pulse handover, two targets 300 m apart,
+%               420 m/s, high elevation over the sea, low altitude near the horizon); some
+%               are expected to be missed
 %   'random'    random_targets_scenario.m: cfg.scenario.random.n targets with random position,
 %               RCS and velocity in the limits below (the same seed gives the same targets)
 % cfg.targets is set from the scenario below; after changing cfg.scenario in a

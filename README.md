@@ -216,6 +216,7 @@ file was built for other values (for example after you change
 | `src/clutter_cnr.m` | CNR of uniform clutter at the matched filter output (`cfg.clutter.cnr_dB` -> sigma0) |
 | `src/stc_gain.m` | STC: gain of the attenuator in front of the receiver over the PRI (`cfg.rx.stc`; 1 with `cfg.rx.stc.enable = false`) |
 | `src/stc_advice.m` | the hint of the ADC overload warnings: switch the STC on, or raise its attenuation |
+| `clutter_map.m` | picture of the clutter terrain (types, shadowed cells, CNR per cell) -> `output/clutter_map.png` (`docs/clutter_map.png`: the default map) |
 | `stc_demo.m` | STC demonstration: curves, ADC samples of a PRI, clipping, SNR against range, eclipsed echo of a near target (figures in `output/stc_demo`) |
 | `src/adc_overload.m` | fraction of the ADC samples of the receive intervals at full scale (receiver gain too high, STC off) |
 | `src/target_rcs.m`, `draw_target_rcs.m` | Swerling 1 target RCS (a new value every scan) |
@@ -235,7 +236,7 @@ file was built for other values (for example after you change
 | `src/cfar_pfa.m` | false alarm probability of a CFAR threshold (inverse of `cfar_alpha.m`) |
 | `src/snr_budget.m`, `print_snr_budget.m` | expected SNR after every block (incl. STC, ADC noise and DDC rounding; blind speeds marked) |
 | `src/target_scenario.m` | targets of the scenario selected by `cfg.scenario.type`: `'six'`, `'challenge'` or `'random'` |
-| `src/challenge_targets_scenario.m` | ten targets hard for the radar: 0.3 m^2 at 48 km over the mountains, slow (25 m/s) over the hills, tangential (in the MTI notch), a 1 m^2 target at 23 km behind a 10 m^2 target at 5 km (pulse handover, STC), two targets 300 m apart, 420 m/s, 37 deg elevation, 100 m altitude at 45 km |
+| `src/challenge_targets_scenario.m` | ten targets hard for the radar: 0.3 m^2 at 48 km over the mountains, slow (25 m/s) over the hills, tangential (in the MTI notch), a 1 m^2 target at 23 km behind a 10 m^2 target at 5 km (pulse handover, STC), two targets 300 m apart, 420 m/s, 37 deg elevation (over the sea), 100 m altitude at 45 km; C2 and the 5 km target over the hills |
 | `src/random_targets_scenario.m` | `cfg.scenario.random.n` (10) targets with random RCS, position, altitude, speed and heading in the limits of `cfg.scenario.random` (reproducible: seed) |
 | `src/six_targets_scenario.m`, `make_target.m`, `target_geometry.m`, `illumination_time.m`, `target_sectors.m` | targets |
 | `tests/` | tests (see below) |
@@ -370,8 +371,13 @@ there, at the same beam and Doppler, behind very strong far targets.
   steering vector per elevation group: `sys.clutterSteer`, one column of
   `clutter_signal` per group) and with the elevation pattern at it. The
   sea drift gives its clutter a mean radial velocity (-1.5 to -2 m/s on the
-  West side), still inside the MTI notch. `'uniform'` is land everywhere,
+  West side), still inside the MTI notch. `clutter_map.m` draws the map
+  (below: 62 km around the radar, rings every 10 km; brighter = higher CNR,
+  grey = not seen). `'uniform'` is land everywhere,
   the model before the terrain types (the same cells and random numbers).
+
+  ![Clutter terrain](docs/clutter_map.png)
+
 * **Clutter cells:** Rayleigh cells (0.25 deg x 15 m) from
   1 km on, with internal motion. Scan modulation
   comes from the two-way azimuth pattern. Two Doppler spectra of the internal
@@ -831,6 +837,8 @@ budget.
 | `test_ppi_interactive` | PPI interaction: data tips, zoom around the cursor, pan, keys, filters, pinned tips, pause, clear, PNG; detection display (modes, arcs, data tips, filters); CFAR threshold field (Apply, hand-over through `ppi_update`, invalid input, Default, Pfa); tracks (triangles, data tip, checkbox); block processing times |
 | `test_setup` | configuration edge cases without a simulation: the simulated sectors (`[0 360]` = whole circle, across North, several sectors), settings that cannot work stop with a message naming them (MTI notch over all Doppler bins, CPI too short, unknown CFAR method, DDC rate, PRF mode), a short pulse that hands over within its first CFAR window keeps one whole window (and the C receiver accepts the exported configuration); the DDC output and the PRI header are the same for every CFAR method and pulse compression filter |
 | `test_vhf_challenges` | demanding cases at 170 MHz (one CPI each, clutter): ADC overload detected at 60 dB without STC, none with the STC (and at 30 dB without it); strong targets at 5, 8, 12 and 21 km (up to 10 m^2) give one detection and no ghost of their eclipsed long-pulse echo with the STC (the number without it is printed); targets at 30 and 23.5 km (deepest long-window STC) behind a strong near target are detected, no other long-pulse detection; fixed PRF: blind at 5 m/s, 30 - 430 m/s detected with the right velocity; staggered PRF: the row blind speed (225 m/s) flagged and not detected, 150 m/s detected; two targets 300 m apart resolved; 33 000 CFAR detections pruned in about a second, exactly as the direct rules |
+| `test_clutter` | clutter power and terrain (5 min): the CNR measured at the matched filter output equals `cfg.clutter.cnr_dB` (60, 72.7, 85 dB) and `cnr_dB = []` keeps `sigma0_dB`; desert and sea 15 dB below land; nothing flat beyond the horizon, mountains seen beyond it, their back slopes shadowed, one steering vector per elevation group; internal motion of every type (sea: its drift); no ADC clipping over 360 deg at the default CNR, clipping above the warning at +15 dB; one CPI over land, hills, mountains, desert and sea: the target detected, nothing else |
+| `test_scenarios(scenario, ...)` | several scans (default 3, 48 elements, fixed PRF, terrain clutter) of the `'six'`, `'challenge'` or `'random'` scenario through `run_radar_sim`: every target with at least 3 dB of SNR margin, not at a blind speed and in range gives plots in nScans - 1 scans and a confirmed track; at most 2 false plots per scan, no false confirmed track, no ADC overload; options: `'prf'`, `'terrain'` (`'uniform'`, `'regions'`, `'off'`), `'cnrOffset'`, `'nElements'`, `'seed'` |
 | `test_multi_scan(mode, nScans)` | several scans of the six-target scenario through the C receiver (DDC files, `radar_stream_send`): every PRI received, a confirmed track on every target not at a blind speed, no confirmed false track, at most 2 false plots per scan |
 | `test_cfar` | the three CFAR methods on exponential noise: false alarm rate 1e-3 in the interior and at the range edges (shifted window), targets in the first and last range cell detected, only the tested range interval is tested, the noise estimate equals the direct sums over the (shifted) window, also when the whole tested interval lies within the edge cells |
 | `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA, with and without the radial velocity: one confirmed track per target, close to it, no false track; the radial velocity lowers the velocity error after two scans; staggered PRF (folded plot velocities): the track radial velocity is unfolded; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |
