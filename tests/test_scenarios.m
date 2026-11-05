@@ -19,7 +19,12 @@ function [ok, out] = test_scenarios(scenario, varargin)
 %   but one of these scans and, when expected in at least
 %   cfg.track.confirmHits scans including the last, end with a confirmed
 %   track on it (within 500 m in range and 2 deg in azimuth, updated in the
-%   last scan). A target whose azimuth changes by more than 15 deg between
+%   last scan). Not expected in a scan: a blind speed, less than 3 dB of
+%   margin, out of range, or another target at least as strong (-3 dB) in
+%   its CFAR window (CA-CFAR masking: C6/C7 of the challenge scenario). A
+%   target above the highest DBF beam is detected with a wrong elevation (and
+%   its elevation sidelobes as extra plots near it): no 3-D track required.
+%   A target whose azimuth changes by more than 15 deg between
 %   looks (passing close to the radar) is not required to have a confirmed
 %   track: a new track knows only the radial velocity, and the next plot
 %   lies outside its gate (a limit of the track initiation; reported).
@@ -122,19 +127,43 @@ for id = unique(L(:, 2)).'
 end
 
 % expectations from the SNR budget at every look
+B = cell(nT, p.nScans);
+for k = 1:nT
+    for s = 1:p.nScans, B{k, s} = snr_budget(sys, cfg.targets(k), tLook(k, s)); end
+end
+cw = sys.cfar;                                        % CFAR window (cells, bins on each side)
+binV = abs(diff(sys.dop.v_mps(1:2)));
+elTop = Inf;
+if sys.dbf.enabled, elTop = max(sys.dbf.beamEl_deg) + abs(diff(sys.dbf.beamEl_deg(end-1:end))) / 2; end
 for k = 1:nT
     tg = cfg.targets(k);
     expScan = false(1, p.nScans);
-    why = '';
+    notes = {};
+    above = false;
     for s = 1:p.nScans
-        b = snr_budget(sys, tg, tLook(k, s));
-        R = target_geometry(tg, tLook(k, s), h);
-        expScan(s) = ~b.blind && b.margin >= 3 && R >= rCover(1) && R <= rCover(2);
-        if s == 1, b1 = b;  R1 = R; end
-        if ~expScan(s) && isempty(why)
-            if b.blind, why = 'blind speed';
-            elseif b.margin < 3, why = sprintf('margin %.1f dB', b.margin);
-            else, why = sprintf('out of range %.1f km', R/1e3); end
+        b = B{k, s};
+        [R, ~, el, vr] = target_geometry(tg, tLook(k, s), h);
+        inRange = R >= rCover(1) && R <= rCover(2);
+        % CA-CFAR masking: a target at least as strong (-3 dB) inside the CFAR window of this one
+        cell = abs(diff(sys.wave.(b.pulse).range_m(1:2)));
+        masker = '';
+        for j = [1:k-1, k+1:nT]
+            [Rj, ~, ~, vrj] = target_geometry(cfg.targets(j), tLook(k, s), h);
+            dBin = abs(mod(vrj - vr + sys.track.vrSpan/2, sys.track.vrSpan) - sys.track.vrSpan/2) / binV;
+            if strcmp(B{j, s}.pulse, b.pulse) && B{j, s}.doppler >= b.doppler - 3 && ...
+                    abs(Rj - R) / cell <= cw.guardRange + cw.trainRange + 1 && dBin <= cw.guardDoppler + cw.trainDoppler + 1
+                masker = cfg.targets(j).name;
+            end
+        end
+        expScan(s) = ~b.blind && b.margin >= 3 && inRange && isempty(masker);
+        if b.blind, notes{end+1} = sprintf('scan %d blind speed', s); %#ok<AGROW>
+        elseif b.margin < 3, notes{end+1} = sprintf('scan %d margin %.1f dB', s, b.margin); %#ok<AGROW>
+        elseif ~inRange, notes{end+1} = sprintf('scan %d out of range %.1f km', s, R/1e3); %#ok<AGROW>
+        elseif ~isempty(masker), notes{end+1} = sprintf('scan %d in the CFAR window of %s', s, masker); %#ok<AGROW>
+        end
+        if expScan(s) && el > elTop
+            above = true;
+            notes{end+1} = sprintf('scan %d el %.1f deg above the DBF beams (%.1f)', s, el, elTop); %#ok<AGROW>
         end
     end
     nExp = nnz(expScan);
@@ -145,20 +174,24 @@ for k = 1:nT
     azL = zeros(1, p.nScans);
     for s = 1:p.nScans, [~, azL(s)] = target_geometry(tg, tLook(k, s), h); end
     azStep = max([0, abs(wrap180(diff(azL)))]);
-    fastCross = azStep > 15;
-    if fastCross && needTrack
+    if azStep > 15 && needTrack
         needTrack = false;
-        why = [why, sprintf('%sfast crosser %.0f deg/scan: track not required', ternary(isempty(why), '', ', '), azStep)];
+        notes{end+1} = sprintf('fast crosser %.0f deg/scan: track not required', azStep); %#ok<AGROW>
+    end
+    if above && sys.track.dim == 3 && needTrack
+        needTrack = false;
+        notes{end+1} = 'wrong elevation: 3-D track not required'; %#ok<AGROW>
     end
     out.expected(k) = nExp > 0;
     out.scansExpected(k) = nExp;
     out.scansSeen(k) = nnz(seen(k, expScan));
     good = out.scansSeen(k) >= nExp - (nExp > 1) && (out.tracked(k) || ~needTrack);
-    if ~isempty(why), why = sprintf(' (%s)', why); end
-    ok = report(sprintf('%-4s %5.1f m^2 %5.1f km az %5.1f: margin %5.1f dB, expected in %d of %d scans%s, plots in %d, %s', ...
-                        tg.name, tg.rcs_m2, R1/1e3, mod(atan2(tg.pos0_m(1), tg.pos0_m(2))*180/pi, 360), b1.margin, ...
-                        nExp, p.nScans, why, nnz(seen(k, :)), ...
-                        ternary(out.tracked(k), 'confirmed track', 'no confirmed track')), good) && ok;
+    why = '';
+    if ~isempty(notes), why = [' (' strjoin(notes, ', ') ')']; end
+    ok = report(sprintf('%-4s %5.1f m^2 %5.1f km az %5.1f: margin %5.1f dB, expected in %d of %d scans, plots in %d, %s%s', ...
+                        tg.name, tg.rcs_m2, target_geometry(tg, tLook(k, 1), h)/1e3, ...
+                        mod(atan2(tg.pos0_m(1), tg.pos0_m(2))*180/pi, 360), B{k, 1}.margin, nExp, p.nScans, ...
+                        nnz(seen(k, :)), ternary(out.tracked(k), 'confirmed track', 'no confirmed track'), why), good) && ok;
 end
 out.nFalsePlots = nFalse;  out.nFalseTracks = nFalseTracks;  out.adcClippedMax = res.adcClipped.max;
 ok = report(sprintf('%d plots, %d false (at most %d); %d false confirmed track(s); ADC clipped at most %.3f%% of a PRI', ...

@@ -17,10 +17,13 @@ function targets = challenge_targets_scenario()
 %           the long-pulse blind range (22.5 km), at the short/long-pulse
 %           handover and where the long-window STC ends
 %   C6, C7  two targets 300 m apart in range on the same azimuth (other
-%           Doppler: 40 m/s apart): two plots, two tracks
+%           Doppler: 40 m/s apart; 525 m in slant range at the first look):
+%           C7 lies in the 2-D CFAR window of the stronger C6 and is masked
+%           at first (CA-CFAR), then resolved: two plots, two tracks
 %   C8      fast: 420 m/s radial, near the unambiguous limit of the fixed PRF
 %           (+-441 m/s; with the staggered PRF it folds)
-%   C9      high elevation: 9 km altitude at 12 km (37 deg), over the sea
+%   C9      high elevation: 9 km altitude at 12 km (37 deg, receding: below
+%           the highest DBF beam, 40 deg), over the sea
 %   C10     low altitude far away: 100 m at 45 km (0.1 deg elevation) over the
 %           sea, near the radar horizon (51 km for 100 m), at the lower edge
 %           of the beams
@@ -33,6 +36,6 @@ targets(5)  = make_target('C5',  1.0,  23e3,   140,   3000,   150,     0);
 targets(6)  = make_target('C6',  2.0,  33e3,   185,   5000,  -200,     0);
 targets(7)  = make_target('C7',  2.0,  33.3e3, 185,   5200,  -160,     0);
 targets(8)  = make_target('C8',  3.0,  50e3,   235,   9000,  -420,     0);
-targets(9)  = make_target('C9',  2.0,  12e3,   280,   9000,  -150,   100);
+targets(9)  = make_target('C9',  2.0,  12e3,   280,   9000,   150,   100);
 targets(10) = make_target('C10', 5.0,  45e3,   325,    100,  -250,    30);
 end
