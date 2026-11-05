@@ -838,7 +838,7 @@ budget.
 | `test_setup` | configuration edge cases without a simulation: the simulated sectors (`[0 360]` = whole circle, across North, several sectors), settings that cannot work stop with a message naming them (MTI notch over all Doppler bins, CPI too short, unknown CFAR method, DDC rate, PRF mode), a short pulse that hands over within its first CFAR window keeps one whole window (and the C receiver accepts the exported configuration); the DDC output and the PRI header are the same for every CFAR method and pulse compression filter |
 | `test_vhf_challenges` | demanding cases at 170 MHz (one CPI each, clutter): ADC overload detected at 60 dB without STC, none with the STC (and at 30 dB without it); strong targets at 5, 8, 12 and 21 km (up to 10 m^2) give one detection and no ghost of their eclipsed long-pulse echo with the STC (the number without it is printed); targets at 30 and 23.5 km (deepest long-window STC) behind a strong near target are detected, no other long-pulse detection; fixed PRF: blind at 5 m/s, 30 - 430 m/s detected with the right velocity; staggered PRF: the row blind speed (225 m/s) flagged and not detected, 150 m/s detected; two targets 300 m apart resolved; 33 000 CFAR detections pruned in about a second, exactly as the direct rules |
 | `test_clutter` | clutter power and terrain (5 min): the CNR measured at the matched filter output equals `cfg.clutter.cnr_dB` (60, 72.7, 85 dB) and `cnr_dB = []` keeps `sigma0_dB`; desert and sea 15 dB below land; nothing flat beyond the horizon, mountains seen beyond it, their back slopes shadowed, one steering vector per elevation group; internal motion of every type (sea: its drift); no ADC clipping over 360 deg at the default CNR, clipping above the warning at +15 dB; one CPI over land, hills, mountains, desert and sea: the target detected, nothing else |
-| `test_scenarios(scenario, ...)` | several scans (default 3, 48 elements, fixed PRF, terrain clutter) of the `'six'`, `'challenge'` or `'random'` scenario through `run_radar_sim`: every target with at least 3 dB of SNR margin, not at a blind speed and in range gives plots in nScans - 1 scans and a confirmed track; at most 2 false plots per scan, no false confirmed track, no ADC overload; options: `'prf'`, `'terrain'` (`'uniform'`, `'regions'`, `'off'`), `'cnrOffset'`, `'nElements'`, `'seed'` |
+| `test_scenarios(scenario, ...)` | several scans (default 3, 48 elements, fixed PRF, terrain clutter) of the `'six'`, `'challenge'` or `'random'` scenario through `run_radar_sim`, with the simulated sectors around every look at every target. A target is expected in a scan unless it is at a blind speed, has less than 3 dB of SNR margin, is out of range or lies in the CFAR window of a stronger (or nearly as strong) target of the same pulse; it must give plots in all expected scans but one and, with enough scans, a confirmed track (not required above the DBF beams, 40 deg, for a 3-D track, or for a crosser faster than 15 deg per scan); at most 2 false plots per scan, no false confirmed track, no ADC overload; options: `'prf'`, `'terrain'` (`'uniform'`, `'regions'`, `'off'`), `'cnrOffset'`, `'gainOffset'`, `'nElements'`, `'seed'` |
 | `test_multi_scan(mode, nScans)` | several scans of the six-target scenario through the C receiver (DDC files, `radar_stream_send`): every PRI received, a confirmed track on every target not at a blind speed, no confirmed false track, at most 2 false plots per scan |
 | `test_cfar` | the three CFAR methods on exponential noise: false alarm rate 1e-3 in the interior and at the range edges (shifted window), targets in the first and last range cell detected, only the tested range interval is tested, the noise estimate equals the direct sums over the (shifted) window, also when the whole tested interval lies within the edge cells |
 | `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA, with and without the radial velocity: one confirmed track per target, close to it, no false track; the radial velocity lowers the velocity error after two scans; staggered PRF (folded plot velocities): the track radial velocity is unfolded; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |
@@ -901,8 +901,28 @@ Doppler CFAR (two targets). With 3 scans of two targets both tracks are
 confirmed: speed within 4 m/s, heading within 0.3 deg, height within 25 m of
 the truth.
 
+Terrain clutter (CNR of land 72.7 dB at 5 km; mountains, hills, desert and
+sea of `cfg.clutter.regions`), 3 scans each, all PASS:
+
+| Run | Targets expected / seen | False plots | False tracks | ADC clipped |
+|---|---|---|---|---|
+| challenge, fixed PRF, 48 elements | 10 / 10 (C3 blind in scan 1, C6 and C7 in each other's CFAR window in scan 1), 8 confirmed tracks | 0 of 31 | 0 | 0 % |
+| challenge, fixed PRF, 1 element (2-D) | 10 / 10, 9 confirmed tracks | 0 of 29 | 0 | 0 % |
+| random (seed 1), staggered PRF, 48 elements | 10 / 10 (R1, R8 below 3 dB margin in some scans, R3 in scan 3, R4 crosses at 31 deg/scan), 7 confirmed tracks | 0 of 28 | 0 | 0.025 % |
+| random (seed 3), fixed PRF, 1 element | 10 / 10, 8 confirmed tracks (R7, R10 blind in one scan) | 0 of 28 | 0 | 0.038 % |
+| six targets, fixed PRF, 48 elements | PASS | PASS | 0 | PASS |
+| challenge, clutter off | PASS | PASS | 0 | PASS |
+| challenge, CNR +10 dB, gain -10 dB | PASS | PASS | 0 | PASS |
+
+`test_clutter` passes (CNR measured within 0.06 dB of 60, 72.7 and 85 dB),
+and with the terrain clutter `test_vhf_challenges` passes and the C receiver
+still gives exactly the plots and track updates of MATLAB. With the CNR
+raised by 10 dB at the default gain of 60 dB, 3.7 % of a PRI is clipped
+near the hills and mountains (the run warns): 10 dB less receiver gain
+(`cfg.rx.gain_dB`) removes it (the scenario test passes).
+
 `tests/run_all_tests.m` runs all of them for the fixed and the staggered
-PRF (about 4 hours in Octave on a 4-vCPU VM). The six-target test simulates
+PRF and the scenario tests (about 9 hours in Octave on a 4-vCPU VM). The six-target test simulates
 only the azimuth sectors around the targets, about 2400 PRIs. Its raw files
 are about 18 GB per PRF mode; `run_all_tests` deletes them after checking
 them. Octave without a display (`octave-cli` has no graphics toolkit) runs
@@ -917,6 +937,19 @@ PPI use a virtual display: `xvfb-run octave --no-gui --eval run_all_tests`.
   returns from one elevation (0 deg), every hill or mountain region from
   one mean elevation (its steering vector); sigma0 does not depend on the
   grazing angle.
+* The DBF beams cover 0.5 - 40.3 deg in elevation: a target above about
+  40 deg (close and high) is seen only through the sidelobes of the
+  highest beam, with a wrong elevation and a large SNR loss.
+* The 2-D CA-CFAR window (+-11 range cells, +-7 Doppler bins with the
+  guard cells) masks a target with another of similar or larger SNR
+  inside it (challenge C6 / C7 at 33 km in the first scan).
+* Track initiation needs two plots within the gate of a one-plot
+  tentative track: a close target crossing faster than about 15 deg per
+  scan (random R4: 7.7 km, 31 deg/scan) gives plots but no confirmed
+  track.
+* With one element (2-D tracking) the slant range is taken as ground
+  range: for a close high target (elevation above about 20 deg) the
+  track position is off by R(1 - cos(el)), which can exceed the gate.
 * The transmitter uses the wide element pattern in elevation. Every
   receive element sees the full azimuth pattern.
 * Swerling 1 targets (constant RCS within a scan), no multipath, no echoes
