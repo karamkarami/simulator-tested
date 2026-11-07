@@ -164,24 +164,27 @@ newLogW = zeros(0, 1);
 keys = cell(1, nTr);                                 % per track the children [parent STH, plot (0 = none)]
 for i = 1:nTr, keys{i} = zeros(0, 2); end
 for g = 1:nG
-    C = inf(nPl, nTr + nPl);
-    base = 0;
+    % columns: the tracks whose STH of this hypothesis gates a plot, then one new target per plot
+    part = zeros(1, 0);
     for i = 1:nTr
-        h = tr.G(g, i);
-        li = L{i}(h, :);
-        if any(isfinite(li))
-            C(:, i) = -(li - L0{i}(h)).';
-            base = base + L0{i}(h);
-        end
+        if any(isfinite(L{i}(tr.G(g, i), :))), part(end+1) = i; end %#ok<AGROW>
     end
-    C(sub2ind(size(C), 1:nPl, nTr + (1:nPl))) = -logNew;
+    nP = numel(part);
+    C = inf(nPl, nP + nPl);
+    base = 0;
+    for c = 1:nP
+        i = part(c);  h = tr.G(g, i);
+        C(:, c) = -(L{i}(h, :) - L0{i}(h)).';
+        base = base + L0{i}(h);
+    end
+    C(sub2ind(size(C), 1:nPl, nP + (1:nPl))) = -logNew;
     k = max(1, ceil(m.maxHyp * w(g)));
     [A, cost] = murty(C, k);
     for a = 1:size(A, 1)
         row = zeros(1, nTr + nPl);
         plotOf = zeros(1, nTr);
         for j = 1:nPl
-            if A(a, j) <= nTr, plotOf(A(a, j)) = j; end
+            if A(a, j) <= nP, plotOf(part(A(a, j))) = j; end
         end
         for i = 1:nTr
             key = [tr.G(g, i), plotOf(i)];
@@ -193,7 +196,7 @@ for g = 1:nG
             row(i) = idx;
         end
         for j = 1:nPl                               % new track of plot j: 2 = born, 1 = no target
-            row(nTr + j) = 1 + (A(a, j) == nTr + j);
+            row(nTr + j) = 1 + (A(a, j) == nP + j);
         end
         newRows(end+1, :) = row; %#ok<AGROW>
         newLogW(end+1, 1) = tr.logw(g) + base - cost(a); %#ok<AGROW>
@@ -615,11 +618,13 @@ end
 end
 
 function X = sigma_points(x, P, scale)
-% 2n+1 sigma points of N(x, P) (P only positive semi-definite: square root by eig).
+% 2n+1 sigma points of N(x, P) (Cholesky factor; P only positive semi-definite:
+% a small diagonal loading, raised until the factorization succeeds).
 [Lc, flag] = chol(P, 'lower');
-if flag ~= 0
-    [V, D] = eig((P + P') / 2);
-    Lc = V * diag(sqrt(max(diag(D), 0)));
+load = 1e-12 * max(abs(diag(P)));
+while flag ~= 0
+    [Lc, flag] = chol(P + load * eye(numel(x)), 'lower');
+    load = 10 * load;
 end
 S = scale * Lc;
 X = [x, x + S, x - S];

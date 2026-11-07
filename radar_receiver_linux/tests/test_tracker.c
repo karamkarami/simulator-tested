@@ -1,5 +1,7 @@
 /*
- * test_tracker.c - the C EKF tracker (tracker.c) against the MATLAB tracker.
+ * test_tracker.c - the C trackers (tracker.c: EKF in tracker_ekf.c, PMBM in
+ * tracker_pmbm.c, as cfg.track.method of the configuration) against the
+ * MATLAB trackers.
  *
  *   test_tracker CONFIG                      self tests: two crossing targets, 3-D and 2-D;
  *                                            GNN with two targets 200 m apart;
@@ -8,13 +10,18 @@
  *       CONFIG:    exported for the case (export_receiver_config.m): dimension,
  *                  motion model, gate and GNN batch as in tests/test_tracker.m
  *       PLOTS.csv: time_s,az_deg,range_m,el_deg,vr_mps of every plot in processing order
- *       LOG.csv:   the MATLAB track log (track_update.m): time,id,confirmed,x,y,z,vx,vy,vz,hits,plotIndex
+ *       LOG.csv:   the MATLAB track log (track_update.m: track_ekf.m or track_pmbm.m):
+ *                  time,id,confirmed,x,y,z,vx,vy,vz,hits,plotIndex
  *       TEND:      time of the last call (the open batch is associated)
  *       Every plot is given to the tracker in a call of its own at the plot
  *       time (as tests/test_tracker.m does), then a call at TEND with flush;
  *       every track update must match the log in the same order: same plot,
  *       track number, state and number of updates, positions and velocities
  *       within 1e-6 relative.
+ *       PLOTS.csv with 7 columns (tests/test_tracker_pmbm.m): the calls of
+ *       the MATLAB test, one row per plot and call: call_time,flush,time_s,
+ *       az_deg,range_m,el_deg,vr_mps (a call without a plot: time_s NaN);
+ *       the rows of one call are consecutive.
  *
  * Prints PASS or FAIL and returns 0 on success.
  */
@@ -75,7 +82,7 @@ static void self_test(RadarConfig *cfg, int dim)
     }
     tracker_update(&t, NULL, 0, 6 * T, 1, NULL, NULL);
     int confirmed = 0;
-    for (int j = 0; j < t.nTracks; j++) {
+    for (int j = 0; j < tracker_count(&t); j++) {
         Track r;
         tracker_report(&t, j, &r);
         if (!r.confirmed) continue;
@@ -120,8 +127,8 @@ static void gnn_test(RadarConfig *cfg)
         }
         tracker_update(&t, d, 2, scan * T, 1, NULL, NULL);
     }
-    CHECK(t.nTracks == 2, "GNN: %d tracks (expected 2)", t.nTracks);
-    for (int j = 0; j < t.nTracks; j++) {
+    CHECK(tracker_count(&t) == 2, "GNN: %d tracks (expected 2)", tracker_count(&t));
+    for (int j = 0; j < tracker_count(&t); j++) {
         Track r;
         tracker_report(&t, j, &r);
         const double R = hypot(r.pos_m[0], r.pos_m[1]);
@@ -160,10 +167,10 @@ static void min_speed_test(RadarConfig *cfg)
                 d[i].vr_mps = speed[i];
             }
             tracker_update(&t, d, 2, scan * T, 1, NULL, NULL);
-            if (scan == 0) afterFirst = t.nTracks;
+            if (scan == 0) afterFirst = tracker_count(&t);
         }
         int nSlow = 0, nFast = 0;
-        for (int j = 0; j < t.nTracks; j++) {
+        for (int j = 0; j < tracker_count(&t); j++) {
             Track r;
             tracker_report(&t, j, &r);
             const double v = hypot(r.vel_mps[0], r.vel_mps[1]);
@@ -236,18 +243,50 @@ static int compare_with_matlab(RadarConfig *cfg, const char *plotsPath, const ch
     tracker_init(&t, cfg);
     c.haveRef = read_ref(&c);
     int nPlots = 0;
-    double tp, az, R, el, vr;
-    while (fscanf(fp, "%lf,%lf,%lf,%lf,%lf", &tp, &az, &R, &el, &vr) == 5) {
-        nPlots++;
-        Detection d;
-        memset(&d, 0, sizeof d);
-        d.time_s = tp;  d.az_deg = az;  d.range_m = R;  d.el_deg = el;  d.vr_mps = vr;
-        tracker_update(&t, &d, 1, tp, 0, on_update, &c);
+    char line[512];
+    if (!fgets(line, sizeof line, fp)) line[0] = 0;
+    int commas = 0;
+    for (const char *q = line; *q; q++) commas += *q == ',';
+    rewind(fp);
+    if (commas == 6) {                                  /* the calls of the MATLAB test */
+        Detection batch[64];
+        int nb = 0, flush = 0, have = 0;
+        double callT = 0.0;
+        double ct, fl, tp, az, R, el, vr;
+        for (;;) {
+            const int got = fscanf(fp, "%lf,%lf,%lf,%lf,%lf,%lf,%lf", &ct, &fl, &tp, &az, &R, &el, &vr) == 7;
+            if (have && (!got || ct != callT)) {        /* the previous call is complete */
+                tracker_update(&t, batch, nb, callT, flush, on_update, &c);
+                nb = 0;
+                have = 0;
+            }
+            if (!got) break;
+            have = 1;
+            callT = ct;
+            flush = fl != 0.0;
+            if (isfinite(tp) && nb < 64) {
+                Detection *d = &batch[nb++];
+                memset(d, 0, sizeof *d);
+                d->time_s = tp;  d->az_deg = az;  d->range_m = R;  d->el_deg = el;  d->vr_mps = vr;
+                nPlots++;
+            }
+        }
+    } else {
+        double tp, az, R, el, vr;
+        while (fscanf(fp, "%lf,%lf,%lf,%lf,%lf", &tp, &az, &R, &el, &vr) == 5) {
+            nPlots++;
+            Detection d;
+            memset(&d, 0, sizeof d);
+            d.time_s = tp;  d.az_deg = az;  d.range_m = R;  d.el_deg = el;  d.vr_mps = vr;
+            tracker_update(&t, &d, 1, tp, 0, on_update, &c);
+        }
+        tracker_update(&t, NULL, 0, tEnd, 1, on_update, &c);
     }
-    tracker_update(&t, NULL, 0, tEnd, 1, on_update, &c);
     if (c.haveRef) { c.bad++; printf("FAIL: MATLAB has more track updates than C\n"); }
-    printf("  %d-D %s: %d plots, %d track updates, %d different from MATLAB, max relative state difference %.1e\n",
-           t.dim, t.nd == 3 ? "CA" : "CV", nPlots, c.updates, c.bad, c.maxRel);
+    char name[64];
+    tracker_name(cfg, name, sizeof name);
+    printf("  %s: %d plots, %d track updates, %d different from MATLAB, max relative state difference %.1e\n",
+           name, nPlots, c.updates, c.bad, c.maxRel);
     fclose(fp);
     fclose(c.log);
     tracker_free(&t);

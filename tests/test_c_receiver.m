@@ -1,4 +1,4 @@
-function [ok, cmp] = test_c_receiver(prfMode, receiverBin, port, targetIdx, replayOnly, cfarMethod)
+function [ok, cmp] = test_c_receiver(prfMode, receiverBin, port, targetIdx, replayOnly, cfarMethod, cfarType, trackMethod)
 %TEST_C_RECEIVER  The C receiver (radar_receiver_<os>/, <os> = windows or linux: receiver_dir.m) against the MATLAB processing.
 %
 %   [ok, cmp] = TEST_C_RECEIVER(prfMode, receiverBin, port) runs the
@@ -20,8 +20,10 @@ function [ok, cmp] = test_c_receiver(prfMode, receiverBin, port, targetIdx, repl
 %   the recording of an earlier run against its saved MATLAB plots (to check
 %   a changed receiver quickly).
 %   cfarMethod: '2d' (default), 'range' or 'doppler' (cfg.cfar.method).
-%   The tracks (EKF, cfg.track) of both programs are compared as well: the
-%   same track numbers, update by update, with positions within 20 m.
+%   cfarType: 'ca' (default), 'go', 'so' or 'os' (cfg.cfar.type).
+%   trackMethod: 'ekf' (default) or 'pmbm' (cfg.track.method).
+%   The tracks of both programs are compared as well: the same track
+%   numbers, update by update, with positions within 20 m.
 %   Needs a POSIX shell (Linux, macOS) to start the receiver in the background.
 
 if nargin < 1, prfMode = 'fixed'; end
@@ -34,6 +36,8 @@ if nargin < 3 || isempty(port), port = 50000 + strcmp(prfMode, 'staggered'); end
 if nargin < 4, targetIdx = []; end
 if nargin < 5, replayOnly = false; end
 if nargin < 6 || isempty(cfarMethod), cfarMethod = '2d'; end
+if nargin < 7 || isempty(cfarType), cfarType = 'ca'; end
+if nargin < 8 || isempty(trackMethod), trackMethod = 'ekf'; end
 if ~exist(receiverBin, 'file')
     error('C receiver %s not found: build it first (radar_receiver_<os>/README.md)', receiverBin);
 end
@@ -42,10 +46,12 @@ end
 cfg = radar_config();
 cfg.prf.mode        = prfMode;
 cfg.cfar.method     = cfarMethod;
+cfg.cfar.type       = cfarType;
+cfg.track.method    = trackMethod;
 cfg.clutter.enable  = true;
 cfg.rx.maxRange_m   = 50e3;
 cfg.targets         = six_targets_scenario();
-cfg.io.outFolder    = fullfile(root, 'output', ['c_receiver_' prfMode '_' cfarMethod]);
+cfg.io.outFolder    = fullfile(root, 'output', ['c_receiver_' prfMode '_' cfarType '_' cfarMethod '_' trackMethod]);
 cfg.io.saveRaw      = false;
 cfg.display.enable  = false;
 cfg.udp.enable      = true;
@@ -124,7 +130,8 @@ else
 end
 tok = regexp(logText, 'Processing time per PRI: ([\d.]+) ms', 'tokens', 'once');
 if ~isempty(tok), cmp.msPerPri = str2double(tok{1}); end
-fprintf('Result (%s PRF, C receiver vs MATLAB): %s\n', prfMode, ternary(ok, 'PASS', 'FAIL'));
+fprintf('Result (%s PRF, CFAR %s %s, %s tracker, C receiver vs MATLAB): %s\n', prfMode, upper(cfarType), cfarMethod, ...
+        upper(trackMethod), ternary(ok, 'PASS', 'FAIL'));
 end
 
 function ax = compare_axes(sys)
@@ -197,7 +204,7 @@ fprintf('Plots: MATLAB %d, C %d; largest differences: range %.1f m, az %.3f deg,
 end
 
 function ok = compare_tracks(logM, fileC)
-% MATLAB track log (track_update.m) against the track updates of the C receiver (--tracks-csv).
+% MATLAB track log (track_update.m: EKF or PMBM) against the track updates of the C receiver (--tracks-csv).
 txt = strtrim(fileread(fileC));
 lines = strsplit(txt, {'\n', '\r'});
 C = zeros(0, 12);

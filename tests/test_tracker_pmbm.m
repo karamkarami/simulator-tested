@@ -42,10 +42,15 @@ function ok = test_tracker_pmbm()
 %      scans, 10 false plots per scan, fixed PRF. Every target detected in at
 %      least the last 3 scans ends with a confirmed track on it, there is no
 %      false confirmed track; C11 - C13 also with the EKF for comparison.
+%   When the C receiver is built (radar_receiver_<os>/build/test_tracker), the
+%   C PMBM tracker (tracker_pmbm.c) runs on the same calls of every PMBM case:
+%   every track update must match MATLAB (plot, track number, confirmation,
+%   updates, state).
 
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
 ok = true;
+c_compare('reset');
 for dim = [3 2]
     ok = six_case(dim, 'fixed') && ok;
 end
@@ -64,6 +69,14 @@ ok = min_speed_case() && ok;
 for dim = [3 2]
     ok = challenge_case(dim) && ok;
 end
+[nC, nBad] = c_compare('get');
+if nC > 0
+    fprintf('  C tracker (tracker_pmbm.c) on the same calls: %d runs compared, %d different from MATLAB: %s\n', nC, nBad, ...
+            ternary(nBad == 0, 'ok', 'FAIL'));
+    ok = ok && nBad == 0;
+else
+    fprintf('  C tracker not built: comparison skipped\n');
+end
 fprintf('PMBM tracker (IMM-UKF): %s\n', ternary(ok, 'PASS', 'FAIL'));
 end
 
@@ -73,7 +86,7 @@ function ok = six_case(dim, prf)
 tgts = six_targets_scenario();
 nScans = 5;                                          % (T1 passes over the radar after 50 s)
 pl = make_plots(cfg, sys, tgts, nScans, struct('nFalse', 8, 'seed', 7));
-tr = run_tracker(sys.track, pl, nScans * sys.track.scanTime_s);
+tr = run_tracker(sys.track, pl, nScans * sys.track.scanTime_s, cfg);
 [good, txt] = check_targets(cfg, tr, tgts, nScans * sys.track.scanTime_s, 500, 25);   % 0.3 deg at 46 km: 240 m
 nF = false_tracks(cfg, tr, tgts);
 ok = good && nF == 0;
@@ -116,7 +129,7 @@ for method = {'pmbm', 'ekf'}
     [cfg, sys] = make_cfg(dim, method{1}, 'fixed');
     T = sys.track.scanTime_s;
     pl = make_plots(cfg, sys, tg, nScans, struct('nFalse', 0, 'seed', 3));
-    [tr, modes] = run_tracker(sys.track, pl, nScans * T);
+    [tr, modes] = run_tracker(sys.track, pl, nScans * T, cfg);
     L = tr.log;
     ids = unique(L(L(:, 3) == 1, 2));
     s = struct('nTracks', numel(unique(L(:, 2))), 'nConfirmed', numel(ids), 'pos', Inf, 'vel', Inf, ...
@@ -163,7 +176,7 @@ tgts(1).vel_mps = -tgts(1).vel_mps;                  % T1 recedes (inbound it pa
 nScans = 10;
 [pl, detected] = make_plots(cfg, sys, tgts, nScans, struct('nFalse', 30, 'pd', 0.7, 'seed', 21));
 tEnd = nScans * sys.track.scanTime_s;
-tr = run_tracker(sys.track, pl, tEnd);
+tr = run_tracker(sys.track, pl, tEnd, cfg);
 [cfgE, sysE] = make_cfg(dim, 'ekf', 'fixed');
 trE = run_tracker(sysE.track, pl, tEnd);
 need = all(detected(:, end-2:end), 2).';            % detected in the last 3 scans: a track is required
@@ -186,7 +199,7 @@ tg(1) = make_target('A', 2, 20e3, 30, 0, 100, 0);
 tg(2) = make_target('B', 2, 20.2e3, 30, 0, 100, 0);
 nScans = 6;
 pl = make_plots(cfg, sys, tg, nScans, struct('nFalse', 0, 'seed', 4, 'noise', 0));
-tr = run_tracker(sys.track, pl, nScans * sys.track.scanTime_s);
+tr = run_tracker(sys.track, pl, nScans * sys.track.scanTime_s, cfg);
 [good, txt] = check_targets(cfg, tr, tg, nScans * sys.track.scanTime_s, 50, 5);
 rep = track_report(tr);
 ok = good && sum([rep.confirmed]) == 2;
@@ -206,7 +219,7 @@ for dim = [3 2]
     tg(2) = target_at(c - v2*tc, [v2 0], 3600, 'X2'); %#ok<AGROW>
     nScans = 9;
     pl = make_plots(cfg, sys, tg, nScans, struct('nFalse', 4, 'seed', 5));
-    tr = run_tracker(sys.track, pl, nScans * T);
+    tr = run_tracker(sys.track, pl, nScans * T, cfg);
     % the track of each target before the crossing must be the one after it
     L = tr.log(tr.log(:, 3) == 1, :);
     owner = zeros(2, 2);                             % track of target k before / after
@@ -259,7 +272,7 @@ for gate = [false true]
     tg(2) = make_target('F', 2, 20e3, 120, 0, 100, 0);
     nScans = 4;
     pl = make_plots(cfg, sys, tg, nScans, struct('nFalse', 0, 'seed', 1, 'noise', 0));
-    tr = run_tracker(sys.track, pl, nScans * sys.track.scanTime_s);
+    tr = run_tracker(sys.track, pl, nScans * sys.track.scanTime_s, cfg);
     rep = track_report(tr);
     v = arrayfun(@(r) norm(r.vel_mps(1:2)), rep);
     nSlow = sum(v < 50);  nFast = sum(v >= 50 & [rep.confirmed]);
@@ -279,7 +292,7 @@ nScans = 6;
 T = sys.track.scanTime_s;
 [pl, detected] = make_plots(cfg, sys, tgts, nScans, struct('nFalse', 10, 'seed', 11, 'budget', true));
 tEnd = nScans * T;
-tr = run_tracker(sys.track, pl, tEnd);
+tr = run_tracker(sys.track, pl, tEnd, cfg);
 [cfgE, sysE] = make_cfg(dim, 'ekf', 'fixed');
 trE = run_tracker(sysE.track, pl, tEnd);
 ok = true;
@@ -411,15 +424,21 @@ for k = find(f(1:end-1) < 0 & f(2:end) >= 0)                   % the antenna pas
 end
 end
 
-function [tr, modes] = run_tracker(p, pl, tEnd)
+function [tr, modes] = run_tracker(p, pl, tEnd, cfg)
+% The tracker on the plots; with cfg (PMBM) also the C tracker on the same calls (when built).
 tr = track_init(p);
-[tr, modes] = feed(tr, pl, tEnd);
+[tr, modes, calls] = feed(tr, pl, tEnd);
+if nargin > 3 && strcmp(p.method, 'pmbm')
+    c_compare('add', compare_with_c(cfg, calls, tr.log));
+end
 end
 
-function [tr, modes] = feed(tr, pl, tEnd)
+function [tr, modes, calls] = feed(tr, pl, tEnd)
 % The plots reach the tracker 0.1 s after their time; the tracker is called every 0.1 s.
 % modes: [time, model probabilities] of the confirmed tracks after every update (PMBM).
+% calls: one row per plot and call [callTime flush time az range el vr] (time NaN: no plot).
 modes = zeros(0, 4);
+calls = zeros(0, 7);
 k = 1;
 nLog = 0;
 for t = 0:0.1:tEnd + 0.05
@@ -427,6 +446,12 @@ for t = 0:0.1:tEnd + 0.05
     while k <= numel(pl) && pl(k).time_s + 0.1 <= t + 1e-9
         new = [new, pl(k)]; %#ok<AGROW>
         k = k + 1;
+    end
+    if isempty(new)
+        calls(end+1, :) = [t 0 NaN NaN NaN NaN NaN]; %#ok<AGROW>
+    end
+    for q = 1:numel(new)
+        calls(end+1, :) = [t 0 new(q).time_s new(q).az_deg new(q).range_m new(q).el_deg new(q).vr_mps]; %#ok<AGROW>
     end
     tr = track_update(tr, new, t);
     if isfield(tr, 'T') && size(tr.log, 1) > nLog
@@ -440,6 +465,47 @@ for t = 0:0.1:tEnd + 0.05
     end
 end
 tr = track_update(tr, [], tEnd + 0.1, true);
+calls(end+1, :) = [tEnd + 0.1, 1, NaN NaN NaN NaN NaN];
+end
+
+function ok = compare_with_c(cfg, calls, log)
+% The C tracker (radar_receiver_<os>/build/test_tracker, tracker_pmbm.c) on the
+% same calls: every track update must match the MATLAB log (when built).
+ok = true;
+bin = fullfile(receiver_dir(), 'build', 'test_tracker');
+if ispc, bin = [bin '.exe']; end
+if ~exist(bin, 'file'), ok = []; return; end
+folder = tempname();
+mkdir(folder);
+fp = fullfile(folder, 'calls.csv');  fl = fullfile(folder, 'log.csv');  fc = fullfile(folder, 'config.bin');
+write_csv(fp, calls, [repmat('%.17g,', 1, 6) '%.17g\n']);
+write_csv(fl, log, [repmat('%.17g,', 1, 10) '%.17g\n']);
+evalc('export_receiver_config(cfg, fc)');
+[status, out] = system(sprintf('"%s" "%s" "%s" "%s" %.17g', bin, fc, fp, fl, calls(end, 1)));
+ok = status == 0;
+if ~ok, fprintf('    C tracker: %s', regexprep(out, '\n(?=.)', '\n    ')); end
+c_compare('text', out);
+delete(fp);  delete(fl);  delete(fc);  rmdir(folder);
+end
+
+function varargout = c_compare(action, v)
+% Results of the comparisons with the C tracker: 'reset', 'add' (ok, [] = not built),
+% 'text' (its last output), 'get' -> [nCompared, nFailed, lastText].
+persistent n nBad last
+if isempty(n), n = 0;  nBad = 0;  last = ''; end
+switch action
+    case 'reset', n = 0;  nBad = 0;  last = '';
+    case 'add'
+        if ~isempty(v), n = n + 1;  nBad = nBad + ~v; end
+    case 'text', last = v;
+    case 'get', varargout = {n, nBad, last};
+end
+end
+
+function write_csv(file, M, fmt)
+fid = fopen(file, 'w');
+fprintf(fid, fmt, M.');
+fclose(fid);
 end
 
 function [pt, vt] = truth_xyz(tg, t, cfg, dim)

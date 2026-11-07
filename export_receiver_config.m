@@ -93,11 +93,7 @@ r{end+1} = {'updateEvery', cfg.proc.updateEvery};
 r{end+1} = {'consolePlots', double(cfg.console.plots)};   % print every plot (receiver default)
 r{end+1} = {'minExtent_deg', cfg.extract.minExtent_deg};
 r{end+1} = {'meanPri_s', mean(sys.pri)};
-tk = sys.track;                                      % EKF tracker (track_setup.m)
-if tk.enable && strcmp(tk.method, 'pmbm')
-    warning(['cfg.track.method = ''pmbm'': the C receiver has only the EKF tracker; it tracks with the ' ...
-             'EKF settings of cfg.track (the PMBM tracker runs in MATLAB, run_radar_sim).']);
-end
+tk = sys.track;                                      % tracker (track_setup.m): EKF or PMBM
 r{end+1} = {'trackEnable', double(tk.enable)};
 r{end+1} = {'trackDim', tk.dim};
 r{end+1} = {'trackSigma', [sqrt(diag(tk.R)).', zeros(1, 3 - tk.dim)]};   % range [m], az, el [rad]
@@ -118,6 +114,26 @@ r{end+1} = {'trackMaxMissTentative', tk.maxMissTentative};
 r{end+1} = {'trackMaxMiss', tk.maxMiss};
 r{end+1} = {'trackMinSpeed', tk.minSpeed_mps};                          % delete slower tracks [m/s] (0 = off)
 r{end+1} = {'scanTime_s', tk.scanTime_s};
+r{end+1} = {'trackMethod', double(strcmp(tk.method, 'pmbm'))};           % 0 EKF (tracker_ekf.c), 1 PMBM (tracker_pmbm.c)
+r{end+1} = {'trackAz0_deg', tk.az0_deg};                                 % antenna azimuth at t = 0 (PMBM looks)
+if strcmp(tk.method, 'pmbm')                                             % PMBM with IMM-UKF (track_setup.m)
+    m = tk.pmbm;
+    r{end+1} = {'pmbmPd', m.pd};
+    r{end+1} = {'pmbmPs', m.ps};
+    r{end+1} = {'pmbmLogLambda', [m.logLambdaC, m.logLambdaU, m.logVrDensity]};   % false plots, undetected targets, 1/vrSpan
+    r{end+1} = {'pmbmMaxHyp', m.maxHyp};
+    r{end+1} = {'pmbmPrune', [m.logHypPrune, m.rPrune, m.rConfirm, m.rDelete]};
+    r{end+1} = {'pmbmModels', cellfun(@(x) find(strcmp(x, {'cv', 'ca', 'ct'})) - 1, m.models)};   % 0 CV, 1 CA, 2 CT
+    r{end+1} = {'pmbmMu0', m.mu0};
+    r{end+1} = {'pmbmSwitchLambda', m.switchLambda};
+    r{end+1} = {'pmbmQCv', [m.qCv, zeros(1, 3 - tk.dim)]};
+    r{end+1} = {'pmbmQCa', [m.qCa, zeros(1, 3 - tk.dim)]};
+    r{end+1} = {'pmbmQCt', [m.qCt, zeros(1, 3 - tk.dim)]};
+    r{end+1} = {'pmbmTurn', [m.qTurn, m.sigmaTurn0, m.sigmaClimb0]};
+    r{end+1} = {'pmbmUnused', [m.varUnusedA, m.varUnusedW]};
+    r{end+1} = {'pmbmUkf', [m.ukfScale, m.Wm(1), m.Wc(1), m.Wm(2)]};      % scale, weights of the centre and the others
+    r{end+1} = {'pmbmTiming', [m.latency_s, m.maintStep_s]};
+end
 
 folder = fileparts(fileName);
 if ~isempty(folder) && ~exist(folder, 'dir'), mkdir(folder); end

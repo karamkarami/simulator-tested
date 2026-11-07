@@ -321,10 +321,57 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
                 cfg->trackMinSpeed = (r && r->rows * r->cols >= 1) ? r->data[0] : 0.0;
             }
             cfg->scanTime_s = get_scalar(&rs, "scanTime_s");
+            {                                      /* optional: the EKF in older files */
+                const Record *r = find_optional(&rs, "trackMethod");
+                cfg->trackMethod = (r && r->rows * r->cols >= 1) ? (int)lround(r->data[0]) : TRACK_METHOD_EKF;
+                r = find_optional(&rs, "trackAz0_deg");
+                cfg->trackAz0_deg = (r && r->rows * r->cols >= 1) ? r->data[0] : 0.0;
+            }
+            if (cfg->trackMethod == TRACK_METHOD_PMBM) {
+                cfg->pmbmPd = get_scalar(&rs, "pmbmPd");
+                cfg->pmbmPs = get_scalar(&rs, "pmbmPs");
+                double *l = get_doubles(&rs, "pmbmLogLambda", 3, NULL);
+                double *pr = get_doubles(&rs, "pmbmPrune", 4, NULL);
+                double *qv = get_doubles(&rs, "pmbmQCv", 3, NULL), *qa = get_doubles(&rs, "pmbmQCa", 3, NULL);
+                double *qt = get_doubles(&rs, "pmbmQCt", 3, NULL), *tu = get_doubles(&rs, "pmbmTurn", 3, NULL);
+                double *un = get_doubles(&rs, "pmbmUnused", 2, NULL), *uk = get_doubles(&rs, "pmbmUkf", 4, NULL);
+                double *ti = get_doubles(&rs, "pmbmTiming", 2, NULL);
+                int nm = 0;
+                double *mo = get_doubles(&rs, "pmbmModels", -1, &nm), *mu = NULL;
+                if (mo && nm >= 1 && nm <= 3) mu = get_doubles(&rs, "pmbmMu0", nm, NULL);
+                cfg->pmbmMaxHyp = get_int(&rs, "pmbmMaxHyp");
+                cfg->pmbmSwitchLambda = get_scalar(&rs, "pmbmSwitchLambda");
+                if (l && pr && qv && qa && qt && tu && un && uk && ti && mo && mu) {
+                    cfg->pmbmLogLambdaC = l[0];  cfg->pmbmLogLambdaU = l[1];  cfg->pmbmLogVrDensity = l[2];
+                    cfg->pmbmLogHypPrune = pr[0];  cfg->pmbmRPrune = pr[1];  cfg->pmbmRConfirm = pr[2];
+                    cfg->pmbmRDelete = pr[3];
+                    memcpy(cfg->pmbmQCv, qv, sizeof cfg->pmbmQCv);
+                    memcpy(cfg->pmbmQCa, qa, sizeof cfg->pmbmQCa);
+                    memcpy(cfg->pmbmQCt, qt, sizeof cfg->pmbmQCt);
+                    cfg->pmbmQTurn = tu[0];  cfg->pmbmSigmaTurn0 = tu[1];  cfg->pmbmSigmaClimb0 = tu[2];
+                    cfg->pmbmVarUnusedA = un[0];  cfg->pmbmVarUnusedW = un[1];
+                    cfg->pmbmUkfScale = uk[0];  cfg->pmbmWm0 = uk[1];  cfg->pmbmWc0 = uk[2];  cfg->pmbmWi = uk[3];
+                    cfg->pmbmLatency_s = ti[0];  cfg->pmbmMaintStep_s = ti[1];
+                    cfg->pmbmNModels = nm;
+                    for (int j = 0; j < nm; j++) {
+                        cfg->pmbmModels[j] = (int)lround(mo[j]);
+                        cfg->pmbmMu0[j] = mu[j];
+                    }
+                } else {
+                    set_error(&rs, "incomplete PMBM tracker settings in the configuration");
+                }
+                free(l); free(pr); free(qv); free(qa); free(qt); free(tu); free(un); free(uk); free(ti); free(mo); free(mu);
+                int badModel = 0;
+                for (int j = 0; j < cfg->pmbmNModels; j++) badModel |= cfg->pmbmModels[j] < PMBM_CV || cfg->pmbmModels[j] > PMBM_CT;
+                if (!rs.failed && (!(cfg->pmbmPd > 0 && cfg->pmbmPd < 1) || !(cfg->pmbmPs > 0 && cfg->pmbmPs <= 1) ||
+                                   cfg->pmbmMaxHyp < 1 || badModel || !(cfg->pmbmUkfScale > 0)))
+                    set_error(&rs, "invalid PMBM tracker settings in the configuration");
+            }
             if (!rs.failed && ((cfg->trackDim != 2 && cfg->trackDim != 3) || !(cfg->trackGate > 0) ||
                                !(cfg->scanTime_s > 0) || (cfg->trackModel != TRACK_CV && cfg->trackModel != TRACK_CA) ||
                                !(cfg->trackBatchGap_s >= 0) || !(cfg->trackBatchMax_s >= 0) ||
-                               !(cfg->trackMinSpeed >= 0)))
+                               !(cfg->trackMinSpeed >= 0) ||
+                               (cfg->trackMethod != TRACK_METHOD_EKF && cfg->trackMethod != TRACK_METHOD_PMBM)))
                 set_error(&rs, "invalid tracker settings in the configuration");
         }
 
