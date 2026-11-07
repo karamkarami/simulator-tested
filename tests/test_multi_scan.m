@@ -1,4 +1,4 @@
-function [ok, out] = test_multi_scan(prfMode, nScans, buildDir, replayOnly)
+function [ok, out] = test_multi_scan(prfMode, nScans, buildDir, replayOnly, trackMethod, cfarType)
 %TEST_MULTI_SCAN  Several antenna scans through the C receiver: confirmed tracks on the targets only.
 %
 %   [ok, out] = TEST_MULTI_SCAN(prfMode, nScans, buildDir) simulates nScans
@@ -18,13 +18,18 @@ function [ok, out] = test_multi_scan(prfMode, nScans, buildDir, replayOnly)
 %   The live run is reported as well: when the computer is busy the receiver
 %   cannot follow 20 ms per PRI and drops PRIs (its queue is full).
 %   TEST_MULTI_SCAN(prfMode, nScans, buildDir, true) only processes the
-%   recording of an earlier run again. buildDir: radar_receiver_<os>/build
-%   (default). Needs a POSIX shell. About 40 minutes per 3 scans in Octave
+%   recording of an earlier run again (with the configuration exported
+%   again: e.g. another tracker or CFAR detector on the same data).
+%   trackMethod: 'ekf' (default) or 'pmbm' (cfg.track.method); cfarType:
+%   'ca' (default), 'go', 'so' or 'os' (cfg.cfar.type). buildDir:
+%   radar_receiver_<os>/build (default). Needs a POSIX shell. About 40 minutes per 3 scans in Octave
 %   (the DDC files, about 2 GB, are deleted again).
 
 if nargin < 1 || isempty(prfMode), prfMode = 'fixed'; end
 if nargin < 2 || isempty(nScans), nScans = 3; end
 if nargin < 4, replayOnly = false; end
+if nargin < 5 || isempty(trackMethod), trackMethod = 'ekf'; end
+if nargin < 6 || isempty(cfarType), cfarType = 'ca'; end
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
 if nargin < 3 || isempty(buildDir), buildDir = fullfile(receiver_dir(), 'build'); end
@@ -45,6 +50,8 @@ cfg.io.saveRaw = false;
 cfg.io.outFolder = fullfile(root, 'output', ['multi_scan_' prfMode]);
 cfg.io.ddcFolder = fullfile(cfg.io.outFolder, 'ddc_pulses');
 cfg.io.matFormat = '-v6';
+cfg.track.method = trackMethod;
+cfg.cfar.type = cfarType;
 sys = setup_radar(cfg);
 cfg.sim.sectors_deg = target_sectors(sys, cfg.targets);
 sys.cfg = cfg;
@@ -82,6 +89,9 @@ if ~replayOnly
              'on this computer); the recording is processed below\n'], tok{1}, nExpected, drop{1});
 end
 
+if replayOnly
+    evalc('export_receiver_config(cfg, cfgFile)');   % the tracker and CFAR of this call
+end
 %% The recording through the receiver: every PRI
 [~, rtxt] = system(sprintf('"%s" --config "%s" --replay "%s" --plots-csv "%s" --tracks-csv "%s" --no-skip --quiet 2>&1', ...
                            receiver, cfgFile, files.rec, files.plots, files.tracks));
@@ -152,7 +162,8 @@ end
 out.nPlots = size(P, 1);  out.nFalsePlots = nFp;
 ok = report(sprintf('%d plots in %d scans, %d false (at most 2 per scan); %.2f ms per PRI', size(P, 1), nScans, nFp, ms), ...
             nFp <= 2*nScans) && ok;
-fprintf('Multi-scan tracking (%s PRF, %d scans): %s\n', prfMode, nScans, ternary(ok, 'PASS', 'FAIL'));
+fprintf('Multi-scan tracking (%s PRF, %d scans, CFAR %s, %s tracker): %s\n', prfMode, nScans, upper(cfarType), ...
+        upper(trackMethod), ternary(ok, 'PASS', 'FAIL'));
 end
 
 function M = read_csv(file)

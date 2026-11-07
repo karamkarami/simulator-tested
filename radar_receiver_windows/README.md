@@ -447,6 +447,21 @@ real-time test with `--threads 2` it still dropped no PRIs and plotted every
 target: with `--update-every 8` about half of the updates were skipped (fixed
 PRF; a third with the staggered PRF), with every-pulse updates nine tenths.
 
+**CFAR detectors: processing time** (`radar_bench`, 4-vCPU VM, 3 threads,
+Doppler/CFAR on every pulse, each detector at its threshold for Pfa 1e-8,
+2-D window; "CFAR" = CFAR with the pruning and the reports, per PRI):
+
+| Elements | CA | GO | SO | OS (rank 0.9) | total per PRI with CA / OS |
+|---|---|---|---|---|---|
+| 48 (21 beams) | 3.1 ms | 7.7 ms | 7.9 ms | 5.0 ms | 6.0 / 8.2 ms |
+| 1 | 0.22 ms | 0.43 ms | 0.42 ms | 0.45 ms | 0.36 / 0.62 ms |
+
+CA keeps its float box sums; GO and SO need the two half sums of every
+cell (double prefix sums, a branch-free loop for the interior cells); OS
+counts the training cells of the local peaks only and stops as soon as too
+many lie above P/alpha. The PMBM tracker costs about as much as the EKF at
+the design threshold (about 1 us per PRI with a few plots per scan).
+
 **Real time.** Doppler processing and CFAR on every new pulse, as in MATLAB,
 take longer than a 1 ms PRI on a small PC. The receiver handles this in two
 ways:

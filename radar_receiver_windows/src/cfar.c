@@ -339,7 +339,24 @@ static void goso_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, i
                 sG[i - e0 + 1] = sG[i - e0] + cG[i];
             }
 #define S(arr, i) arr[(i) - e0]
+            /* interior cells (window not shifted, halves complete): one loop without branches */
+            const int i0 = cf > oR ? cf : oR, i1 = cl < nR - 1 - oR ? cl : nR - 1 - oR;
+            if (i0 <= i1) {
+                const int nh = oR * (2 * oD + 1) - gR * (2 * gD + 1);
+                const double *restrict pO = sO - e0, *restrict pG = sG - e0;
+                double *restrict st = w->accO;
+                unsigned char *restrict dt = det;
+                for (int r = i0; r <= i1; r++) {
+                    const double sa = (pO[r] - pO[r - oR]) - (pG[r] - pG[r - gR]);
+                    const double sb = (pO[r + oR + 1] - pO[r + 1]) - (pG[r + gR + 1] - pG[r + 1]);
+                    const double ma = sa / nh, mb = sb / nh;
+                    const double s = go ? (ma > mb ? ma : mb) : (ma < mb ? ma : mb);
+                    dt[r] = (double)x[r] > alpha * s;
+                    st[r] = s;
+                }
+            }
             for (int r = cf; r <= cl; r++) {
+                if (r == i0 && i0 <= i1) { r = i1; continue; }   /* done above */
                 const int rc = window_centre(r, oR, nR), a1 = rc - oR, b2 = rc + oR;
                 const int g1 = r - gR > 0 ? r - gR : 0, g2 = r + gR < nR - 1 ? r + gR : nR - 1;
                 const double sa = (S(sO, r) - S(sO, a1)) - (S(sG, r) - S(sG, g1));
@@ -393,7 +410,8 @@ static float select_kth(float *v, int n, int k)
 
 /* OS: the local peaks of the tested cells are the candidates; a candidate
  * is detected when at least k of its N training cells t have alpha*t < P
- * (in double; i.e. P > alpha * X(k)). */
+ * (in double; i.e. P > alpha * X(k)). The count stops after the Doppler row
+ * in which more than N - k cells are above (the cell cannot be detected). */
 static void os_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int b, int cf, int cl, CfarScratch *w)
 {
     const int nfft = cfg->nfft, nR = m->nR;
@@ -412,21 +430,28 @@ static void os_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int
             if (!det[r]) continue;
             const int rc = window_centre(r, oR, nR);
             const double th = x[r];
-            int cnt = 0;
-            for (int k = -oD; k <= oD; k++) {
-                const float *row = Pb + (size_t)(((d + k) % nfft + nfft) % nfft) * nCells;
-                const int inG = abs(k) <= gD;
-                for (int rr = rc - oR; rr <= rc + oR; rr++) {
-                    if (inG && abs(rr - r) <= gR) continue;
-                    cnt += alpha * (double)row[rr] < th;
-                }
-            }
             const int g1 = r - gR > 0 ? r - gR : 0, g2 = r + gR < nR - 1 ? r + gR : nR - 1;
             const int nr = nWin - (g2 - g1 + 1) * (2 * gD + 1);
             long kr = lround((double)cfg->cfarOsK * nr / cfg->nTrain);
             if (kr < 1) kr = 1;
             if (kr > nr) kr = nr;
-            det[r] = cnt >= kr;
+            /* detected when at least kr training cells t have alpha*t < P, i.e. at most nr - kr
+             * are not: stop as soon as more are not (most candidates, a fraction of the window) */
+            const long maxAbove = nr - kr;
+            long above = 0;
+            for (int k = -oD; k <= oD && above <= maxAbove; k++) {
+                const float *row = Pb + (size_t)(((d + k) % nfft + nfft) % nfft) * nCells;
+                const int inG = abs(k) <= gD;
+                int n = 0;
+                if (inG) {                                   /* the row without its guard cells */
+                    for (int rr = rc - oR; rr < g1; rr++) n += !(alpha * (double)row[rr] < th);
+                    for (int rr = g2 + 1; rr <= rc + oR; rr++) n += !(alpha * (double)row[rr] < th);
+                } else {
+                    for (int rr = rc - oR; rr <= rc + oR; rr++) n += !(alpha * (double)row[rr] < th);
+                }
+                above += n;
+            }
+            det[r] = above <= maxAbove;
             if (det[r] && m->noise) {                            /* X(k): the noise estimate */
                 int n = 0;
                 for (int k = -oD; k <= oD; k++) {

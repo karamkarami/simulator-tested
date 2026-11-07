@@ -173,7 +173,12 @@ cfg.proc.updateEvery  = 1;     % run MTI/Doppler/CFAR every N new pulses (1 = ev
 % so every range cell can be tested.
 cfg.cfar.type   = 'ca';   % 'ca', 'go', 'so' or 'os'
 cfg.cfar.method = '2d';   % '2d', 'range' or 'doppler'
-cfg.cfar.osRank = 0.75;   % OS: rank of the statistic as a fraction of the training cells (0 ... 1]
+cfg.cfar.osRank = 0.9;    % OS: rank of the statistic as a fraction of the training cells (0 ... 1]. The
+                          % textbook 0.75 suits isolated interfering targets; here the eclipsed long-pulse
+                          % echo of a near target (short-pulse range, below 22.5 km) smears over the next
+                          % 15 km of the long window as a ripple of similar peaks, whose 75th percentile is
+                          % below its mean: with 0.75 the OS detects tens of its peaks per scan
+                          % (test_multi_scan: 62 false plots in 3 scans, 0.9: 1, as CA; 0.95: 0)
 
 cfg.cfar.twoD.guardRange   = 3;     % guard cells on each side in range
 cfg.cfar.twoD.trainRange   = 8;     % training cells on each side in range

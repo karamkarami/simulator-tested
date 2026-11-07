@@ -498,7 +498,7 @@ if isfield(c, 'type') && ~isempty(c.type), w.type = lower(c.type); end
 if ~any(strcmp(w.type, {'ca', 'go', 'so', 'os'}))
     error('cfg.cfar.type must be ''ca'', ''go'', ''so'' or ''os''.');
 end
-w.osRank = 0.75;
+w.osRank = 0.9;
 if isfield(c, 'osRank') && ~isempty(c.osRank), w.osRank = c.osRank; end
 if ~(w.osRank > 0 && w.osRank <= 1)
     error('cfg.cfar.osRank must lie in (0, 1].');
