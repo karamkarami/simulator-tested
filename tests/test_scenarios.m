@@ -73,14 +73,9 @@ cpiSpan = sys.cpi.length * mean(sys.pri) * sys.ant.rate_dps;
 half = sys.ant.azBeamwidth_deg + cpiSpan/2 + 1;
 sectors = zeros(0, 2);
 for k = 1:nT
-    for s = 1:p.nScans
-        t = (s - 1) * T;
-        for it = 1:4
-            [~, az] = target_geometry(cfg.targets(k), t, h);
-            t = (s - 1) * T + mod(az - cfg.ant.az0_deg, 360) / sys.ant.rate_dps;
-        end
-        tLook(k, s) = t;
-        [~, az] = target_geometry(cfg.targets(k), t, h);
+    tLook(k, :) = look_times(cfg.targets(k), cfg.ant.az0_deg, sys.ant.rate_dps, T, p.nScans, h);
+    for s = find(isfinite(tLook(k, :)))
+        [~, az] = target_geometry(cfg.targets(k), tLook(k, s), h);
         sectors(end+1, :) = mod([az - half, az + half], 360); %#ok<AGROW>
     end
 end
@@ -136,7 +131,7 @@ end
 % expectations from the SNR budget at every look
 B = cell(nT, p.nScans);
 for k = 1:nT
-    for s = 1:p.nScans, B{k, s} = snr_budget(sys, cfg.targets(k), tLook(k, s)); end
+    for s = find(isfinite(tLook(k, :))), B{k, s} = snr_budget(sys, cfg.targets(k), tLook(k, s)); end
 end
 cw = sys.cfar;                                        % CFAR window (cells, bins on each side)
 binV = abs(diff(sys.dop.v_mps(1:2)));
@@ -148,6 +143,10 @@ for k = 1:nT
     notes = {};
     above = false;
     for s = 1:p.nScans
+        if ~isfinite(tLook(k, s))                   % the antenna does not pass the target in this scan
+            notes{end+1} = sprintf('scan %d no look (crosses the start azimuth)', s); %#ok<AGROW>
+            continue
+        end
         b = B{k, s};
         [R, ~, el, vr] = target_geometry(tg, tLook(k, s), h);
         inRange = R >= rCover(1) && R <= rCover(2);
@@ -155,6 +154,7 @@ for k = 1:nT
         cell = abs(diff(sys.wave.(b.pulse).range_m(1:2)));
         masker = '';
         for j = [1:k-1, k+1:nT]
+            if isempty(B{j, s}), continue; end
             [Rj, ~, ~, vrj] = target_geometry(cfg.targets(j), tLook(k, s), h);
             dBin = abs(mod(vrj - vr + sys.track.vrSpan/2, sys.track.vrSpan) - sys.track.vrSpan/2) / binV;
             if strcmp(B{j, s}.pulse, b.pulse) && B{j, s}.doppler >= b.doppler - 3 && ...
@@ -178,8 +178,9 @@ for k = 1:nT
     % azimuth step between looks: a target that passes close to the radar
     % turns by tens of degrees per scan; a new track (velocity unknown but
     % the radial one) does not gate its next plot then (track initiation limit)
-    azL = zeros(1, p.nScans);
-    for s = 1:p.nScans, [~, azL(s)] = target_geometry(tg, tLook(k, s), h); end
+    tk = tLook(k, isfinite(tLook(k, :)));
+    azL = zeros(1, numel(tk));
+    for s = 1:numel(tk), [~, azL(s)] = target_geometry(tg, tk(s), h); end
     azStep = max([0, abs(wrap180(diff(azL)))]);
     if azStep > 15 && needTrack
         needTrack = false;
@@ -187,7 +188,7 @@ for k = 1:nT
     end
     % maneuvering target: acceleration between its looks
     aMax = 0;
-    for tt = linspace(tLook(k, 1), tLook(k, end), 60)
+    for tt = linspace(min(tk), max(tk), 60)
         [~, ~, acc] = target_state(tg, tt);
         aMax = max(aMax, norm(acc));
     end
@@ -208,8 +209,8 @@ for k = 1:nT
     why = '';
     if ~isempty(notes), why = [' (' strjoin(notes, ', ') ')']; end
     ok = report(sprintf('%-4s %5.1f m^2 %5.1f km az %5.1f: margin %5.1f dB, expected in %d of %d scans, plots in %d, %s%s', ...
-                        tg.name, tg.rcs_m2, target_geometry(tg, tLook(k, 1), h)/1e3, ...
-                        mod(atan2(tg.pos0_m(1), tg.pos0_m(2))*180/pi, 360), B{k, 1}.margin, nExp, p.nScans, ...
+                        tg.name, tg.rcs_m2, target_geometry(tg, tk(1), h)/1e3, ...
+                        mod(atan2(tg.pos0_m(1), tg.pos0_m(2))*180/pi, 360), B{k, find(isfinite(tLook(k, :)), 1)}.margin, nExp, p.nScans, ...
                         nnz(seen(k, :)), ternary(out.tracked(k), 'confirmed track', 'no confirmed track'), why), good) && ok;
 end
 out.nFalsePlots = nFalse;  out.nFalseTracks = nFalseTracks;  out.adcClippedMax = res.adcClipped.max;
@@ -217,6 +218,30 @@ ok = report(sprintf('%d plots, %d false (at most %d); %d false confirmed track(s
                     numel(P), nFalse, 2*p.nScans, nFalseTracks, 100*res.adcClipped.max), ...
             nFalse <= 2*p.nScans && nFalseTracks == 0 && res.adcClipped.max <= cfg.adc.overloadWarn) && ok;
 fprintf('Scenario test (%s): %s\n', label, ternary(ok, 'PASS', 'FAIL'));
+end
+
+function tl = look_times(tg, az0, rate, T, nScans, h)
+% Times when the antenna passes the target, one per scan (NaN: none in that
+% scan, e.g. a target that crosses the start azimuth against the rotation,
+% or along it: its look moves to the next scan, after the end of the run).
+tt = 0:0.02:nScans*T;
+f = zeros(size(tt));
+for k = 1:numel(tt)
+    [~, az] = target_geometry(tg, tt(k), h);
+    f(k) = wrap180(az0 + rate*tt(k) - az);           % antenna ahead of the target: > 0
+end
+tl = nan(1, nScans);
+if f(1) >= 0 && f(1) < rate * 0.02, tl(1) = 0; end   % the antenna starts at the target
+for k = find(f(1:end-1) < 0 & f(2:end) >= 0)
+    a = tt(k);  b = tt(k+1);
+    for it = 1:30                                    % bisection
+        c = (a + b) / 2;
+        [~, az] = target_geometry(tg, c, h);
+        if wrap180(az0 + rate*c - az) < 0, a = c; else, b = c; end
+    end
+    s = floor(a / T) + 1;
+    if s <= nScans && ~isfinite(tl(s)), tl(s) = a; end
+end
 end
 
 function near = any_target_near(targets, t, pos, h)

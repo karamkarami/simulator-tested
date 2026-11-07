@@ -38,7 +38,8 @@ function targets = challenge_targets_scenario()
 %           and range rate change by 80 m/s per scan)
 %   C13     combined: a 3 deg/s turn to the left while it slows down
 %           (-4 m/s^2) and climbs (4 m/s^2 up: 60 m/s climb rate) from t = 4 s
-%           to 19 s, low (600 m) at 25 km
+%           to 19 s, low (600 m) at 25 km (North-North-West; it does not
+%           cross North, the start azimuth of the antenna, within 3 scans)
 %                    name   RCS[m2] range[m] az[deg] alt[m] vRadial[m/s] vCross[m/s] (maneuvers)
 targets(1)  = make_target('C1',  0.3,  48e3,    50,   4500,  -150,    50);
 targets(2)  = make_target('C2',  2.0,   8e3,   125,    300,   -25,     4);
@@ -53,5 +54,5 @@ targets(10) = make_target('C10', 5.0,  45e3,   325,    100,  -250,    30);
 % maneuvers: rows [tStart_s turnRate_dps accelAlong_mps2 accelUp_mps2] (make_target.m)
 targets(11) = make_target('C11', 3.0,  30e3,    15,   4000,  -250,     0, [3 5 0 0; 15 -5 0 0; 27 0 0 0]);
 targets(12) = make_target('C12', 2.0,  20e3,   265,   2000,  -100,     0, [0 0 8 0; 30 0 0 0]);
-targets(13) = make_target('C13', 2.0,  25e3,   355,    600,  -200,    50, [4 -3 -4 4; 19 0 0 0]);
+targets(13) = make_target('C13', 2.0,  25e3,   345,    600,  -200,    50, [4 -3 -4 4; 19 0 0 0]);
 end
