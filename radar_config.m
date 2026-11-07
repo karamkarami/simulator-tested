@@ -380,7 +380,8 @@ cfg.sim.sectors_deg = [];     % [] = full 360 deg; else rows [azStart azEnd]: on
 cfg.sim.seed        = 1;      % random seed
 cfg.sim.swerling    = 1;      % target RCS model: 1 = Swerling 1 (new RCS every scan), 0 = constant
 
-%% Targets (see make_target.m)
+%% Targets (see make_target.m: constant velocity, or maneuvers: coordinated turns and constant
+% accelerations, target_state.m)
 % Test scenario:
 %   'six'       six_targets_scenario.m: six targets around the radar (0.5 - 10 m^2, 8 - 46 km)
 %   'challenge' challenge_targets_scenario.m: thirteen targets that are hard for the radar

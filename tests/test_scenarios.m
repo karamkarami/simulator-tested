@@ -11,6 +11,7 @@ function [ok, out] = test_scenarios(scenario, varargin)
 %     'gainOffset' 0           dB added to cfg.rx.gain_dB (e.g. -cnrOffset: no ADC overload)
 %     'nElements' 48           cfg.ant.nElements (1: no DBF, 2-D tracking)
 %     'seed'      1            cfg.sim.seed (and the random scenario)
+%     'method'    'ekf'        cfg.track.method: 'ekf' (EKF, GNN) or 'pmbm' (PMBM, IMM-UKF)
 %   The sectors around every look at every target are simulated (a crossing
 %   target moves several degrees per scan). A target is expected in a scan
 %   when snr_budget gives it at least 3 dB of margin at that look (Pd 0.9 at
@@ -31,12 +32,17 @@ function [ok, out] = test_scenarios(scenario, varargin)
 %   With one element (2-D tracking at slant range) a crossing target at high
 %   elevation can lose its track as well: the slant-range projection bends
 %   its path (reported as a failure).
+%   A maneuvering target (C11 - C13 of the challenge scenario: more than
+%   2 m/s^2 between its looks) needs its track with the PMBM tracker (IMM
+%   with turn and acceleration models); the EKF (one motion model) is only
+%   reported for it.
 %   The other targets are only reported. Over all: at most 2 false plots per
 %   scan (more than 1 km / 3 deg from every target), no false confirmed
 %   track, and the ADC overload below cfg.adc.overloadWarn.
 %   With the defaults one scan takes about 35 - 60 min in Octave (48 elements).
 
-p = struct('nScans', 3, 'prf', 'fixed', 'terrain', 'regions', 'cnrOffset', 0, 'gainOffset', 0, 'nElements', 48, 'seed', 1);
+p = struct('nScans', 3, 'prf', 'fixed', 'terrain', 'regions', 'cnrOffset', 0, 'gainOffset', 0, 'nElements', 48, 'seed', 1, ...
+           'method', 'ekf');
 for i = 1:2:numel(varargin), p.(varargin{i}) = varargin{i+1}; end
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
@@ -46,6 +52,7 @@ cfg.sim.seed = p.seed;
 cfg.sim.nScans = p.nScans;
 cfg.prf.mode = p.prf;
 cfg.ant.nElements = p.nElements;
+cfg.track.method = p.method;
 if strcmp(p.terrain, 'off')
     cfg.clutter.enable = false;
 else
@@ -78,8 +85,8 @@ for k = 1:nT
     end
 end
 cfg.sim.sectors_deg = sectors;
-label = sprintf('%s scenario, %s PRF, clutter %s (CNR %.1f dB), gain %g dB, %d element(s), %d scans', scenario, ...
-                p.prf, p.terrain, cfg.clutter.cnr_dB, cfg.rx.gain_dB, p.nElements, p.nScans);
+label = sprintf('%s scenario, %s PRF, clutter %s (CNR %.1f dB), gain %g dB, %d element(s), %d scans, %s tracker', ...
+                scenario, p.prf, p.terrain, cfg.clutter.cnr_dB, cfg.rx.gain_dB, p.nElements, p.nScans, upper(p.method));
 fprintf('%s\n', label);
 res = run_radar_sim(cfg);
 sys = res.sys;
@@ -177,6 +184,18 @@ for k = 1:nT
     if azStep > 15 && needTrack
         needTrack = false;
         notes{end+1} = sprintf('fast crosser %.0f deg/scan: track not required', azStep); %#ok<AGROW>
+    end
+    % maneuvering target: acceleration between its looks
+    aMax = 0;
+    for tt = linspace(tLook(k, 1), tLook(k, end), 60)
+        [~, ~, acc] = target_state(tg, tt);
+        aMax = max(aMax, norm(acc));
+    end
+    if aMax > 2 && needTrack && ~strcmp(sys.track.method, 'pmbm')
+        needTrack = false;
+        notes{end+1} = sprintf('maneuver %.0f m/s^2: track required only with the PMBM tracker', aMax); %#ok<AGROW>
+    elseif aMax > 2
+        notes{end+1} = sprintf('maneuver %.0f m/s^2', aMax); %#ok<AGROW>
     end
     if above && sys.track.dim == 3 && needTrack
         needTrack = false;

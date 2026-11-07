@@ -6,8 +6,9 @@
 %   Linux or macOS), test_c_receiver compares it with the MATLAB processing
 %   (about 20 minutes per run: fixed and staggered PRF, 1-D range and Doppler
 %   CFAR), and test_multi_scan sends three scans through it (about 40 minutes).
-%   test_clutter takes about 5 minutes, each test_scenarios run (3 scans, 48
-%   elements) 2 - 3 hours. All tests together take about 9 hours.
+%   test_clutter takes about 5 minutes, test_tracker_pmbm about 3 minutes, each
+%   test_scenarios run (3 scans, 48 elements) 2 - 3 hours (1 element: about
+%   20 minutes). All tests together take about 12 hours.
 %   The PPI tests need graphics: in Octave without a display run
 %   xvfb-run octave --no-gui --eval run_all_tests (octave-cli has no
 %   graphics toolkit: the interactive PPI test is skipped, the other tests
@@ -39,6 +40,7 @@ tests(end+1, :) = {'Phase codes: matched and mismatch filters (and the C core te
 tests(end+1, :) = {'Configuration edge cases (sectors, invalid settings, handover)', @test_setup};
 tests(end+1, :) = {'CFAR methods (2-D, range, Doppler), edges, range interval', @test_cfar};
 tests(end+1, :) = {'EKF tracker 3-D and 2-D (and the C tracker when built)', @test_tracker};
+tests(end+1, :) = {'PMBM tracker with IMM-UKF 3-D and 2-D: maneuvers, acceleration, clutter, close targets', @test_tracker_pmbm};
 tests(end+1, :) = {'Interactive PPI (data tips, zoom, pan, filters)', @test_ppi_interactive};
 tests(end+1, :) = {'No ghost of the short-pulse echo (same IF)', @test_short_pulse_ghost};
 tests(end+1, :) = {'170 MHz challenges (overload, eclipsed echoes, blind speeds, resolution, load)', @test_vhf_challenges};
@@ -47,8 +49,12 @@ for mode = {'fixed', 'staggered'}
     tests(end+1, :) = {sprintf('Six targets with clutter (%s PRF)', mode{1}), ...
                        @() test_six_targets(mode{1}, true, false)}; %#ok<SAGROW>
 end
-tests(end+1, :) = {'Ten challenging targets in the terrain clutter, 3 scans: plots and tracks (fixed PRF)', ...
+tests(end+1, :) = {'Thirteen challenging targets in the terrain clutter, 3 scans: plots and tracks (fixed PRF)', ...
                    @() test_scenarios('challenge')};
+tests(end+1, :) = {'Thirteen challenging targets, 3 scans, PMBM tracker (IMM-UKF), 48 elements (3-D)', ...
+                   @() test_scenarios('challenge', 'method', 'pmbm')};
+tests(end+1, :) = {'Thirteen challenging targets, 3 scans, PMBM tracker (IMM-UKF), 1 element (2-D)', ...
+                   @() test_scenarios('challenge', 'method', 'pmbm', 'nElements', 1)};
 tests(end+1, :) = {'Ten random targets in the terrain clutter, 3 scans: plots and tracks (staggered PRF)', ...
                    @() test_scenarios('random', 'prf', 'staggered')};
 

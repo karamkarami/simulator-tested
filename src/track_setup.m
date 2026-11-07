@@ -138,8 +138,11 @@ m.qCt = [s.imm.sigmaAccelCt_mps2^2 * [1 1], qz(1)];  m.qCt = m.qCt(1:d);   % [m^
 m.qTurn = deg2rad(s.imm.sigmaTurn_dps)^2;          % [rad^2/s^3]
 m.sigmaTurn0 = deg2rad(s.imm.maxTurn_dps) / sqrt(3);
 m.sigmaClimb0 = min(t.maxSpeed_mps, s.maxClimb_mps) / sqrt(3);   % vertical velocity std of a new track (3-D)
-m.varUnusedA = 0.1^2;                              % acceleration of the CV and CT models: ~0 [m^2/s^4]
-m.varUnusedW = deg2rad(0.01)^2;                    % turn rate of the CV and CA models: ~0 [rad^2/s^2]
+% A model without acceleration (CV, CT) or turn rate (CV, CA) predicts it as 0 with the
+% uncertainty of a new track: it does not change the motion of that model, but when the
+% IMM mixes it into the CA or CT model that model can take up a new maneuver at once.
+m.varUnusedA = p.sigmaA0^2;                        % [m^2/s^4]
+m.varUnusedW = m.sigmaTurn0^2;                     % [rad^2/s^2]
 % unscented transform: weights of the 2n+1 sigma points
 n = m.n;
 a = s.ukf.alpha;  b = s.ukf.beta;  k = s.ukf.kappa;

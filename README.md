@@ -40,8 +40,10 @@ or `radar_receiver_linux/README.md`; below `radar_receiver_<os>`).
  CA-CFAR on every range-Doppler map: 2-D, 1-D range or 1-D Doppler window (cfg.cfar.method),
          in a selectable range interval per sub-pulse, range window shifted inwards at the edges
  Pruning (local peaks + sidelobe blanking) -> plot extraction (azimuth peak picking)
- Tracking (optional): EKF, 2-D (range, azimuth) or 3-D (+ elevation), constant velocity or
-          constant acceleration, global nearest neighbour (GNN) association
+ Tracking (optional, cfg.track.method): 'ekf' EKF, 2-D (range, azimuth) or 3-D (+ elevation),
+          constant velocity or constant acceleration, global nearest neighbour (GNN) association;
+          'pmbm' multi-target Bayesian tracker: PMBM filter with IMM-UKF state estimation
+          (CV / CA / coordinated turn), 2-D or 3-D
  PPI display (updated while the antenna turns): plots / detections, tracks, block, console and display times
 ```
 
@@ -229,16 +231,17 @@ file was built for other values (for example after you change
 | `src/cpi_buffer_*.m` | circular CPI buffers |
 | `src/mti_filter.m`, `doppler_process.m` | clutter filter, Doppler processing |
 | `src/cfar_detect.m`, `cfar_alpha.m` | CA-CFAR (2-D, 1-D range, 1-D Doppler window) |
-| `src/track_setup.m`, `track_init.m`, `track_update.m`, `track_report.m` | EKF tracker (2-D / 3-D, CV / CA model, GNN association) |
+| `src/track_setup.m`, `track_init.m`, `track_update.m`, `track_report.m` | tracker: EKF (2-D / 3-D, CV / CA model, GNN association), and the common interface of both methods (`cfg.track.method`) |
+| `src/track_pmbm.m` | PMBM multi-target tracker with IMM-UKF state estimation (CV, CA, coordinated turn), 2-D / 3-D (`cfg.track.method = 'pmbm'`) |
 | `src/prune_peaks.m`, `detection_reports.m`, `plot_extractor*.m` | pruning (local peaks, sidelobes) and plot extraction |
 | `src/ppi_init.m`, `ppi_update.m`, `ppi_callbacks.m` | interactive PPI display |
 | `src/detection_log_init.m`, `detection_log_add.m` | CFAR detections kept for the PPI |
 | `src/cfar_pfa.m` | false alarm probability of a CFAR threshold (inverse of `cfar_alpha.m`) |
 | `src/snr_budget.m`, `print_snr_budget.m` | expected SNR after every block (incl. STC, ADC noise and DDC rounding; blind speeds marked) |
 | `src/target_scenario.m` | targets of the scenario selected by `cfg.scenario.type`: `'six'`, `'challenge'` or `'random'` |
-| `src/challenge_targets_scenario.m` | ten targets hard for the radar: 0.3 m^2 at 48 km over the mountains, slow (25 m/s) over the hills, tangential (in the MTI notch), a 1 m^2 target at 23 km behind a 10 m^2 target at 5 km (pulse handover, STC), two targets 300 m apart, 420 m/s, 37 deg elevation (over the sea), 100 m altitude at 45 km; C2 and the 5 km target over the hills |
+| `src/challenge_targets_scenario.m` | thirteen targets hard for the radar: 0.3 m^2 at 48 km over the mountains, slow (25 m/s) over the hills, tangential (in the MTI notch), a 1 m^2 target at 23 km behind a 10 m^2 target at 5 km (pulse handover, STC), two targets 300 m apart, 420 m/s, 37 deg elevation (over the sea), 100 m altitude at 45 km; C2 and the 5 km target over the hills; and for the tracker: C11 a 5 deg/s weave (2.2 g, right then left), C12 a constant acceleration of 8 m/s^2 (100 -> 340 m/s), C13 a 3 deg/s turn while it slows down (-4 m/s^2) and climbs (4 m/s^2 up) |
 | `src/random_targets_scenario.m` | `cfg.scenario.random.n` (10) targets with random RCS, position, altitude, speed and heading in the limits of `cfg.scenario.random` (reproducible: seed) |
-| `src/six_targets_scenario.m`, `make_target.m`, `target_geometry.m`, `illumination_time.m`, `target_sectors.m` | targets |
+| `src/six_targets_scenario.m`, `make_target.m`, `target_state.m`, `target_geometry.m`, `illumination_time.m`, `target_sectors.m` | targets: constant velocity or with maneuvers (`make_target(..., maneuvers)`: rows `[tStart turnRate_dps accelAlong_mps2 accelUp_mps2]`, coordinated turns and constant accelerations, integrated in closed form by `target_state.m`) |
 | `tests/` | tests (see below) |
 | `radar_receiver_windows/`, `radar_receiver_linux/` | the receiver processing in C (CMake/CLion, Qt PPI, serial output), one project per operating system with the same `src`, `tests`, `tools` and `config` (test `same_sources`; the Linux one also has real-time options) |
 | `src/receiver_dir.m` | the folder of the C receiver for this computer (`ispc`: Windows, else Linux) |
@@ -597,6 +600,67 @@ there, at the same beam and Doppler, behind very strong far targets.
   so it is tested from its second update on). The C receiver does the same
   (`trackMinSpeed` in its configuration file). The
   tracks are in `results.tracker` and on the PPI.
+* **Tracking with `cfg.track.method = 'pmbm'`: multi-target Bayesian
+  tracker** (`src/track_pmbm.m`, settings `cfg.track.pmbm`; same calls,
+  `results.tracker.tracks` and `results.tracker.log` as the EKF). The
+  multi-target density is a Poisson multi-Bernoulli mixture (PMBM): the
+  targets not yet detected are a Poisson process with a uniform intensity in
+  the measurement space (`undetectedTargets` = 1 in the coverage), every
+  detected target is a Bernoulli component (a track: existence probability
+  r and a state density) holding single-target hypotheses (the histories
+  of plots it may explain), and the global hypotheses (one single-target
+  hypothesis per track, with a weight) are the data association
+  hypotheses. The plots arrive in the batches of the EKF (`gnnSector_deg`,
+  `gnnMaxSector_deg`). Every global hypothesis gives its best assignments
+  of the batch (Murty's k-best algorithm on the Hungarian assignment, as
+  many as its weight earns of `maxHypotheses` = 25); a plot updates a track
+  (weight r*ps*pd*l, l = likelihood of the plot), starts a new track or is
+  a false plot (weight `falsePlotsPerScan` (2) + pd*`undetectedTargets`,
+  per unit measurement volume). The antenna looks at a track once per scan:
+  when it passed the predicted azimuth without a plot, the track is missed
+  (r -> r(1-pd)/(1-r*pd) after the survival `ps` = 0.99 per scan; `pd` =
+  0.9). Pruning: global hypotheses below `hypPrune` (1e-3 of the best) or
+  beyond 25, single-target hypotheses below `rPrune`, tracks whose
+  existence (over all global hypotheses) is below `rDelete` (1e-4), as well
+  as after `maxMiss` / `maxMissTentative` missed scans and with the speed
+  gate as the EKF. A track is confirmed when its existence is at least
+  `rConfirm` (0.9) and it has `confirmHits` (3) plots in the most likely
+  global hypothesis; the tracks shown and logged are those of the most
+  likely global hypothesis. When that hypothesis changes (e.g. the first plot
+  of a track is now explained as a false plot and the target by a later
+  track), the track that holds the newest plot of a confirmed track takes
+  its number, so the numbers stay with the targets.
+  State estimation of every single-target hypothesis: IMM (interacting
+  multiple models) of `imm.models` = CV (white acceleration 2 m/s^2), CA
+  (white jerk 1 m/s^3) and CT (coordinated turn in the horizontal plane with
+  the turn rate in the state, its random walk 0.5 deg/s per sqrt(s), white
+  acceleration 2 m/s^2), on the common state [position; velocity;
+  acceleration; turn rate] (2-D: 7 values, 3-D: 10; vertical: CV with
+  `sigmaAccelZ_mps2`), switching with `switchProb` = 0.05 per scan (the
+  transition matrix raised to the power dt/scan time). A model without
+  acceleration or turn rate keeps them at 0 with the uncertainty of a new
+  track, so the CA and CT models can take up a new maneuver at once. Every
+  model is an unscented Kalman filter (UKF, 2n+1 sigma points, alpha 1,
+  beta 2, kappa 0): the CT motion and the measurement (range, azimuth (,
+  elevation) and the radial velocity, unfolded as with the EKF) are
+  propagated through the sigma points; CV and CA are linear (exact Kalman
+  prediction). Gate: chi-square (`gateProb`) of any model. 2-D (one
+  element) measures ground range (slant range without elevation) and
+  azimuth, as the 2-D EKF; 3-D range, azimuth and elevation; a new track
+  starts at the plot with the velocity prior (horizontal `maxSpeed_mps`,
+  vertical `pmbm.maxClimb_mps` = 100 m/s) conditioned on the plot radial
+  velocity when it is unambiguous. `track_report` and the PPI data tip add
+  the existence probability and the model probabilities of a track. The C
+  receiver has only the EKF (`export_receiver_config` warns).
+  On synthetic plots (`test_tracker_pmbm`) it follows a 4 deg/s turn with
+  one track (CT probability 0.8 - 0.95 in the turn; the EKF loses it and
+  starts 3 - 4 tracks) and a 6 m/s^2 acceleration (CA probability 0.8 - 0.9,
+  velocity error 11 m/s rms instead of 45 m/s, acceleration within
+  0.1 m/s^2), keeps the six targets with Pd 0.7 and 30 false plots per scan
+  without a false confirmed track, keeps two targets 200 m apart and two
+  crossing targets on their own tracks, and confirms 12 of the 13 challenge
+  targets in 6 scans (the EKF 11). About 1 - 2 ms per plot-track pair in
+  Octave.
 * **Pruning and plots:** only local maxima in beam x range x Doppler are
   kept. Range, elevation and Doppler sidelobes more than 20 dB below a
   stronger peak are removed. Detections of the same target in successive
@@ -838,9 +902,10 @@ budget.
 | `test_setup` | configuration edge cases without a simulation: the simulated sectors (`[0 360]` = whole circle, across North, several sectors), settings that cannot work stop with a message naming them (MTI notch over all Doppler bins, CPI too short, unknown CFAR method, DDC rate, PRF mode), a short pulse that hands over within its first CFAR window keeps one whole window (and the C receiver accepts the exported configuration); the DDC output and the PRI header are the same for every CFAR method and pulse compression filter |
 | `test_vhf_challenges` | demanding cases at 170 MHz (one CPI each, clutter): ADC overload detected at 60 dB without STC, none with the STC (and at 30 dB without it); strong targets at 5, 8, 12 and 21 km (up to 10 m^2) give one detection and no ghost of their eclipsed long-pulse echo with the STC (the number without it is printed); targets at 30 and 23.5 km (deepest long-window STC) behind a strong near target are detected, no other long-pulse detection; fixed PRF: blind at 5 m/s, 30 - 430 m/s detected with the right velocity; staggered PRF: the row blind speed (225 m/s) flagged and not detected, 150 m/s detected; two targets 300 m apart resolved; 33 000 CFAR detections pruned in about a second, exactly as the direct rules |
 | `test_clutter` | clutter power and terrain (5 min): the CNR measured at the matched filter output equals `cfg.clutter.cnr_dB` (60, 72.7, 85 dB) and `cnr_dB = []` keeps `sigma0_dB`; desert and sea 15 dB below land; nothing flat beyond the horizon, mountains seen beyond it, their back slopes shadowed, one steering vector per elevation group; internal motion of every type (sea: its drift); no ADC clipping over 360 deg at the default CNR, clipping above the warning at +15 dB; one CPI over land, hills, mountains, desert and sea: the target detected, nothing else |
-| `test_scenarios(scenario, ...)` | several scans (default 3, 48 elements, fixed PRF, terrain clutter) of the `'six'`, `'challenge'` or `'random'` scenario through `run_radar_sim`, with the simulated sectors around every look at every target. A target is expected in a scan unless it is at a blind speed, has less than 3 dB of SNR margin, is out of range or lies in the CFAR window of a stronger (or nearly as strong) target of the same pulse; it must give plots in all expected scans but one and, with enough scans, a confirmed track (not required above the DBF beams, 40 deg, for a 3-D track, or for a crosser faster than 15 deg per scan); at most 2 false plots per scan, no false confirmed track, no ADC overload; options: `'prf'`, `'terrain'` (`'uniform'`, `'regions'`, `'off'`), `'cnrOffset'`, `'gainOffset'`, `'nElements'`, `'seed'` |
+| `test_scenarios(scenario, ...)` | several scans (default 3, 48 elements, fixed PRF, terrain clutter) of the `'six'`, `'challenge'` or `'random'` scenario through `run_radar_sim`, with the simulated sectors around every look at every target. A target is expected in a scan unless it is at a blind speed, has less than 3 dB of SNR margin, is out of range or lies in the CFAR window of a stronger (or nearly as strong) target of the same pulse; it must give plots in all expected scans but one and, with enough scans, a confirmed track (not required above the DBF beams, 40 deg, for a 3-D track, or for a crosser faster than 15 deg per scan); at most 2 false plots per scan, no false confirmed track, no ADC overload; a maneuvering target (more than 2 m/s^2: C11 - C13) needs its track only with the PMBM tracker; options: `'prf'`, `'terrain'` (`'uniform'`, `'regions'`, `'off'`), `'cnrOffset'`, `'gainOffset'`, `'nElements'`, `'seed'`, `'method'` (`'ekf'`, `'pmbm'`) |
 | `test_multi_scan(mode, nScans)` | several scans of the six-target scenario through the C receiver (DDC files, `radar_stream_send`): every PRI received, a confirmed track on every target not at a blind speed, no confirmed false track, at most 2 false plots per scan |
 | `test_cfar` | the three CFAR methods on exponential noise: false alarm rate 1e-3 in the interior and at the range edges (shifted window), targets in the first and last range cell detected, only the tested range interval is tested, the noise estimate equals the direct sums over the (shifted) window, also when the whole tested interval lies within the edge cells |
+| `test_tracker_pmbm` | PMBM tracker with IMM-UKF on synthetic plots (target positions from `target_state`, plots at the antenna looks, errors of `cfg.track`, folded radial velocity), 3-D and 2-D, against the EKF on the same plots: six targets with 8 false plots per scan (fixed and staggered PRF): one confirmed track per target, no false track; a 4 deg/s turn: one track, smaller position error than the EKF, CT dominant in the turn; a 6 m/s^2 acceleration: one track, CA dominant, smaller velocity error than the EKF; Pd 0.7 with 30 false plots per scan: every target detected in the last 3 scans tracked, at most one false track; two targets 200 m apart and two crossing targets: no merge, no swap; track termination after the missed scans; speed gate; the 13 challenge targets with detections from the SNR budget: every target detected in the last 3 scans tracked, no false track |
 | `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA, with and without the radial velocity: one confirmed track per target, close to it, no false track; the radial velocity lowers the velocity error after two scans; staggered PRF (folded plot velocities): the track radial velocity is unfolded; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |
 | `test_c_receiver(mode, ..., cfarMethod)` | the six-target scenario streamed over UDP to the C receiver (`radar_receiver_<os>/`): its plots and track updates must match MATLAB; the recorded stream is replayed to check repeatability and speed |
 
@@ -950,6 +1015,16 @@ PPI use a virtual display: `xvfb-run octave --no-gui --eval run_all_tests`.
 * With one element (2-D tracking) the slant range is taken as ground
   range: for a close high target (elevation above about 20 deg) the
   track position is off by R(1 - cos(el)), which can exceed the gate.
+* PMBM tracker: the undetected targets have a uniform intensity (no map of
+  where targets appear), the detection probability `pd` is the same
+  everywhere (not from the SNR of the target), and the tracker assumes
+  that the antenna looks everywhere (a sector run, `cfg.sim.sectors_deg`,
+  misses the tracks outside its sectors, as with the EKF). The IMM follows
+  turns up to about 6 deg/s (3.5 g at 280 m/s, 60 deg of heading per scan),
+  but a reversal of such a turn within one scan (turn rate from -6 to
+  +6 deg/s) leaves the gate of every model: a new track starts (the EKF
+  loses it as well). It runs in MATLAB only: the C receiver tracks with the
+  EKF.
 * The transmitter uses the wide element pattern in elevation. Every
   receive element sees the full azimuth pattern.
 * Swerling 1 targets (constant RCS within a scan), no multipath, no echoes
