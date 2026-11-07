@@ -302,6 +302,21 @@ int main(int argc, char **argv)
         }
         check(magenta, "the track triangle is drawn around the plot");
     }
+    {   /* a PMBM track: existence and the IMM model probabilities in its data tip */
+        Track tp = tk;
+        tp.method = TRACK_METHOD_PMBM;
+        tp.existence = 0.973;
+        tp.nModes = 3;
+        tp.modes[0] = PMBM_CV;  tp.modes[1] = PMBM_CA;  tp.modes[2] = PMBM_CT;
+        tp.modeProb[0] = 0.05;  tp.modeProb[1] = 0.15;  tp.modeProb[2] = 0.80;
+        ppi_post_track(&tp);
+        win.refresh();
+        const QString tipP = pw.tipText(st);
+        check(tipP.contains("Track 7 (confirmed, 3-D PMBM)") && tipP.contains("Existence: 0.973") &&
+              tipP.contains("Models: CV 0.05 CA 0.15 CT 0.80"), "data tip of a PMBM track: existence, model probabilities");
+        ppi_post_track(&tk);                             /* back to the EKF track */
+        win.refresh();
+    }
     win.tracksBox()->setChecked(false);
     check(!pw.showTracks() && !pw.tipText(st).contains("Track"), "Tracks checkbox hides the tracks");
     send_key(pw, Qt::Key_T, "t");

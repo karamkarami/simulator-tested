@@ -37,7 +37,8 @@ or `radar_receiver_linux/README.md`; below `radar_receiver_<os>`).
  CPI buffer (circular, the pulses of one CPI)              -> [21 x nRange x 114], short and long
  MTI  fixed PRF: 3-pulse canceller | staggered: weights from file
  Doppler fixed: Hamming + FFT 128 (next power of 2 of 114) | staggered: de-interleave, Hamming, FFT 32, NCI
- CA-CFAR on every range-Doppler map: 2-D, 1-D range or 1-D Doppler window (cfg.cfar.method),
+ CFAR on every range-Doppler map: CA, GO, SO or OS detector (cfg.cfar.type) with the
+         2-D, 1-D range or 1-D Doppler window (cfg.cfar.method),
          in a selectable range interval per sub-pulse, range window shifted inwards at the edges
  Pruning (local peaks + sidelobe blanking) -> plot extraction (azimuth peak picking)
  Tracking (optional, cfg.track.method): 'ekf' EKF, 2-D (range, azimuth) or 3-D (+ elevation),
@@ -230,13 +231,16 @@ file was built for other values (for example after you change
 | `src/matched_filter.m`, `plot_range_profile.m` | pulse compression, range/delay/index plots |
 | `src/cpi_buffer_*.m` | circular CPI buffers |
 | `src/mti_filter.m`, `doppler_process.m` | clutter filter, Doppler processing |
-| `src/cfar_detect.m`, `cfar_alpha.m` | CA-CFAR (2-D, 1-D range, 1-D Doppler window) |
-| `src/track_setup.m`, `track_init.m`, `track_update.m`, `track_report.m` | tracker: EKF (2-D / 3-D, CV / CA model, GNN association), and the common interface of both methods (`cfg.track.method`) |
+| `src/cfar_detect.m` | CFAR block: the detector of `cfg.cfar.type` with the window of `cfg.cfar.method`, MTI notch |
+| `src/cfar_ca.m`, `cfar_goso.m`, `cfar_os.m` | CA (cell averaging), GO / SO (greatest / smallest of the half windows) and OS (order statistic) CFAR, each with the 2-D, 1-D range and 1-D Doppler window |
+| `src/cfar_alpha.m`, `cfar_statistic.m`, `cfar_quadrature.m` | threshold factor of a detector for a Pfa; distribution of its noise statistic; the quadrature of the Pfa integral |
+| `src/track_setup.m`, `track_init.m`, `track_update.m`, `track_report.m` | tracking block: settings, the tracker of `cfg.track.method` (`track_update.m` calls `track_ekf.m` or `track_pmbm.m`), the tracks for the display |
+| `src/track_ekf.m` | EKF tracker (2-D / 3-D, CV / CA model, GNN association; `cfg.track.method = 'ekf'`) |
 | `src/track_pmbm.m` | PMBM multi-target tracker with IMM-UKF state estimation (CV, CA, coordinated turn), 2-D / 3-D (`cfg.track.method = 'pmbm'`) |
 | `src/prune_peaks.m`, `detection_reports.m`, `plot_extractor*.m` | pruning (local peaks, sidelobes) and plot extraction |
 | `src/ppi_init.m`, `ppi_update.m`, `ppi_callbacks.m` | interactive PPI display |
 | `src/detection_log_init.m`, `detection_log_add.m` | CFAR detections kept for the PPI |
-| `src/cfar_pfa.m` | false alarm probability of a CFAR threshold (inverse of `cfar_alpha.m`) |
+| `src/cfar_pfa.m` | false alarm probability of a CFAR threshold of any detector (inverse of `cfar_alpha.m`) |
 | `src/snr_budget.m`, `print_snr_budget.m` | expected SNR after every block (incl. STC, ADC noise and DDC rounding; blind speeds marked) |
 | `src/target_scenario.m` | targets of the scenario selected by `cfg.scenario.type`: `'six'`, `'challenge'` or `'random'` |
 | `src/challenge_targets_scenario.m` | thirteen targets hard for the radar: 0.3 m^2 at 48 km over the mountains, slow (25 m/s) over the hills, tangential (in the MTI notch), a 1 m^2 target at 23 km behind a 10 m^2 target at 5 km (pulse handover, STC), two targets 300 m apart, 420 m/s, 37 deg elevation (over the sea), 100 m altitude at 45 km; C2 and the 5 km target over the hills; and for the tracker: C11 a 5 deg/s weave (2.2 g, right then left), C12 a constant acceleration of 8 m/s^2 (100 -> 340 m/s), C13 a 3 deg/s turn while it slows down (-4 m/s^2) and climbs (4 m/s^2 up) |
@@ -489,15 +493,35 @@ there, at the same beam and Doppler, behind very strong far targets.
   de-interleaving into 4 rows of 28 samples. Each row is sampled every
   sum(PRI); it gets a Hamming window and a 32-point FFT (the next power of 2
   of 28), and |X|^2 is averaged over the rows.
-* **CFAR:** cell-averaging CFAR with one of three windows (`cfg.cfar.method`),
-  each with its own guard and training cells and Pfa (or a fixed threshold
-  `threshold_dB`):
+* **CFAR:** one of four detectors (`cfg.cfar.type`) with one of three
+  windows (`cfg.cfar.method`), each window with its own guard and training
+  cells and Pfa (or a fixed threshold `threshold_dB`). The detector is the
+  statistic of the training cells that the threshold factor alpha
+  multiplies: `'ca'` (default) their mean; `'go'` / `'so'` the larger /
+  smaller of the means of the two halves of the window (2-D and range
+  window: the cells at a smaller and at a larger range than the cell under
+  test, the cells on its own range in neither; Doppler window: the bins
+  below and above it; at a range edge an empty half is replaced by the
+  other); `'os'` the k-th smallest training cell, k = round(`osRank` x
+  training cells), `osRank` = 0.75 (k scaled to the training cells at the
+  range edges). alpha comes from the Pfa (`cfar_alpha.m`): for CA the closed
+  form, for GO, SO and OS P(Z < S/alpha) integrated over the cell power S
+  with the distribution of the statistic Z (`cfar_statistic.m`: Gamma of
+  the looks, its maximum / minimum over two halves, or its order
+  statistic; checked against the single-look closed forms of Gandhi and
+  Kassam and of Rohling, `test_cfar`). The noise estimate of a detection
+  (SNR with `cfg.report.snrNoise = 'cfar'`) is the statistic divided by its
+  mean for unit noise. OS is evaluated only at the cells that are local
+  maxima (3 x 3 x 3), the only ones the pruning keeps: the same result for
+  a fraction of the work.
 
-  | Method | Window (each side) | Training cells | Threshold (Pfa 1e-8) |
-  |---|---|---|---|
-  | `'2d'` (default) | 3 + 8 range, 3 + 4 Doppler | 296 | 12.79 dB |
-  | `'range'` | 3 + 16 range cells | 32 | 13.96 dB |
-  | `'doppler'` | 2 + 8 Doppler bins | 16 | 15.39 dB |
+  | Window | Each side | Training cells | CA | GO | SO | OS (k) |
+  |---|---|---|---|---|---|---|
+  | `'2d'` (default) | 3 + 8 range, 3 + 4 Doppler | 296 (halves 144) | 12.79 dB | 12.63 dB | 13.07 dB | 11.46 dB (222) |
+  | `'range'` | 3 + 16 range cells | 32 (halves 16) | 13.96 dB | 13.58 dB | 15.66 dB | 13.33 dB (24) |
+  | `'doppler'` | 2 + 8 Doppler bins | 16 (halves 8) | 15.39 dB | 14.88 dB | 18.99 dB | 15.50 dB (12) |
+
+  (thresholds for Pfa 1e-8, one look, fixed PRF)
 
   The MTI colours the noise ([1 -2 1] gives +4 dB
   near PRF/2), so every Doppler bin is first divided by its noise gain and
@@ -653,7 +677,8 @@ there, at the same beam and Doppler, behind very strong far targets.
   vertical `pmbm.maxClimb_mps` = 100 m/s) conditioned on the plot radial
   velocity when it is unambiguous. `track_report` and the PPI data tip add
   the existence probability and the model probabilities of a track. The C
-  receiver has only the EKF (`export_receiver_config` warns).
+  receiver runs the same tracker (`tracker_pmbm.c`; its track updates equal
+  MATLAB's, `test_tracker_pmbm`).
   On synthetic plots (`test_tracker_pmbm`) it follows a 4 deg/s turn with
   one track (CT probability 0.8 - 0.95 in the turn; the EKF loses it and
   starts 3 - 4 tracks) and a 6 m/s^2 acceleration (CA probability 0.8 - 0.9,
@@ -726,12 +751,12 @@ The panel on the right has:
   velocity leader of `cfg.display.trackLeader_s` = 30 s of flight), gray
   while tentative. Start value of the checkbox: `cfg.display.showTracks`.
 * **CFAR threshold [dB]**: the threshold factor 10 log10(alpha) of the
-  selected CFAR method (`cfg.cfar.method`). *Apply* hands the value to the
+  selected CFAR detector and window (`cfg.cfar.type`, `cfg.cfar.method`). *Apply* hands the value to the
   running simulation at its next display update (`ppi_update` returns `sys`
   with the new `sys.cfar.alpha`), from then on every CFAR uses it. *Default*
   goes back to the value of the method's Pfa. The line below shows the
   method, the threshold in use and its false alarm probability (`cfar_pfa.m`,
-  the inverse of `cfar_alpha.m`), e.g. `2-D: 12.79 dB (Pfa 1.0e-08)`.
+  the inverse of `cfar_alpha.m`, for every detector), e.g. `CA 2-D: 12.79 dB (Pfa 1.0e-08)`.
 * Reset view, Clear display, Remove data tips, Pause, and **Save screenshot
   (PNG)**, which saves the window as it is now (file dialog, default name
   `ppi_<date>_<time>.png`).
@@ -906,10 +931,10 @@ budget.
 | `test_clutter` | clutter power and terrain (5 min): the CNR measured at the matched filter output equals `cfg.clutter.cnr_dB` (60, 72.7, 85 dB) and `cnr_dB = []` keeps `sigma0_dB`; desert and sea 15 dB below land; nothing flat beyond the horizon, mountains seen beyond it, their back slopes shadowed, one steering vector per elevation group; internal motion of every type (sea: its drift); no ADC clipping over 360 deg at the default CNR, clipping above the warning at +15 dB; one CPI over land, hills, mountains, desert and sea: the target detected, nothing else |
 | `test_scenarios(scenario, ...)` | several scans (default 3, 48 elements, fixed PRF, terrain clutter) of the `'six'`, `'challenge'` or `'random'` scenario through `run_radar_sim`, with the simulated sectors around every look at every target. A target is expected in a scan unless it is at a blind speed, has less than 3 dB of SNR margin, is out of range or lies in the CFAR window of a stronger (or nearly as strong) target of the same pulse; it must give plots in all expected scans but one and, with enough scans, a confirmed track (not required above the DBF beams, 40 deg, for a 3-D track, or for a crosser faster than 15 deg per scan); at most 2 false plots per scan, no false confirmed track, no ADC overload; a maneuvering target (more than 2 m/s^2: C11 - C13) needs its track only with the PMBM tracker; options: `'prf'`, `'terrain'` (`'uniform'`, `'regions'`, `'off'`), `'cnrOffset'`, `'gainOffset'`, `'nElements'`, `'seed'`, `'method'` (`'ekf'`, `'pmbm'`) |
 | `test_multi_scan(mode, nScans)` | several scans of the six-target scenario through the C receiver (DDC files, `radar_stream_send`): every PRI received, a confirmed track on every target not at a blind speed, no confirmed false track, at most 2 false plots per scan |
-| `test_cfar` | the three CFAR methods on exponential noise: false alarm rate 1e-3 in the interior and at the range edges (shifted window), targets in the first and last range cell detected, only the tested range interval is tested, the noise estimate equals the direct sums over the (shifted) window, also when the whole tested interval lies within the edge cells |
+| `test_cfar` | the four CFAR detectors (CA, GO, SO, OS) with the three windows on exponential noise: false alarm rate 1e-3 in the interior (CA also at the range edges, the shifted window; GO / SO edges reported), targets in the first and last range cell detected, only the tested range interval is tested, the noise estimate equals the statistic computed directly from the (shifted) window, also when the whole tested interval lies within the edge cells; OS testing only the local maxima gives the same local maxima as testing every cell; `cfar_pfa` against the single-look closed forms of CA, GO, SO and OS |
 | `test_tracker_pmbm` | PMBM tracker with IMM-UKF on synthetic plots (target positions from `target_state`, plots at the antenna looks, errors of `cfg.track`, folded radial velocity), 3-D and 2-D, against the EKF on the same plots: six targets with 8 false plots per scan (fixed and staggered PRF): one confirmed track per target, no false track; a 4 deg/s turn: one track, smaller position error than the EKF, CT dominant in the turn; a 6 m/s^2 acceleration: one track, CA dominant, smaller velocity error than the EKF; Pd 0.7 with 30 false plots per scan: every target detected in the last 3 scans tracked, at most one false track; two targets 200 m apart and two crossing targets: no merge, no swap; track termination after the missed scans; speed gate; the 13 challenge targets with detections from the SNR budget: every target detected in the last 3 scans tracked, no false track |
 | `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA, with and without the radial velocity: one confirmed track per target, close to it, no false track; the radial velocity lowers the velocity error after two scans; staggered PRF (folded plot velocities): the track radial velocity is unfolded; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |
-| `test_c_receiver(mode, ..., cfarMethod)` | the six-target scenario streamed over UDP to the C receiver (`radar_receiver_<os>/`): its plots and track updates must match MATLAB; the recorded stream is replayed to check repeatability and speed |
+| `test_c_receiver(mode, ..., cfarMethod, cfarType, trackMethod)` | the six-target scenario streamed over UDP to the C receiver (`radar_receiver_<os>/`) with the given CFAR window, detector and tracker: its plots and track updates must match MATLAB; the recorded stream is replayed to check repeatability and speed |
 
 Latest results at 170 MHz with the receiver gain of 60 dB and the STC
 (Octave 8.4 on a 4-vCPU VM): every SNR budget check passes (fixed and
@@ -1029,8 +1054,7 @@ PPI use a virtual display: `xvfb-run octave --no-gui --eval run_all_tests`.
   turns up to about 6 deg/s (3.5 g at 280 m/s, 60 deg of heading per scan),
   but a reversal of such a turn within one scan (turn rate from -6 to
   +6 deg/s) leaves the gate of every model: a new track starts (the EKF
-  loses it as well). It runs in MATLAB only: the C receiver tracks with the
-  EKF.
+  loses it as well).
 * The transmitter uses the wide element pattern in elevation. Every
   receive element sees the full azimuth pattern.
 * Swerling 1 targets (constant RCS within a scan), no multipath, no echoes

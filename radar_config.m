@@ -233,7 +233,7 @@ cfg.extract.maxMiss = 2;       % CPIs without a detection before a plot is close
 %           gateProb, confirmHits, maxMiss*, speed gate)
 % Both work in 2-D (one element: range and azimuth, as the 2-D EKF) and in
 % 3-D (DBF: range, azimuth and elevation), cfg.track.dim. The C receiver
-% has only the EKF (export_receiver_config warns when 'pmbm' is selected).
+% runs the same trackers (tracker_ekf.c, tracker_pmbm.c).
 cfg.track.method          = 'ekf';   % 'ekf' or 'pmbm'
 
 % EKF: extended Kalman filter on the plots

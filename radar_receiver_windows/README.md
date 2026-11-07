@@ -25,8 +25,10 @@ at 921600 baud.
  CPI ring buffer (the pulses of one CPI) -> MTI ring (MTI output of each pulse computed once)
  Doppler: fixed PRF Hamming + FFT 128 | staggered: de-interleave, Hamming, FFT 32, NCI;
           division by the noise gain of every bin
- CA-CFAR (2-D, 1-D range or 1-D Doppler window, tested range interval, shifted range window at the edges)
-   -> pruning (local peaks, sidelobe blanking) -> reports -> plot extraction -> EKF tracking (optional)
+ CFAR (cfar.c): CA, GO, SO or OS detector with the 2-D, 1-D range or 1-D Doppler window
+   (tested range interval, shifted range window at the edges)
+   -> pruning (local peaks, sidelobe blanking) -> reports -> plot extraction
+   -> tracking (optional, tracker.c): EKF + GNN (tracker_ekf.c) or PMBM + IMM-UKF (tracker_pmbm.c)
         |                                   |                         |                |
         |                                   +-> serial (detections)   +-> CSV, console, Qt PPI,
         |                                                                 serial (plots) +-> CSV, Qt PPI
@@ -35,7 +37,7 @@ at 921600 baud.
 The algorithms are the same as in the MATLAB simulator (`../src/*.m`, see
 `../README.md`). The C receiver reads every number that MATLAB derives
 (DBF matrix, pulse compression filters, range axes, CPI length, MTI
-weights, Doppler window and noise gains, CFAR method, window, threshold
+weights, Doppler window and noise gains, CFAR detector, window, threshold
 factor and tested range cells, extraction and tracker settings) from a
 configuration file that `export_receiver_config.m` writes. Both programs
 therefore always use the same values.
@@ -151,7 +153,7 @@ plots of both programs.
 | `--ppi` | show the interactive PPI (Qt build, see below) |
 | `--ppi-snapshot FILE` | save the PPI as a PNG at the end and close it |
 | `--ppi-show MODE` | what the PPI shows at the start: `plots` (default, after the plot extractor), `detections` (CFAR detections before it) or `both` |
-| `--cfar-threshold DB` | CA-CFAR threshold factor 10 log10(alpha) in dB of the configured method (default: the configuration, i.e. the method's Pfa); can also be changed in the PPI |
+| `--cfar-threshold DB` | CFAR threshold factor 10 log10(alpha) in dB of the configured detector and window (default: the configuration, i.e. the method's Pfa); can also be changed in the PPI |
 | `--serial DEVICE` | send the CFAR output to a serial port (`/dev/ttyUSB0`, `COM3`, ...) |
 | `--baud N` | serial baud rate (default 921600) |
 | `--serial-content X` | `detections` (default: the pruned CFAR detections of every CPI update) or `plots` |
@@ -242,13 +244,14 @@ The panel on the right of the window has:
   they disappear like the plots.
 * **Save screenshot (PNG) ...**: saves the PPI as it is now (without the
   panel); the default file name has the date and time.
-* **Tracks (T)**: shows or hides the tracks of the EKF tracker: a hollow
+* **Tracks (T)**: shows or hides the tracks of the tracker (EKF or PMBM): a hollow
   triangle at the last update, so the plot (filled circle) lies inside it;
   magenta with its number and a 30 s velocity leader when confirmed, gray
-  while tentative. Hover over it: number, state, range, azimuth, height and
-  climb (3-D), speed, heading, acceleration (constant-acceleration model),
+  while tentative. Hover over it: number, state, tracker, range, azimuth, height and
+  climb (3-D), speed, heading, acceleration (constant-acceleration model, PMBM),
+  for the PMBM the existence probability and the IMM model probabilities,
   updates. A deleted track disappears.
-* **CFAR threshold [dB]**: shows the method (`cfg.cfar.method`), the
+* **CFAR threshold [dB]**: shows the detector and window (`cfg.cfar.type`, `cfg.cfar.method`), the
   threshold the processing uses and its false alarm probability
   (`cfar_pfa()`, needs `nLooks` in the configuration file: export it again
   with the current `export_receiver_config.m`). *Apply* sends the value in
@@ -261,8 +264,8 @@ The panel on the right of the window has:
   shows at once instead of creeping into a mean since the start, of every
   block of the processing thread:
   DBF, matched filter, MTI (clutter filter), Doppler (FFT and non-coherent
-  integration), CFAR of the configured method with the pruning, plot
-  extractor, tracking, the console output (printing the plots, track
+  integration), CFAR of the configured detector and window (e.g. `CFAR OS 2-D`) with the pruning, plot
+  extractor, tracking (e.g. `Tracking PMBM 3-D IMM CV/CA/CT`), the console output (printing the plots, track
   confirmations and messages; 0 with `--quiet`) and the display calls
   (handing the antenna, plots, detections, tracks and times to the PPI),
   and their total: the time the processing thread spends per PRI, display
@@ -273,10 +276,32 @@ The panel on the right of the window has:
   accumulated times 4 times a second; the console and display times are
   also printed at the end (`Output per PRI`).
 
-**Tracking** (`cfg.track.enable` in the configuration, `tracker.c`): the
-same EKF as `track_update.m` (2-D or 3-D, constant velocity or constant
-acceleration, global nearest neighbour association on batches of plots,
-see `../README.md`). The radial velocity of the plots is a measurement as
+**CFAR detectors** (`cfar.c`, `cfg.cfar.type` and `cfg.cfar.method` in the
+configuration): the same CA (mean of the training cells), GO / SO (larger /
+smaller mean of the two half windows: before and after the cell in range
+with the 2-D and range windows, below and above it in Doppler with the
+Doppler window) and OS (k-th smallest training cell) detectors as
+`cfar_detect.m`, each with the 2-D, range or Doppler window. CA keeps its
+running box sums; GO and SO use running Doppler sums and range prefix sums
+in double; OS counts, for the local peaks only (the other cells cannot
+survive the pruning), the training cells below P/alpha, and selects the
+k-th one only for a detection (its noise estimate). The false alarm
+probability of a threshold (`cfar_pfa()`, the PPI threshold field) is the
+closed form for CA and a numerical integral (the same as `cfar_pfa.m`) for
+GO, SO and OS.
+
+**Tracking** (`cfg.track.enable` in the configuration, `tracker.c`, which
+selects `cfg.track.method`): `tracker_ekf.c`, the same EKF as `track_ekf.m`
+(2-D or 3-D, constant velocity or constant acceleration, global nearest
+neighbour association on batches of plots), or `tracker_pmbm.c`, the same
+multi-target Bayesian tracker as `track_pmbm.m` (PMBM filter: Poisson
+undetected targets, multi-Bernoulli mixture with Murty's k best
+assignments; IMM-UKF state estimation with the CV, CA and coordinated-turn
+models; see `../README.md`). The track updates of both are identical to
+MATLAB's (`tests/test_tracker.c` with `../tests/test_tracker.m` and
+`../tests/test_tracker_pmbm.m`). The tracks CSV (`--tracks-csv`) has, for the
+PMBM, the existence probability and the model probabilities (`pCV, pCA,
+pCT`) as its last columns. The radial velocity of the plots is a measurement as
 well (`cfg.track.useRadialVelocity`): unambiguous when no target can be
 faster than half the span of the Doppler axis (fixed PRF at 170 MHz:
 +-441 m/s), otherwise unfolded with the range rate the track predicts. Once
@@ -509,15 +534,15 @@ Timing:
 
 | Test | What it checks |
 |---|---|
-| `tracker` (`tests/test_tracker.c`) | two crossing targets over 6 scans, 3-D and 2-D (plots with radial velocity): two confirmed tracks that stay on their targets; GNN with two targets 200 m apart: each track stays on its own target; speed gate: a 3 m/s track is deleted at its second update with `trackMinSpeed` = 5 m/s, a 100 m/s one kept; with plots, a configuration and the track log from `../tests/test_tracker.m` (CV and CA, 2-D and 3-D, with and without the radial velocity, staggered PRF with folded plot velocities), every C track update equals MATLAB's (same plot, state within 1e-6) |
-| `core` (`tests/test_core.c`) | batched FFT against a direct DFT; plot extractor, also on random dense detection streams (hundreds of open groups) against the linear search of `plot_extractor.m`: the same plots in the same order; a moving target through the whole chain with the exported configuration (its velocity a quarter of the Doppler axis from zero, for any carrier frequency; one plot at the right range, velocity and beam); direct and fast-convolution matched filters give the same plot; the same target with the CFAR threshold raised to 45 dB at run time gives no detection; `cfar_pfa()` against the closed form (one look) and the Pfa 1e-8 of the configured threshold |
+| `tracker` (`tests/test_tracker.c`) | (the tracker of the configuration, `cfg.track.method`) two crossing targets over 6 scans, 3-D and 2-D (plots with radial velocity): two confirmed tracks that stay on their targets; GNN with two targets 200 m apart: each track stays on its own target; speed gate: a 3 m/s track is deleted at its second update with `trackMinSpeed` = 5 m/s, a 100 m/s one kept; with plots, a configuration and the track log from `../tests/test_tracker.m` (CV and CA, 2-D and 3-D, with and without the radial velocity, staggered PRF with folded plot velocities), every C track update equals MATLAB's (same plot, state within 1e-6); with the calls of `../tests/test_tracker_pmbm.m` (16 PMBM cases: maneuvers, constant acceleration, 30 false plots per scan, close and crossing targets, the challenge scenario) every update of the C PMBM tracker equals MATLAB's |
+| `core` (`tests/test_core.c`) | batched FFT against a direct DFT; plot extractor, also on random dense detection streams (hundreds of open groups) against the linear search of `plot_extractor.m`: the same plots in the same order; a moving target through the whole chain with the exported configuration (its velocity a quarter of the Doppler axis from zero, for any carrier frequency; one plot at the right range, velocity and beam); direct and fast-convolution matched filters give the same plot; the same target with the CFAR threshold raised to 45 dB at run time gives no detection; `cfar_pfa()` against the closed forms of CA, GO, SO and OS (one look) and the Pfa 1e-8 of the configured threshold |
 | `core_phasecode` | the same core test with `config/radar_config_phasecode.bin` (both sub-pulses P4 phase codes with mismatch filters): the echo is the real code, the plot lies on the target cell |
 | `core_1ch` | the same core test with `config/radar_config_1ch.bin` (the default radar with one receive element, no DBF): four-step FFT and direct matched filter give the same plot |
-| `cfar` (`tests/test_cfar.c`) | the CA-CFAR of `processor.c` against direct sums over the training cells combined with the direct local peak test: every decision, for the 2-D, 1-D range and 1-D Doppler windows and tested range intervals in the middle, at both range edges (also when the whole interval lies within the cells of the shifted windows) and over all cells, with the beams of the configuration and with one beam split into range chunks over 4 threads; the noise floor median equals that of a sorted copy (400 maps: odd and even sizes, ties, zeros, a structured half; with and without a bracket from the previous median); the pruning of tens of thousands of CFAR detections (a strong target with sidelobes, 3000 strong cells) gives exactly the cells of the direct pairwise rules |
+| `cfar` (`tests/test_cfar.c`) | the CFAR detectors of `cfar.c` (CA, GO, SO, OS) against the statistic computed directly from the training cells combined with the direct local peak test: every decision and noise estimate, for every detector with the 2-D, 1-D range and 1-D Doppler windows and tested range intervals in the middle, at both range edges (also when the whole interval lies within the cells of the shifted windows) and over all cells, with the beams of the configuration and with one beam split into range chunks over 4 threads; the noise floor median equals that of a sorted copy (400 maps: odd and even sizes, ties, zeros, a structured half; with and without a bracket from the previous median); the pruning of tens of thousands of CFAR detections (a strong target with sidelobes, 3000 strong cells) gives exactly the cells of the direct pairwise rules |
 | `cfar_1ch` | the same CFAR test with `config/radar_config_1ch.bin` |
 | `udp_input` | reassembly with shuffled, duplicate, missing and foreign datagrams; timeouts; record and replay; fuzzing |
 | `ddc_files` (`tests/test_ddc_files.c`) | MAT-file reader with files written as MATLAB writes them (data in smaller storage types, small elements, skipped char field, compressed `-v7` with zlib); folder listing; the datagrams of a DDC file are accepted by `udp_input.c` and give back the same PRI; corrupted, truncated, `-v7.3` and big-endian files are refused |
 | `serial` | frame encoding and CRC; real output to a pseudo-terminal (Linux): exact bytes, 200-detection split, non-blocking drops, close |
 | `ppi` | the Qt PPI runs off-screen with antenna updates, plots, detections and a CFAR threshold report and saves a snapshot |
-| `ppi_interactive` | mouse, wheel and key events: data tips, cursor readout, zoom around the cursor, pan, pin/unpin, reset, filters, persistence options, pause, clear; detections (display modes, arcs drawn, data tips, key D); window panel: display mode box, CFAR threshold Apply/Default and its report, screenshot, mean block times; tracks (triangle drawn around the plot, data tip, checkbox and key T, deletion) |
+| `ppi_interactive` | mouse, wheel and key events: data tips, cursor readout, zoom around the cursor, pan, pin/unpin, reset, filters, persistence options, pause, clear; detections (display modes, arcs drawn, data tips, key D); window panel: display mode box, CFAR threshold Apply/Default and its report, screenshot, mean block times; tracks (triangle drawn around the plot, data tip, PMBM data tip with existence and model probabilities, checkbox and key T, deletion) |
 | `../tests/test_c_receiver.m` (Octave/MATLAB) | the six-target scenario streamed over UDP to this receiver: the C plots must match the MATLAB plots; the recording is replayed to check that the result is repeatable and to measure the time |

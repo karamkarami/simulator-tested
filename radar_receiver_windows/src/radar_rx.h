@@ -28,12 +28,16 @@ extern "C" {
 
 enum { PULSE_SHORT = 0, PULSE_LONG = 1, N_PULSES = 2 };
 enum { MF_AUTO = 0, MF_DIRECT = 1, MF_FFT = 2 };
-enum { CFAR_2D = 0, CFAR_RANGE = 1, CFAR_DOPPLER = 2 };
-enum { TRACK_CV = 0, TRACK_CA = 1 };
+enum { CFAR_2D = 0, CFAR_RANGE = 1, CFAR_DOPPLER = 2 };        /* window (cfg.cfar.method)  */
+enum { CFAR_CA = 0, CFAR_GO = 1, CFAR_SO = 2, CFAR_OS = 3 };     /* detector (cfg.cfar.type)  */
+enum { TRACK_CV = 0, TRACK_CA = 1 };                          /* EKF motion model          */
+enum { TRACK_METHOD_EKF = 0, TRACK_METHOD_PMBM = 1 };         /* tracker (cfg.track.method) */
+enum { PMBM_CV = 0, PMBM_CA = 1, PMBM_CT = 2 };               /* IMM models of the PMBM     */
 enum { WAVE_LFM = 0, WAVE_PHASE_CODE = 1 };
 enum { COMPRESSION_MATCHED = 0, COMPRESSION_MISMATCH = 1 };
 enum { SNR_NOISE_MEDIAN = 0, SNR_NOISE_CFAR = 1 };   /* noise floor of the SNR of the reports */
 const char *cfar_method_name(int method);   /* "2-D", "1-D range", "1-D Doppler" */
+const char *cfar_type_name(int type);       /* "CA", "GO", "SO", "OS" */
 
 typedef struct {
     int     rxFirst;       /* receive interval of this sub-pulse: DDC samples rxFirst ... */
@@ -95,9 +99,15 @@ typedef struct {
     double  medianToMean;  /* median / mean of the noise power (noise floor estimate) */
 
     /* CFAR, pruning, plot extraction */
+    int     cfarType;      /* detector CFAR_CA, CFAR_GO, CFAR_SO or CFAR_OS (cfar.c; optional
+                              in the file: CA)                                            */
     int     cfarMethod;    /* CFAR_2D, CFAR_RANGE or CFAR_DOPPLER: the window below   */
     int     guardRange, trainRange, guardDoppler, trainDoppler, nTrain;
-    double  alpha;         /* CA-CFAR threshold factor (design value from cfg.cfar.pfa) */
+    int     cfarNHalf;     /* GO, SO: training cells per half window                  */
+    int     cfarOsK;       /* OS: rank of the statistic (of nTrain)                    */
+    double  cfarNoiseScale;  /* mean of the statistic for unit noise (noise estimate =
+                                statistic / this; 1 for CA)                            */
+    double  alpha;         /* CFAR threshold factor (design value from cfg.cfar.pfa)  */
     double  nLooks;        /* looks of the noise power in a cell (for cfar_pfa)       */
     double  sidelobeMargin_dB;
     int     snrNoise;      /* SNR = power / noise - 1 of the reports with the noise of
@@ -109,8 +119,11 @@ typedef struct {
     double  minExtent_deg;  /* azimuth extent of a plot (minHits = this / azimuth step per update) */
     double  meanPri_s;      /* mean PRI                                               */
 
-    /* EKF tracker (optional in the file: off if missing) */
+    /* tracker (optional in the file: off if missing); the common settings, the
+     * EKF ones (trackModel ... trackSigmaA0) and the PMBM ones (pmbm...) */
     int     trackEnable, trackDim;   /* dimension 2 (range, azimuth) or 3 (+ elevation)  */
+    int     trackMethod;    /* TRACK_METHOD_EKF or TRACK_METHOD_PMBM (optional: EKF)        */
+    double  trackAz0_deg;   /* antenna azimuth at t = 0 (PMBM: look times)                */
     int     trackModel;     /* TRACK_CV (constant velocity) or TRACK_CA (constant acceleration) */
     double  trackSigma[3];  /* measurement errors: range [m], azimuth, elevation [rad]   */
     double  trackQ[3];      /* process noise per axis: white acceleration [m^2/s^3] (CV)
@@ -129,6 +142,22 @@ typedef struct {
     double  trackMinSpeed;  /* delete the tracks with 2+ updates slower than this (|v| of the state)
                                [m/s]; 0 = off (cfg.track.minSpeedEnable; optional in the file: off) */
     double  scanTime_s;     /* antenna revolution                                         */
+    /* PMBM tracker with IMM-UKF (track_setup.m, tracker_pmbm.c) */
+    double  pmbmPd, pmbmPs; /* detection probability, survival probability per scan       */
+    double  pmbmLogLambdaC, pmbmLogLambdaU, pmbmLogVrDensity;   /* false plots, undetected
+                               targets per unit measurement volume, 1/vrSpan (logs)         */
+    int     pmbmMaxHyp;     /* global hypotheses kept                                     */
+    double  pmbmLogHypPrune, pmbmRPrune, pmbmRConfirm, pmbmRDelete;
+    int     pmbmNModels, pmbmModels[3];    /* PMBM_CV, PMBM_CA, PMBM_CT                   */
+    double  pmbmMu0[3], pmbmSwitchLambda;  /* model probabilities of a new track; second
+                                              eigenvalue of the switching per scan         */
+    double  pmbmQCv[3], pmbmQCa[3], pmbmQCt[3];   /* process noise per axis of the models  */
+    double  pmbmQTurn, pmbmSigmaTurn0, pmbmSigmaClimb0;   /* CT turn rate noise, new track:
+                                                         turn rate and climb rate std   */
+    double  pmbmVarUnusedA, pmbmVarUnusedW; /* acceleration / turn rate of the models without */
+    double  pmbmUkfScale, pmbmWm0, pmbmWc0, pmbmWi;  /* unscented transform              */
+    double  pmbmLatency_s, pmbmMaintStep_s; /* plots in the tracker this long after the look;
+                                               missed looks checked every               */
 
     /* run-time option (not in the file): matched filter method,
      * MF_AUTO (the faster one for the thread count), MF_DIRECT or MF_FFT */
@@ -213,9 +242,10 @@ typedef struct {
     uint32_t pulseNumber;  /* newest pulse of the CPI                                 */
 } Detection;
 
-/* A track of the EKF tracker (tracker.c, as track_update.m of the simulator).
- * Position and velocity relative to the antenna: x East, y North, z up (z = 0
- * in 2-D). Reported after every update, and once more with deleted = 1. */
+/* A track of the tracker (tracker.c: EKF or PMBM, as track_update.m of the
+ * simulator). Position and velocity relative to the antenna: x East, y North,
+ * z up (z = 0 in 2-D). Reported after every update, and once more with
+ * deleted = 1. */
 typedef struct {
     uint32_t id;
     int      confirmed;    /* 0: tentative                                           */
@@ -227,7 +257,15 @@ typedef struct {
     double   alt_m;        /* height above ground (3-D), NaN in 2-D                  */
     int      hits;         /* updates                                                 */
     int      misses;       /* scans without a plot since the last update             */
+    int      method;       /* TRACK_METHOD_EKF or TRACK_METHOD_PMBM                  */
+    double   existence;    /* PMBM: probability that a target made its newest plot (NaN: EKF) */
+    int      nModes;       /* PMBM: IMM models (0: EKF)                              */
+    int      modes[3];     /* PMBM: PMBM_CV, PMBM_CA, PMBM_CT                        */
+    double   modeProb[3];  /* PMBM: their probabilities                              */
 } Track;
+
+/* Name of the configured tracker, e.g. "EKF 3-D CV", "PMBM 2-D IMM CV/CA/CT" (tracker.c). */
+void tracker_name(const RadarConfig *cfg, char *buf, size_t len);
 
 typedef struct {
     /* called for the pruned CFAR detections of every CPI update (n may be 0) */
@@ -261,14 +299,16 @@ void processor_flush(Processor *p, const ProcessorCallbacks *cb);   /* close all
  * (so the CPI buffers stay complete), their Doppler/CFAR/extraction updates
  * are skipped. Used by the input loop when it falls behind the stream. */
 void processor_set_slow_time(Processor *p, int enabled);
-/* CA-CFAR threshold factor used from the next CPI update on (starts at
- * cfg->alpha). threshold [dB] = 10*log10(alpha). Call from the processing thread. */
+/* CFAR threshold factor (of the configured detector) used from the next
+ * CPI update on (starts at cfg->alpha). threshold [dB] = 10*log10(alpha).
+ * Call from the processing thread. */
 void   processor_set_cfar_alpha(Processor *p, double alpha);
 double processor_cfar_alpha(const Processor *p);
-/* False alarm probability of the CA-CFAR with factor alpha (inverse of
- * cfar_alpha.m): I(1/(1 + alpha/nTrain); nTrain*nLooks, nLooks). NaN if
- * nLooks <= 0. */
-double cfar_pfa(double alpha, int nTrain, double nLooks);
+/* False alarm probability of the configured CFAR detector (cfg->cfarType,
+ * window, nLooks) with factor alpha (cfar.c, as cfar_pfa.m; the inverse of
+ * cfar_alpha.m): CA I(1/(1 + alpha/nTrain); nTrain*nLooks, nLooks), GO, SO
+ * and OS by numerical integration. NaN if nLooks <= 0. */
+double cfar_pfa(const RadarConfig *cfg, double alpha);
 void processor_timing(const Processor *p, ProcessorTiming *t);
 int  processor_threads(const Processor *p);    /* processing threads (OpenMP team size) */
 void processor_destroy(Processor *p);

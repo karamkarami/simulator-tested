@@ -151,9 +151,10 @@ int main(int argc, char **argv)
     pri.iq = malloc(sizeof(int16_t) * 2 * (size_t)cfg.nCh * cfg.nDdc);
     if (!re || !im || !pri.iq) { fprintf(stderr, "out of memory\n"); return 1; }
 
-    printf("%s: %d element(s), %d beam(s), short %d / long %d range cells, CPI %d, FFT %d, CFAR %s, "
+    printf("%s: %d element(s), %d beam(s), short %d / long %d range cells, CPI %d, FFT %d, CFAR %s %s, "
            "update every %d pulse(s), %d PRIs per threshold, clutter %s\n", configPath, cfg.nCh, cfg.nBeams,
-           cfg.pulse[0].nRange, cfg.pulse[1].nRange, cfg.cpiLength, cfg.nfft, cfar_method_name(cfg.cfarMethod),
+           cfg.pulse[0].nRange, cfg.pulse[1].nRange, cfg.cpiLength, cfg.nfft, cfar_type_name(cfg.cfarType),
+           cfar_method_name(cfg.cfarMethod),
            cfg.updateEvery, nPris, clutter_dB > 0 ? "on" : "off");
     printf("mean time per PRI [us] (CFAR+pr: the CFAR with the pruning and the reports, as in the PPI)\n"
            "%9s %9s | %6s %6s %6s %7s %7s %7s %7s | %7s | %8s %7s\n", "thr[dB]", "Pfa", "DBF",
@@ -216,7 +217,7 @@ int main(int argc, char **argv)
         const double n = (double)(t1.pris - t0.pris), us = 1e3 / (n > 0 ? n : 1);
         const double upd = (double)(cnt.updates - c0.updates);
         printf("%9.2f %9.1e | %6.1f %6.1f %6.1f %7.1f %7.1f %7.1f %7.1f | %7.1f | %8.0f %7llu\n", thr[t],
-               cfar_pfa(pow(10.0, thr[t] / 10.0), cfg.nTrain, cfg.nLooks), (t1.dbf_ms - t0.dbf_ms) * us,
+               cfar_pfa(&cfg, pow(10.0, thr[t] / 10.0)), (t1.dbf_ms - t0.dbf_ms) * us,
                (t1.mf_ms - t0.mf_ms) * us, (t1.mti_ms - t0.mti_ms) * us, (t1.doppler_ms - t0.doppler_ms) * us,
                (t1.cfar_ms - t0.cfar_ms) * us, (t1.extract_ms - t0.extract_ms) * us, (t1.track_ms - t0.track_ms) * us,
                (t1.total_ms - t0.total_ms) * us, upd > 0 ? (double)(cnt.dets - c0.dets) / upd : 0.0,

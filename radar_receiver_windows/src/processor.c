@@ -31,6 +31,7 @@
 #include "radar_rx.h"
 #include "extractor.h"
 #include "tracker.h"
+#include "cfar.h"
 #include "fft.h"
 
 #include <float.h>
@@ -98,11 +99,7 @@ typedef struct {
 
 typedef struct {                /* work buffers of one thread                      */
     float  *xr, *xi;            /* Doppler: one cell block [nfft][CELL_BLOCK]     */
-    float  *ringO, *ringG;      /* CFAR: range box sums of the Doppler rows d-oD ... d+1+oD
-                                   of one beam [ringRows][maxNR]                  */
-    float  *partial;            /* CFAR: partial range sums, 6 x (maxNR + 2*oR + 32) */
-    double *accO, *accG;        /* CFAR: Doppler running sums [nR]                */
-    float  *colMax;             /* CFAR: maxima over the neighbouring beams and bins [nR + 2] */
+    CfarScratch cfar;           /* CFAR (cfar.c)                                  */
     float  *work;               /* noise floor: median candidates [nfft*maxNR + 8] */
 } Scratch;
 
@@ -111,10 +108,9 @@ struct Processor {
     FftPlan fft;
     PulseState ps[N_PULSES];
     int nThreads;
-    int ringRows;               /* CFAR: rows of the range sum ring (2*oD + 2)    */
     Scratch *scratch;           /* [nThreads] */
     int slowTime;               /* 0: skip the Doppler/CFAR updates (overload)    */
-    double alpha;               /* CA-CFAR threshold factor in use                */
+    double alpha;               /* CFAR threshold factor in use                   */
     Tracker tracker;            /* EKF tracker (cfg->trackEnable)                 */
     Detection *newPlots;        /* plots of the latest extractor update           */
     int nNewPlots, capNewPlots;
@@ -292,9 +288,7 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
         s->ext.nBeams = cfg->nBeams;
         reset_buffers(s);
     }
-    const size_t partialLen = (size_t)maxNR + 2 * (cfg->guardRange + cfg->trainRange) + 32;
     p->nThreads = nThr;
-    p->ringRows = 2 * (cfg->guardDoppler + cfg->trainDoppler) + 2;
     p->slowTime = 1;
     p->alpha = cfg->alpha;
     if (cfg->trackEnable) tracker_init(&p->tracker, cfg);
@@ -304,13 +298,8 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
         Scratch *w = &p->scratch[t];
         w->xr = xcalloc((size_t)cfg->nfft * CELL_BLOCK, sizeof(float));
         w->xi = xcalloc((size_t)cfg->nfft * CELL_BLOCK, sizeof(float));
-        w->ringO = xcalloc((size_t)p->ringRows * maxNR, sizeof(float));
-        w->ringG = xcalloc((size_t)p->ringRows * maxNR, sizeof(float));
-        w->partial = xcalloc(6 * partialLen, sizeof(float));
-        w->colMax = xcalloc((size_t)maxNR + 2, sizeof(float));
+        cfar_scratch_init(&w->cfar, cfg, maxNR);
         w->work = xcalloc((size_t)cfg->nfft * maxNR + 8, sizeof(float));
-        w->accO = xcalloc(maxNR, sizeof(double));
-        w->accG = xcalloc(maxNR, sizeof(double));
     }
     return p;
 }
@@ -333,8 +322,8 @@ void processor_destroy(Processor *p)
     }
     for (int t = 0; p->scratch && t < p->nThreads; t++) {
         Scratch *w = &p->scratch[t];
-        free(w->xr); free(w->xi); free(w->ringO); free(w->ringG); free(w->partial); free(w->colMax); free(w->work);
-        free(w->accO); free(w->accG);
+        free(w->xr); free(w->xi); free(w->work);
+        cfar_scratch_free(&w->cfar);
     }
     free(p->scratch);
     fft_plan_free(&p->fft);
@@ -357,49 +346,6 @@ void processor_set_cfar_alpha(Processor *p, double alpha)
 double processor_cfar_alpha(const Processor *p)
 {
     return p->alpha;
-}
-
-/* Continued fraction of the incomplete beta function (modified Lentz). */
-static double beta_cf(double a, double b, double x)
-{
-    const double tiny = 1e-300;
-    double c = 1.0, d = 1.0 - (a + b) * x / (a + 1.0);
-    if (fabs(d) < tiny) d = tiny;
-    d = 1.0 / d;
-    double h = d;
-    for (int m = 1; m <= 1000; m++) {
-        const int m2 = 2 * m;
-        double aa = m * (b - m) * x / ((a + m2 - 1.0) * (a + m2));
-        d = 1.0 + aa * d;  if (fabs(d) < tiny) d = tiny;
-        c = 1.0 + aa / c;  if (fabs(c) < tiny) c = tiny;
-        d = 1.0 / d;
-        h *= d * c;
-        aa = -(a + m) * (a + b + m) * x / ((a + m2) * (a + m2 + 1.0));
-        d = 1.0 + aa * d;  if (fabs(d) < tiny) d = tiny;
-        c = 1.0 + aa / c;  if (fabs(c) < tiny) c = tiny;
-        d = 1.0 / d;
-        const double del = d * c;
-        h *= del;
-        if (fabs(del - 1.0) < 1e-15) break;
-    }
-    return h;
-}
-
-/* Regularized incomplete beta function I_x(a, b) (MATLAB's betainc). */
-static double beta_inc(double x, double a, double b)
-{
-    if (x <= 0.0) return 0.0;
-    if (x >= 1.0) return 1.0;
-    const double lfront = lgamma(a + b) - lgamma(a) - lgamma(b) + a * log(x) + b * log1p(-x);
-    if (x < (a + 1.0) / (a + b + 2.0))
-        return exp(lfront) * beta_cf(a, b, x) / a;
-    return 1.0 - exp(lfront) * beta_cf(b, a, 1.0 - x) / b;
-}
-
-double cfar_pfa(double alpha, int nTrain, double nLooks)
-{
-    if (!(nLooks > 0.0) || nTrain < 1 || !(alpha >= 0.0)) return NAN;
-    return beta_inc(1.0 / (1.0 + alpha / nTrain), nTrain * nLooks, nLooks);
 }
 
 void processor_timing(const Processor *p, ProcessorTiming *t)
@@ -736,210 +682,14 @@ static void doppler(const Processor *p, PulseState *s)
 }
 
 /* ------------------------------------------------------------------------ */
-/* 2-D CA-CFAR                                                              */
+/* CFAR (cfar.c)                                                            */
 /* ------------------------------------------------------------------------ */
 
-/* Range box sums of the range segment x[0 ... nR-1] (zero outside it):
- * yO[r] = sum of x over r-hO ... r+hO, yG[r] over r-hG ... r+hG, for
- * r = o0 ... o0+no-1 (yO, yG are indexed like x). Partial sums of 1, 2, 4,
- * 8, ... neighbouring values are built with vectorised passes, and every
- * window is the sum of the partial sums given by the binary digits of its
- * length, added in one pass (no running sum, so no rounding drift; a sum
- * depends only on the values of its window, so any segment that holds the
- * window gives the same float result). buf: 6 x (nR + 2*hO + 32) floats. */
-static void range_box_sums(const float *x, float *yO, float *yG, int nR, int o0, int no, int hO, int hG, float *buf)
-{
-    const int L = nR + 2 * hO, ld = L + 32;
-    const int wO = 2 * hO + 1, wG = 2 * hG + 1;
-    float *part[6];
-    int top = 0;                                        /* part[k]: sums of 2^k values */
-    while ((2 << top) <= wO && top < 5) top++;
-    for (int k = 0; k <= top; k++) part[k] = buf + (size_t)k * ld;
-    memset(part[0], 0, sizeof(float) * hO);
-    memcpy(part[0] + hO, x, sizeof(float) * nR);
-    memset(part[0] + hO + nR, 0, sizeof(float) * (hO + 32));
-    for (int k = 1; k <= top; k++) {
-        const int sh = 1 << (k - 1), n = L - (1 << k) + 1;
-        const float *restrict a = part[k - 1];
-        float *restrict b = part[k];
-        for (int i = 0; i < n; i++) b[i] = a[i] + a[i + sh];
-    }
-    const int width[2] = { wO, wG }, start[2] = { 0, hO - hG };
-    float *out[2] = { yO, yG };
-    for (int w = 0; w < 2; w++) {
-        const float *t[6];                              /* the terms, largest first */
-        int nt = 0, off = start[w];
-        for (int k = top; k >= 0; k--) {
-            if (!(width[w] & (1 << k))) continue;
-            t[nt++] = part[k] + off;
-            off += 1 << k;
-        }
-        float *restrict y = out[w];
-        const float *restrict t0 = t[0], *restrict t1 = t[nt > 1 ? 1 : 0], *restrict t2 = t[nt > 2 ? 2 : 0];
-        const float *restrict t3 = t[nt > 3 ? 3 : 0], *restrict t4 = t[nt > 4 ? 4 : 0], *restrict t5 = t[nt > 5 ? 5 : 0];
-        const int r1 = o0 + no;
-        switch (nt) {                                   /* one pass, added in the same order */
-        case 1:  for (int r = o0; r < r1; r++) y[r] = t0[r]; break;
-        case 2:  for (int r = o0; r < r1; r++) y[r] = t0[r] + t1[r]; break;
-        case 3:  for (int r = o0; r < r1; r++) y[r] = t0[r] + t1[r] + t2[r]; break;
-        case 4:  for (int r = o0; r < r1; r++) y[r] = t0[r] + t1[r] + t2[r] + t3[r]; break;
-        case 5:  for (int r = o0; r < r1; r++) y[r] = t0[r] + t1[r] + t2[r] + t3[r] + t4[r]; break;
-        default: for (int r = o0; r < r1; r++) y[r] = t0[r] + t1[r] + t2[r] + t3[r] + t4[r] + t5[r]; break;
-        }
-    }
-}
-
-/* The cell (b, r, d) is a local peak: no neighbour in beam (b-1 ... b+1),
- * range (r-1 ... r+1) and Doppler (d-1 ... d+1, circular) is stronger (as
- * prune_peaks.m). */
-static int is_peak(const PulseState *s, int nfft, int nB, int b, int r, int d)
-{
-    const int nR = s->nR;
-    const float v = s->P[(size_t)d * s->nCells + (size_t)b * nR + r];
-    for (int dd = -1; dd <= 1; dd++) {
-        const float *row = s->P + (size_t)((d + dd + nfft) % nfft) * s->nCells;
-        for (int bb = b > 0 ? b - 1 : 0; bb <= b + 1 && bb < nB; bb++)
-            for (int rr = r > 0 ? r - 1 : 0; rr <= r + 1 && rr < nR; rr++)
-                if (row[(size_t)bb * nR + rr] > v) return 0;
-    }
-    return 1;
-}
-
-/* Threshold test of the cells f ... l of one Doppler row: det[r] = P[r] >
- * alpha/nTrain(r) * (outer sum - guard sum), with the outer sum of the centre
- * rc of the (shifted) range window. Three loops (left edge, interior, right
- * edge), so that the interior one vectorises. */
-static void cfar_test_row(const float *restrict P, const double *restrict aO, const double *restrict aG,
-                          const double *restrict ts, unsigned char *restrict det, int f, int l, int oR, int nR)
-{
-    const int e0 = l < oR - 1 ? l : oR - 1, e1 = l < nR - 1 - oR ? l : nR - 1 - oR;
-    int r = f;
-    for (; r <= e0; r++) det[r] = P[r] > ts[r] * (aO[oR] - aG[r]);                   /* rc = oR       */
-    for (; r <= e1; r++) det[r] = P[r] > ts[r] * (aO[r] - aG[r]);                    /* rc = r        */
-    for (; r <= l; r++) det[r] = P[r] > ts[r] * (aO[nR - 1 - oR] - aG[r]);           /* rc = nR-1-oR  */
-}
-
-/* Keeps in det[f ... l] (one Doppler row d of beam b) only the local peaks.
- * Many detections in the row (a low threshold): one vectorised pass with the
- * maxima over the neighbouring beams and Doppler bins (cm, nR + 2 floats),
- * whose cost does not depend on the threshold; few: each one is checked. */
-static void cfar_peaks_row(const PulseState *s, int nfft, int nB, int b, int d, int f, int l, float *cm,
-                           unsigned char *restrict det)
-{
-    const int nR = s->nR;
-    int nDet = 0;
-    for (int r = f; r <= l; r++) nDet += det[r];
-    if (nDet == 0) return;
-    if (8 * nDet < l - f + 1) {
-        for (int r = f; r <= l; r++)
-            if (det[r] && !is_peak(s, nfft, nB, b, r, d)) det[r] = 0;
-        return;
-    }
-    const int ra = f > 0 ? f - 1 : 0, rb = l < nR - 1 ? l + 1 : nR - 1;
-    float *restrict c = cm + 1;                                  /* c[-1] ... c[nR] */
-    c[-1] = c[nR] = -FLT_MAX;                                    /* no neighbour outside the range */
-    for (int r = ra; r <= rb; r++) c[r] = -FLT_MAX;
-    for (int dd = -1; dd <= 1; dd++) {
-        const float *row = s->P + (size_t)((d + dd + nfft) % nfft) * s->nCells;
-        for (int bb = b > 0 ? b - 1 : 0; bb <= b + 1 && bb < nB; bb++) {
-            const float *restrict x = row + (size_t)bb * nR;
-            for (int r = ra; r <= rb; r++) c[r] = c[r] > x[r] ? c[r] : x[r];
-        }
-    }
-    const float *restrict x = s->P + (size_t)d * s->nCells + (size_t)b * nR;
-    for (int r = f; r <= l; r++) {
-        float m = c[r - 1] > c[r] ? c[r - 1] : c[r];
-        m = m > c[r + 1] ? m : c[r + 1];
-        det[r] = (unsigned char)(det[r] & (x[r] >= m));
-    }
-}
-
-/* CA-CFAR (as cfar_detect.m) with the window of the configured method (2-D,
- * or 1-D along range or Doppler: the other half sizes are 0). Only the range
- * cells testFirst ... testFirst+testCount-1 are tested, and only the cells
- * they need are summed. Doppler is circular. At the range edges the outer
- * window is shifted inwards: its sum is the centred sum of the nearest cell
- * whose window lies inside the data (rc), the guard window is cut at the edge,
- * and the noise is divided by the actual number of training cells
- * (s->cntInv). One beam at a time: the range box sums of the Doppler rows
- * d-oD ... d+1+oD are kept in a ring (a few rows, so they stay in the cache),
- * the running sums along Doppler are double (no drift); the sums and
- * decisions are the same as from range sums of the whole map.
- * det marks the detections that are also local peaks (prune_peaks.m: the
- * maximum of their 3 x 3 x 3 neighbourhood in beam x range x Doppler, also
- * for the 1-D windows, since a target spreads over range and Doppler cells
- * whatever the window). Both conditions together, decided here, give the
- * same cells as the threshold followed by the peak test, without a pass
- * over many detections afterwards.
- * The work items are the beams, or, with fewer beams than threads (one
+/* The work items are the beams, or, with fewer beams than threads (one
  * element), chunks of tested range cells of at least CFAR_MIN_CHUNK cells:
  * each chunk sums the range cells its windows need, so its sums and
  * decisions are those of the whole beam. */
 #define CFAR_MIN_CHUNK 64
-
-/* The tested cells cf ... cl of beam b. */
-static void cfar_chunk(const Processor *p, PulseState *s, int b, int cf, int cl, Scratch *w)
-{
-    const RadarConfig *cfg = p->cfg;
-    const int nfft = cfg->nfft, nB = cfg->nBeams, nR = s->nR, R = p->ringRows;
-    const int gR = cfg->guardRange, oR = gR + cfg->trainRange;
-    const int gD = cfg->guardDoppler, oD = gD + cfg->trainDoppler;
-    const int zeroBin = nfft / 2;
-    const size_t nCells = (size_t)s->nCells;
-    /* sums needed at a ... z: the outer window of the centre rc of every tested
-     * cell (shifted inwards at the edges), the guard window of the cell; they
-     * use the range cells e0 ... e1 */
-    const int rcA = cf < oR ? oR : cf > nR - 1 - oR ? nR - 1 - oR : cf;
-    const int rcB = cl < oR ? oR : cl > nR - 1 - oR ? nR - 1 - oR : cl;
-    const int a = rcA < cf ? rcA : cf, z = rcB > cl ? rcB : cl;
-    const int e0 = a - oR > 0 ? a - oR : 0, e1 = z + oR < nR - 1 ? z + oR : nR - 1;
-    const float *Pb = s->P + (size_t)b * nR;
-    /* range sums of the (unwrapped) Doppler row u in ring slot u mod R */
-#define RING_ROW(u) do { const int u_ = (u), slot_ = ((u_ % R) + R) % R;                                     \
-                         range_box_sums(Pb + (size_t)(((u_ % nfft) + nfft) % nfft) * nCells + e0,              \
-                                        w->ringO + (size_t)slot_ * nR + e0, w->ringG + (size_t)slot_ * nR + e0, \
-                                        e1 - e0 + 1, a - e0, z - a + 1, oR, gR, w->partial);                   \
-                     } while (0)
-#define RING(arr, u) (w->arr + (size_t)((((u) % R) + R) % R) * nR)
-    for (int u = -oD; u <= oD; u++) RING_ROW(u);
-    double *restrict aO = w->accO, *restrict aG = w->accG;
-    for (int r = a; r <= z; r++) aO[r] = aG[r] = 0.0;
-    for (int k = -oD; k <= oD; k++) {                          /* window of bin 0 */
-        const float *restrict o = RING(ringO, k);
-        for (int r = a; r <= z; r++) aO[r] += o[r];
-    }
-    for (int k = -gD; k <= gD; k++) {
-        const float *restrict g = RING(ringG, k);
-        for (int r = a; r <= z; r++) aG[r] += g[r];
-    }
-    for (int d = 0; d < nfft; d++) {
-        if (abs(d - zeroBin) > cfg->notchBins) {
-            unsigned char *det = s->det + (size_t)d * nCells + (size_t)b * nR;
-            cfar_test_row(Pb + (size_t)d * nCells, aO, aG, s->thrScale, det, cf, cl, oR, nR);
-            cfar_peaks_row(s, nfft, nB, b, d, cf, cl, w->colMax, det);
-            if (s->noise) {                                     /* SNR of the reports: CFAR noise */
-                float *nz = s->noise + (size_t)d * nCells + (size_t)b * nR;
-                const unsigned char *hit;
-                for (int r = cf; r <= cl && (hit = memchr(det + r, 1, (size_t)(cl - r + 1))) != NULL; r++) {
-                    r = (int)(hit - det);
-                    const int rc = r < oR ? oR : r > nR - 1 - oR ? nR - 1 - oR : r;
-                    nz[r] = (float)(s->cntInv[r] * (aO[rc] - aG[r]));
-                }
-            }
-        }
-        if (d == nfft - 1) break;
-        /* slide the Doppler windows to bin d + 1 */
-        RING_ROW(d + 1 + oD);
-        const float *restrict addO = RING(ringO, d + 1 + oD), *restrict subO = RING(ringO, d - oD);
-        const float *restrict addG = RING(ringG, d + 1 + gD), *restrict subG = RING(ringG, d - gD);
-        for (int r = a; r <= z; r++) {
-            aO[r] += (double)addO[r] - subO[r];
-            aG[r] += (double)addG[r] - subG[r];
-        }
-    }
-#undef RING
-#undef RING_ROW
-}
 
 static void cfar(const Processor *p, PulseState *s, const PulseConfig *pc)
 {
@@ -950,6 +700,7 @@ static void cfar(const Processor *p, PulseState *s, const PulseConfig *pc)
     memset(s->det, 0, (size_t)cfg->nfft * s->nCells);
     if (l < f) return;
     for (int r = f; r <= l; r++) s->thrScale[r] = p->alpha * s->cntInv[r];
+    const CfarMap map = { s->P, s->det, s->noise, s->cntInv, s->thrScale, s->nR, s->nCells, nB, cfg->nfft };
     int nChunks = 1;
     if (nB < p->nThreads) {
         const int most = nTest / CFAR_MIN_CHUNK > 1 ? nTest / CFAR_MIN_CHUNK : 1;
@@ -963,8 +714,8 @@ static void cfar(const Processor *p, PulseState *s, const PulseConfig *pc)
         #pragma omp for schedule(dynamic)
         for (int it = 0; it < nItems; it++) {
             const int c = it % nChunks;
-            cfar_chunk(p, s, it / nChunks, f + (int)((long long)nTest * c / nChunks),
-                       f + (int)((long long)nTest * (c + 1) / nChunks) - 1, w);
+            cfar_chunk(cfg, &map, p->alpha, it / nChunks, f + (int)((long long)nTest * c / nChunks),
+                       f + (int)((long long)nTest * (c + 1) / nChunks) - 1, &w->cfar);
         }
     }
 }

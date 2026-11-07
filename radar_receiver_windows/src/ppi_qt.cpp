@@ -975,7 +975,8 @@ QString track_text(const Track &t)
 {
     QStringList rows;
     const double R = std::sqrt(t.pos_m[0] * t.pos_m[0] + t.pos_m[1] * t.pos_m[1] + t.pos_m[2] * t.pos_m[2]);
-    rows << QStringLiteral("<b>Track %1 (%2, %3-D EKF)</b>").arg(t.id).arg(t.confirmed ? "confirmed" : "tentative").arg(t.dim)
+    rows << QStringLiteral("<b>Track %1 (%2, %3-D %4)</b>").arg(t.id).arg(t.confirmed ? "confirmed" : "tentative").arg(t.dim)
+                .arg(t.method == TRACK_METHOD_PMBM ? "PMBM" : "EKF")
          << QStringLiteral("Range: %1 km").arg(R / 1e3, 0, 'f', 3)
          << QStringLiteral("Azimuth: %1").arg(deg_text(wrap360(std::atan2(t.pos_m[0], t.pos_m[1]) / kDeg), 2));
     if (t.dim == 3)
@@ -985,6 +986,14 @@ QString track_text(const Track &t)
          << QStringLiteral("Heading: %1").arg(deg_text(wrap360(std::atan2(t.vel_mps[0], t.vel_mps[1]) / kDeg), 1));
     const double acc = std::hypot(t.acc_mps2[0], t.acc_mps2[1]);
     if (acc > 0.0) rows << QStringLiteral("Acceleration: %1 m/s\u00b2").arg(acc, 0, 'f', 2);   /* CA model */
+    if (t.method == TRACK_METHOD_PMBM) {                     /* existence, IMM model probabilities */
+        static const char *names[3] = { "CV", "CA", "CT" };
+        QStringList modes;
+        for (int j = 0; j < t.nModes; j++)
+            modes << QStringLiteral("%1 %2").arg(names[t.modes[j]]).arg(t.modeProb[j], 0, 'f', 2);
+        rows << QStringLiteral("Existence: %1").arg(t.existence, 0, 'f', 3)
+             << QStringLiteral("Models: %1").arg(modes.join(QStringLiteral(" ")));
+    }
     rows << QStringLiteral("Updates: %1 (missed scans %2)").arg(t.hits).arg(t.misses)
          << QStringLiteral("Last update: %1 s").arg(t.time_s, 0, 'f', 3);
     return rows.join(QStringLiteral("<br>"));

@@ -1,62 +1,30 @@
 /*
- * tracker.h - EKF tracker of the plots (internal).
- * Same algorithm as src/track_update.m of the MATLAB simulator.
+ * tracker.h - the tracking block of the receiver (internal): the tracker of
+ * cfg.track.method, as track_update.m of the MATLAB simulator:
+ *   TRACK_METHOD_EKF   tracker_ekf.c   extended Kalman filter, GNN association
+ *   TRACK_METHOD_PMBM  tracker_pmbm.c  PMBM multi-target filter, IMM-UKF
  */
 #ifndef TRACKER_H
 #define TRACKER_H
 
-#include "radar_rx.h"
-
-#define TRACK_MAX_STATE 9                /* 3-D, constant acceleration             */
-
-typedef struct {
-    uint32_t id;
-    int      confirmed;
-    double   x[TRACK_MAX_STATE];   /* [positions; velocities (; accelerations)], e.g. [x y vx vy] */
-    double   P[TRACK_MAX_STATE * TRACK_MAX_STATE];   /* covariance, row-major n x n   */
-    double   t;             /* time of the last update                          */
-    int      hits, misses;
-} TrackState;
-
-typedef struct {            /* a plot waiting in the GNN batch                   */
-    double   time_s, az_deg, range_m, el_deg, vr_mps;
-    int      plotIndex;     /* counts the plots given to the tracker (1-based)   */
-} PendingPlot;
+#include "tracker_common.h"
+#include "tracker_ekf.h"
+#include "tracker_pmbm.h"
 
 typedef struct {
-    int      dim, nd, n;                 /* measurement dimension, values per axis (2 CV, 3 CA), state size */
-    double   R[3];                       /* measurement variances                   */
-    double   q[3];                       /* white acceleration (CV) / jerk (CA) density per axis */
-    double   sigmaV0, sigmaA0, gate, scanTime_s, height_m;
-    int      useVr, vrUnambiguous;       /* radial velocity measurement (as track_update.m) */
-    double   Rvr, vrSpan, gateVr;
-    double   batchGap_s, batchMax_s;     /* GNN batch                               */
-    int      confirmHits, maxMissTentative, maxMiss;
-    double   minSpeed;                   /* delete tracks slower than this [m/s], 0 = off */
-    int      minSpeedHits;               /* updates before the speed is tested (2)  */
-    TrackState *tracks;
-    int      nTracks, capacity;
-    uint32_t nextId;
-    PendingPlot *pending;                /* GNN batch                               */
-    int      nPending, capPending, nPlots;
-    double   pendingFirst, pendingLast;  /* arrival time of its first and newest plot */
+    int         method;     /* TRACK_METHOD_EKF or TRACK_METHOD_PMBM            */
+    EkfTracker  ekf;
+    PmbmTracker pmbm;
 } Tracker;
-
-/* Track update (plotIndex = the plot, see PendingPlot) or deletion (deleted = 1, plotIndex 0). */
-typedef void (*TrackerCallback)(void *user, const Track *track, int plotIndex);
 
 void tracker_init(Tracker *t, const RadarConfig *cfg);
 void tracker_free(Tracker *t);
-/* The new plots of time t_s (call it every PRI, also with n = 0), as
- * track_update.m: the batch is associated (GNN) when the antenna has turned
- * batchGap_s without a new plot or batchMax_s after its first plot, the new
- * plots join the batch, flush = 1 associates it at once; then the tracks
- * with too many missed scans are deleted, and with minSpeed > 0 the tracks
- * with at least minSpeedHits updates whose speed |v| is below minSpeed. Every update and deletion is
- * reported through callback (may be NULL). Plots without elevation are not
- * used in 3-D. */
+/* The new plots of time t_s (call it every PRI, also with n = 0); flush = 1
+ * also associates the plots waiting in the batch. Every track update (with
+ * the plot) and deletion is reported through callback (may be NULL). */
 void tracker_update(Tracker *t, const Detection *plots, int n, double t_s, int flush,
                     TrackerCallback callback, void *user);
+int  tracker_count(const Tracker *t);                    /* current tracks           */
 void tracker_report(const Tracker *t, int index, Track *out);
 
 #endif

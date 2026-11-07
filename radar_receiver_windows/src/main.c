@@ -24,7 +24,7 @@
  *     --idle-timeout S       stop when no data came for S seconds after the first PRI (default 0 = never)
  *     --queue N              PRIs buffered between the input thread and the processing (default 64)
  *     --no-skip              never skip Doppler/CFAR updates when the processing falls behind
- *     --cfar-threshold DB    CA-CFAR threshold factor in dB (default from the configuration,
+ *     --cfar-threshold DB    CFAR threshold factor in dB (default from the configuration,
  *                            i.e. from cfg.cfar.pfa); can also be changed in the PPI
  *     --quiet                do not print every plot and confirmed track
  *     --print-plots          print them (the default comes from the configuration,
@@ -62,6 +62,8 @@ typedef struct {
     SerialOut *serial;
     FILE *plotsFile, *detFile, *trackFile;
     uint64_t nPlots, nDetections, nTrackUpdates, nConfirmed;
+    uint32_t *confirmedIds;       /* confirmed track numbers already reported */
+    size_t nConfirmedIds, capConfirmedIds;
     double detArc_deg;            /* azimuth step between CPI updates (PPI detection arcs) */
     double console_ms, display_ms;   /* time in the console output and in the PPI calls */
     int exitCode;
@@ -223,7 +225,20 @@ static void on_track(void *user, const Track *t)
 {
     App *app = user;
     app->nTrackUpdates += !t->deleted;
-    if (t->confirmed && !t->deleted && t->hits == app->cfg.trackConfirmHits) {
+    int first = 0;                               /* first report of a confirmed track number */
+    if (t->confirmed && !t->deleted) {
+        first = 1;
+        for (size_t k = 0; k < app->nConfirmedIds && first; k++) first = app->confirmedIds[k] != t->id;
+        if (first) {
+            if (app->nConfirmedIds == app->capConfirmedIds) {
+                app->capConfirmedIds = app->capConfirmedIds ? 2 * app->capConfirmedIds : 64;
+                uint32_t *p = realloc(app->confirmedIds, sizeof(uint32_t) * app->capConfirmedIds);
+                if (!p) first = 0; else app->confirmedIds = p;
+            }
+            if (first) app->confirmedIds[app->nConfirmedIds++] = t->id;
+        }
+    }
+    if (first) {
         app->nConfirmed++;
         if (!app->opt.quiet) {
             const double t0 = now_seconds();
@@ -236,10 +251,14 @@ static void on_track(void *user, const Track *t)
             app->console_ms += ms_since(t0);
         }
     }
-    if (app->trackFile)
-        fprintf(app->trackFile, "%u,%d,%d,%.6f,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%d,%d,%.4f,%.4f,%.4f\n", t->id, t->confirmed,
-                t->deleted, t->time_s, t->pos_m[0], t->pos_m[1], t->pos_m[2], t->vel_mps[0], t->vel_mps[1], t->vel_mps[2],
-                t->hits, t->misses, t->acc_mps2[0], t->acc_mps2[1], t->acc_mps2[2]);
+    if (app->trackFile) {
+        double pm[3] = { NAN, NAN, NAN };        /* PMBM: probabilities of the models CV, CA, CT */
+        for (int j = 0; j < t->nModes; j++) pm[t->modes[j]] = t->modeProb[j];
+        fprintf(app->trackFile, "%u,%d,%d,%.6f,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%d,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+                t->id, t->confirmed, t->deleted, t->time_s, t->pos_m[0], t->pos_m[1], t->pos_m[2], t->vel_mps[0],
+                t->vel_mps[1], t->vel_mps[2], t->hits, t->misses, t->acc_mps2[0], t->acc_mps2[1], t->acc_mps2[2],
+                t->existence, pm[0], pm[1], pm[2]);
+    }
 #ifdef RADAR_WITH_QT
     if (app->opt.ppi) {
         const double t0 = now_seconds();
@@ -301,7 +320,7 @@ static void print_timing(const App *app, const Processor *proc, const UdpInput *
 static void report_cfar(App *app, const Processor *proc, double default_dB, int changed)
 {
     const double alpha = processor_cfar_alpha(proc), dB = 10.0 * log10(alpha);
-    const double pfa = cfar_pfa(alpha, app->cfg.nTrain, app->cfg.nLooks);
+    const double pfa = cfar_pfa(&app->cfg, alpha);
     if (changed || fabs(dB - default_dB) > 1e-9) {
         const double t0 = now_seconds();
         if (isnan(pfa)) fprintf(stderr, "CFAR threshold %.2f dB\n", dB);
@@ -352,11 +371,15 @@ static int worker(void *arg)
     }
     ProcessorCallbacks cb = { on_detections, on_plot, on_antenna, app, on_track };
 #ifdef RADAR_WITH_QT
-    char detName[32], trackName[32];
-    snprintf(detName, sizeof detName, "CFAR %s", cfar_method_name(app->cfg.cfarMethod));
-    if (app->cfg.trackEnable)
-        snprintf(trackName, sizeof trackName, "Tracking %d-D %s", app->cfg.trackDim, app->cfg.trackModel == TRACK_CA ? "CA" : "CV");
-    else snprintf(trackName, sizeof trackName, "Tracking (off)");
+    char detName[48], trackName[64];
+    snprintf(detName, sizeof detName, "CFAR %s %s", cfar_type_name(app->cfg.cfarType), cfar_method_name(app->cfg.cfarMethod));
+    if (app->cfg.trackEnable) {
+        char tn[40];
+        tracker_name(&app->cfg, tn, sizeof tn);
+        snprintf(trackName, sizeof trackName, "Tracking %s", tn);
+    } else {
+        snprintf(trackName, sizeof trackName, "Tracking (off)");
+    }
     double lastTiming = 0.0;
 #endif
     const double default_dB = 10.0 * log10(app->cfg.alpha);
@@ -457,9 +480,12 @@ static int worker(void *arg)
 #endif
     fprintf(stderr, "Plots: %llu, CFAR detections after pruning: %llu\n",
             (unsigned long long)app->nPlots, (unsigned long long)app->nDetections);
-    if (app->cfg.trackEnable)
-        fprintf(stderr, "Tracks (EKF %d-D): %llu updates, %llu confirmed\n", app->cfg.trackDim,
-                (unsigned long long)app->nTrackUpdates, (unsigned long long)app->nConfirmed);
+    if (app->cfg.trackEnable) {
+        char tn[40];
+        tracker_name(&app->cfg, tn, sizeof tn);
+        fprintf(stderr, "Tracks (%s): %llu updates, %llu confirmed\n", tn, (unsigned long long)app->nTrackUpdates,
+                (unsigned long long)app->nConfirmed);
+    }
     processor_destroy(proc);
     udp_input_close(in);
     return 0;
@@ -515,10 +541,13 @@ int main(int argc, char **argv)
             fprintf(stderr, "%s pulse: LFM, matched filter of %d taps (%.2f ... %.2f km)\n", pulse_name(i), pc->nTaps,
                     pc->range_m[0] / 1e3, pc->range_m[pc->nRange - 1] / 1e3);
     }
-    fprintf(stderr, "CFAR %s (window: range %d+%d, Doppler %d+%d guard+training cells per side), SNR noise: %s, ",
-            cfar_method_name(app.cfg.cfarMethod), app.cfg.guardRange, app.cfg.trainRange, app.cfg.guardDoppler,
+    fprintf(stderr, "CFAR %s %s (window: range %d+%d, Doppler %d+%d guard+training cells per side), SNR noise: %s, ",
+            cfar_type_name(app.cfg.cfarType), cfar_method_name(app.cfg.cfarMethod), app.cfg.guardRange, app.cfg.trainRange, app.cfg.guardDoppler,
             app.cfg.trainDoppler, app.cfg.snrNoise == SNR_NOISE_CFAR ? "CFAR window" : "median of the map");
-    if (app.cfg.trackEnable)
+    if (app.cfg.trackEnable && app.cfg.trackMethod == TRACK_METHOD_PMBM)
+        fprintf(stderr, "tracking: PMBM %d-D, IMM-UKF of %d models, %d global hypotheses\n", app.cfg.trackDim,
+                app.cfg.pmbmNModels, app.cfg.pmbmMaxHyp);
+    else if (app.cfg.trackEnable)
         fprintf(stderr, "tracking: EKF %d-D, %s model, GNN association\n", app.cfg.trackDim,
                 app.cfg.trackModel == TRACK_CA ? "constant-acceleration" : "constant-velocity");
     else fprintf(stderr, "tracking off\n");
@@ -526,7 +555,7 @@ int main(int argc, char **argv)
     app.plotsFile = open_csv(app.opt.plotsCsv,
                              "time_s,az_deg,range_m,el_deg,vr_mps,snr_dB,pulse,hits,beam,rangeCell,dopplerBin,pulseNumber");
     app.trackFile = open_csv(app.opt.tracksCsv, "id,confirmed,deleted,time_s,x_m,y_m,z_m,vx_mps,vy_mps,vz_mps,"
-                                                "hits,misses,ax_mps2,ay_mps2,az_mps2");
+                                                "hits,misses,ax_mps2,ay_mps2,az_mps2,existence,pCV,pCA,pCT");
     app.detFile = open_csv(app.opt.detectionsCsv,
                            "pulseNumber,pulse,time_s,az_deg,range_m,el_deg,vr_mps,snr_dB,beam,rangeCell,dopplerBin");
     if (app.opt.serialDevice) {
@@ -561,6 +590,7 @@ int main(int argc, char **argv)
     }
     if (app.plotsFile) fclose(app.plotsFile);
     if (app.detFile) fclose(app.detFile);
+    free(app.confirmedIds);
     if (app.trackFile) fclose(app.trackFile);
     radar_config_free(&app.cfg);
     return app.exitCode;

@@ -5,7 +5,7 @@
 %   the files). When the C receiver is built (radar_receiver_<os>/build/radar_receiver,
 %   Linux or macOS), test_c_receiver compares it with the MATLAB processing
 %   (about 20 minutes per run: fixed and staggered PRF, 1-D range and Doppler
-%   CFAR), and test_multi_scan sends three scans through it (about 40 minutes).
+%   CFAR, the GO, SO and OS detectors and the PMBM tracker), and test_multi_scan sends three scans through it (about 40 minutes).
 %   test_clutter takes about 5 minutes, test_tracker_pmbm about 3 minutes, each
 %   test_scenarios run (3 scans, 48 elements) 2 - 3 hours (1 element: about
 %   20 minutes). All tests together take about 12 hours.
@@ -38,7 +38,7 @@ tests(end+1, :) = {'DDC recording and replay over UDP with the PRI timing', @tes
 tests(end+1, :) = {'DDC file generation with parfor (generate_ddc_files)', @test_generate_ddc};
 tests(end+1, :) = {'Phase codes: matched and mismatch filters (and the C core test)', @test_phase_code};
 tests(end+1, :) = {'Configuration edge cases (sectors, invalid settings, handover)', @test_setup};
-tests(end+1, :) = {'CFAR methods (2-D, range, Doppler), edges, range interval', @test_cfar};
+tests(end+1, :) = {'CFAR detectors (CA, GO, SO, OS) x windows (2-D, range, Doppler), edges, range interval', @test_cfar};
 tests(end+1, :) = {'EKF tracker 3-D and 2-D (and the C tracker when built)', @test_tracker};
 tests(end+1, :) = {'PMBM tracker with IMM-UKF 3-D and 2-D: maneuvers, acceleration, clutter, close targets', @test_tracker_pmbm};
 tests(end+1, :) = {'Interactive PPI (data tips, zoom, pan, filters)', @test_ppi_interactive};
@@ -67,6 +67,14 @@ if isunix && exist(receiverBin, 'file')
     for method = {'range', 'doppler'}
         tests(end+1, :) = {sprintf('C receiver vs MATLAB (fixed PRF, %s CFAR)', method{1}), ...
                            @() test_c_receiver('fixed', receiverBin, [], [], false, method{1})}; %#ok<SAGROW>
+    end
+    % other CFAR detectors and the PMBM tracker in both programs
+    combos = {'fixed', '2d', 'os', 'pmbm'; 'fixed', 'range', 'go', 'pmbm'; 'fixed', 'doppler', 'so', 'ekf'; ...
+              'staggered', '2d', 'ca', 'pmbm'};
+    for i = 1:size(combos, 1)
+        c = combos(i, :);
+        tests(end+1, :) = {sprintf('C receiver vs MATLAB (%s PRF, CFAR %s %s, %s tracker)', c{1}, upper(c{3}), c{2}, ...
+                           upper(c{4})), @() test_c_receiver(c{1}, receiverBin, [], [], false, c{2}, c{3}, c{4})}; %#ok<SAGROW>
     end
     tests(end+1, :) = {'Three scans through the C receiver: tracks on the targets only (fixed PRF)', ...
                        @() test_multi_scan('fixed', 3)};

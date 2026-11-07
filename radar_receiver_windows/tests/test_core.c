@@ -387,27 +387,56 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
     return found == 1;
 }
 
-/* False alarm probability of the CFAR threshold (the inverse of cfar_alpha.m). */
+/* False alarm probability of the CFAR threshold (the inverse of cfar_alpha.m):
+ * CA, GO, SO and OS against their single-look closed forms (as test_cfar.m),
+ * and the threshold of the configuration. */
 static void test_cfar_pfa(const char *configPath)
 {
-    /* one look: closed form (1 + alpha/N)^-N */
+    RadarConfig c;
+    memset(&c, 0, sizeof c);
+    c.nLooks = 1.0;
+    /* CA, one look: closed form (1 + alpha/N)^-N */
     for (int n = 8; n <= 300; n *= 3) {
         const double alpha = n * (pow(1e-6, -1.0 / n) - 1.0);
-        const double pfa = cfar_pfa(alpha, n, 1.0);
+        c.nTrain = n;
+        const double pfa = cfar_pfa(&c, alpha);
         CHECK(fabs(pfa / 1e-6 - 1.0) < 1e-9, "cfar_pfa one look, N = %d: %.6e (expected 1e-6)", n, pfa);
     }
-    CHECK(fabs(cfar_pfa(0.0, 100, 1.5) - 1.0) < 1e-12, "cfar_pfa(alpha = 0) = 1");
-    CHECK(isnan(cfar_pfa(10.0, 100, 0.0)), "cfar_pfa without nLooks is NaN");
+    c.nTrain = 100;  c.nLooks = 1.5;
+    CHECK(fabs(cfar_pfa(&c, 0.0) - 1.0) < 1e-12, "cfar_pfa(alpha = 0) = 1");
+    c.nLooks = 0.0;
+    CHECK(isnan(cfar_pfa(&c, 10.0)), "cfar_pfa without nLooks is NaN");
+    /* GO, SO (Gandhi and Kassam) and OS (Rohling), one look, N = 32, halves of 16, k = 24, alpha = 10 */
+    {
+        const int N = 32, n = 16, k = 24;
+        const double T = 10.0;
+        double s = 0.0, os = 1.0, binom = 1.0;           /* binom = C(n+j-1, j) */
+        for (int j = 0; j < n; j++) {
+            if (j > 0) binom *= (double)(n + j - 1) / j;
+            s += binom * pow(2.0 + T / n, -(n + j));
+        }
+        for (int i = 0; i < k; i++) os *= (double)(N - i) / (N - i + T);
+        const double ref[3] = { 2.0 * pow(1.0 + T / n, -n) - 2.0 * s, 2.0 * s, os };
+        const int types[3] = { CFAR_GO, CFAR_SO, CFAR_OS };
+        c.nTrain = N;  c.cfarNHalf = n;  c.cfarOsK = k;  c.nLooks = 1.0;
+        for (int t = 0; t < 3; t++) {
+            c.cfarType = types[t];
+            const double pfa = cfar_pfa(&c, T);
+            printf("CFAR %s, one look, alpha 10: Pfa %.6e (closed form %.6e)\n", cfar_type_name(types[t]), pfa, ref[t]);
+            CHECK(fabs(pfa / ref[t] - 1.0) < 1e-6, "cfar_pfa %s: %.6e (closed form %.6e)", cfar_type_name(types[t]), pfa,
+                  ref[t]);
+        }
+    }
     /* the configuration: alpha was designed for cfg.cfar.pfa = 1e-8 with nLooks looks */
     RadarConfig cfg;
     char err[256];
     if (radar_config_load(configPath, &cfg, err, sizeof err) != 0) return;
     if (cfg.nLooks > 0) {
-        const double pfa = cfar_pfa(cfg.alpha, cfg.nTrain, cfg.nLooks);
-        printf("CFAR: alpha %.3f (%.2f dB), %d training cells, %.2f looks -> Pfa %.3e\n", cfg.alpha,
-               10 * log10(cfg.alpha), cfg.nTrain, cfg.nLooks, pfa);
+        const double pfa = cfar_pfa(&cfg, cfg.alpha);
+        printf("CFAR %s: alpha %.3f (%.2f dB), %d training cells, %.2f looks -> Pfa %.3e\n", cfar_type_name(cfg.cfarType),
+               cfg.alpha, 10 * log10(cfg.alpha), cfg.nTrain, cfg.nLooks, pfa);
         CHECK(fabs(pfa / 1e-8 - 1.0) < 1e-3, "Pfa of the configured threshold %.4e (expected 1e-8)", pfa);
-        CHECK(cfar_pfa(cfg.alpha * 2.0, cfg.nTrain, cfg.nLooks) < pfa, "a higher threshold has a lower Pfa");
+        CHECK(cfar_pfa(&cfg, cfg.alpha * 2.0) < pfa, "a higher threshold has a lower Pfa");
     } else {
         printf("configuration without nLooks: Pfa check skipped\n");
     }
