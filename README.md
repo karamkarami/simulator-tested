@@ -978,6 +978,8 @@ sea of `cfg.clutter.regions`), 3 scans each, all PASS:
 | random (seed 1), staggered PRF, 48 elements | 10 / 10 (R1, R8 below 3 dB margin in some scans, R3 in scan 3, R4 crosses at 31 deg/scan), 7 confirmed tracks | 0 of 28 | 0 | 0.025 % |
 | random (seed 3), fixed PRF, 1 element | 10 / 10, 8 confirmed tracks (R7, R10 blind in one scan) | 0 of 28 | 0 | 0.038 % |
 | six targets, fixed PRF, 48 elements | PASS | PASS | 0 | PASS |
+| challenge (13 targets with C11 - C13), fixed PRF, 1 element (2-D), EKF | 13 / 13 (C3 blind in scan 1), 9 confirmed tracks; none on the maneuvering C11, C12, C13 | 0 of 38 | 0 | 0 % |
+| challenge (13 targets with C11 - C13), fixed PRF, 1 element (2-D), **PMBM** | 13 / 13, 12 confirmed tracks: every expected target, the maneuvering C11 (weave, 22 m/s^2), C12 (8 m/s^2) and C13 (turn, slowing, climbing) included | 0 of 38 | 0 | 0 % |
 | challenge, clutter off | PASS | PASS | 0 | PASS |
 | challenge, CNR +10 dB, gain -10 dB | PASS | PASS | 0 | PASS |
 
