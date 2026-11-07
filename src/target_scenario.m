@@ -1,7 +1,7 @@
 function targets = target_scenario(cfg)
 %TARGET_SCENARIO  The targets of the scenario selected by cfg.scenario.type.
 %   'six'       six_targets_scenario.m: six targets around the radar
-%   'challenge' challenge_targets_scenario.m: ten targets that are hard for the radar
+%   'challenge' challenge_targets_scenario.m: thirteen targets that are hard for the radar (C11 - C13 maneuver)
 %   'random'    random_targets_scenario.m: cfg.scenario.random.n targets (default 10)
 %               drawn in the limits of cfg.scenario.random with the seed
 %               cfg.scenario.random.seed ([] = cfg.sim.seed); the ranges are kept

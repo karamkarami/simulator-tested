@@ -90,6 +90,10 @@ r{end+1} = {'consolePlots', double(cfg.console.plots)};   % print every plot (re
 r{end+1} = {'minExtent_deg', cfg.extract.minExtent_deg};
 r{end+1} = {'meanPri_s', mean(sys.pri)};
 tk = sys.track;                                      % EKF tracker (track_setup.m)
+if tk.enable && strcmp(tk.method, 'pmbm')
+    warning(['cfg.track.method = ''pmbm'': the C receiver has only the EKF tracker; it tracks with the ' ...
+             'EKF settings of cfg.track (the PMBM tracker runs in MATLAB, run_radar_sim).']);
+end
 r{end+1} = {'trackEnable', double(tk.enable)};
 r{end+1} = {'trackDim', tk.dim};
 r{end+1} = {'trackSigma', [sqrt(diag(tk.R)).', zeros(1, 3 - tk.dim)]};   % range [m], az, el [rad]

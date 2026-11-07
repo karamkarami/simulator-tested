@@ -145,11 +145,19 @@ if o.showTruth && ~isempty(targets)
     n = numel(targets);
     xy = zeros(n, 2);
     for i = 1:n
-        p = targets(i).pos0_m + targets(i).vel_mps*d.t_s;
+        p = target_state(targets(i), d.t_s);
         xy(i, :) = p(1:2) / 1e3;
-        p0 = targets(i).pos0_m / 1e3;
+        tt = [0, d.t_s];                                    % true path since t = 0
+        if isfield(targets(i), 'maneuvers') && ~isempty(targets(i).maneuvers)
+            tt = linspace(0, d.t_s, 41);                     % maneuvers: curved path
+        end
+        path = zeros(numel(tt), 2);
+        for k = 1:numel(tt)
+            q = target_state(targets(i), tt(k));
+            path(k, :) = q(1:2) / 1e3;
+        end
         set(h.names(i), 'Position', [xy(i, :) 0], 'Visible', 'on');
-        set(h.tracks(i), 'XData', [p0(1) xy(i, 1)], 'YData', [p0(2) xy(i, 2)], 'Visible', 'on');
+        set(h.tracks(i), 'XData', path(:, 1).', 'YData', path(:, 2).', 'Visible', 'on');
     end
     set(h.truth, 'XData', xy(:, 1), 'YData', xy(:, 2), 'Visible', 'on');
 else
@@ -338,8 +346,10 @@ function txt = track_text(tk, height_m)
 states = {'tentative', 'confirmed'};
 p = tk.pos_m;  v = tk.vel_mps;
 R = norm(p(1:tk.dim));
-txt = sprintf(['Track %d (%s, %d-D EKF)\nRange       %.3f km\nAzimuth     %.2f deg\n'], tk.id, ...
-              states{1 + tk.confirmed}, tk.dim, R/1e3, mod(atan2(p(1), p(2))*180/pi, 360));
+method = 'EKF';
+if isfield(tk, 'method') && ~isempty(tk.method), method = tk.method; end
+txt = sprintf(['Track %d (%s, %d-D %s)\nRange       %.3f km\nAzimuth     %.2f deg\n'], tk.id, ...
+              states{1 + tk.confirmed}, tk.dim, method, R/1e3, mod(atan2(p(1), p(2))*180/pi, 360));
 if tk.dim == 3
     txt = [txt sprintf('Height      %.0f m\nClimb       %.1f m/s\n', p(3) + height_m, v(3))];
 end
@@ -347,6 +357,12 @@ txt = [txt sprintf('Speed       %.1f m/s\nHeading     %.1f deg\n', norm(v(1:2)),
 txt = [txt sprintf('Radial vel. %.1f m/s\n', p(1:tk.dim)*v(1:tk.dim).'/R)];   % from the track: unambiguous
 if isfield(tk, 'acc_mps2') && any(tk.acc_mps2 ~= 0)                     % constant-acceleration model
     txt = [txt sprintf('Accel.      %.2f m/s^2\n', norm(tk.acc_mps2(1:2)))];
+end
+if isfield(tk, 'existence') && isfinite(tk.existence)                 % PMBM: existence, IMM models
+    txt = [txt sprintf('Existence   %.3f\n', tk.existence)];
+    if isfield(tk, 'modeProb') && ~isempty(tk.modeProb)
+        txt = [txt sprintf('Models      %s\n', tk.modeProb)];
+    end
 end
 txt = [txt sprintf('Updates     %d (missed scans %d)\nLast update %.3f s', tk.hits, tk.misses, tk.t_s)];
 end
@@ -383,7 +399,7 @@ function show_timing(S)
 us = S.data.timing_us;
 if isempty(us), return; end
 names = {'DBF', 'Matched filter', 'MTI (clutter)', 'Doppler FFT+NCI', ['CFAR ' S.sys.cfar.label], ...
-         'Plot extractor', sprintf('Tracking %d-D %s', S.sys.track.dim, upper(S.sys.track.model)), ...
+         'Plot extractor', tracker_label(S.sys.track), ...
          'Console output', 'Display (PPI)'};
 if ~S.sys.track.enable, names{7} = 'Tracking (off)'; end
 n = min(numel(us), numel(names));
@@ -404,10 +420,13 @@ end
 function txt = truth_text(S, i)
 tgt = S.sys.cfg.targets(i);
 [R, az, el, vr] = target_geometry(tgt, S.data.t_s, S.sys.ant.height_m);
-pos = tgt.pos0_m + tgt.vel_mps * S.data.t_s;
+[pos, vel, acc] = target_state(tgt, S.data.t_s);
 txt = sprintf(['True target %s\nRange       %.3f km\nAzimuth     %.2f deg\nElevation   %.2f deg\n' ...
                'Height      %.0f m\nRadial vel. %.1f m/s\nSpeed       %.1f m/s\nMean RCS    %.2f m^2'], ...
-               tgt.name, R/1e3, az, el, pos(3), vr, norm(tgt.vel_mps), tgt.rcs_m2);
+               tgt.name, R/1e3, az, el, pos(3), vr, norm(vel), tgt.rcs_m2);
+if any(acc ~= 0)                                            % maneuvering now
+    txt = [txt sprintf('\nAccel.      %.1f m/s^2', norm(acc))];
+end
 end
 
 function S = pin(S, p)
@@ -512,4 +531,13 @@ set(fig, 'Units', 'pixels');
 px = get(fig, 'CurrentPoint');
 set(fig, 'Units', units);
 px = px(1:2);
+end
+
+function s = tracker_label(p)
+% Name of the tracking block in the timing panel.
+if isfield(p, 'method') && strcmp(p.method, 'pmbm')
+    s = sprintf('Tracking %d-D PMBM', p.dim);
+else
+    s = sprintf('Tracking %d-D %s', p.dim, upper(p.model));
+end
 end

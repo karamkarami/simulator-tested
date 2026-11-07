@@ -1,5 +1,8 @@
 function tr = track_update(tr, plots, t_s, flush)
 %TRACK_UPDATE  Extended Kalman filter tracking of the plots, GNN association.
+%   With cfg.track.method = 'pmbm' (track_init.m) the PMBM tracker with
+%   IMM-UKF state estimation runs instead (track_pmbm.m), with the same
+%   calls and outputs (tr.tracks, tr.log).
 %   tr = TRACK_UPDATE(tr, plots, t_s) takes the new plots of time t_s (call
 %   it every PRI, also without plots) and deletes the tracks that were not
 %   updated for too long. tr comes from track_init(sys.track).
@@ -55,6 +58,10 @@ function tr = track_update(tr, plots, t_s, flush)
 %   plotIndex], z = 0 in 2-D; plotIndex counts the plots given to the tracker).
 
 if nargin < 4, flush = false; end
+if isfield(tr, 'T')                                % cfg.track.method = 'pmbm'
+    tr = track_pmbm(tr, plots, t_s, flush);
+    return
+end
 p = tr.p;
 % 1) the batch is complete: the antenna turned on without a new plot, or it is old enough
 if ~isempty(tr.pending) && (t_s - tr.pendingLast >= p.batchGap_s || t_s - tr.pendingFirst >= p.batchMax_s)

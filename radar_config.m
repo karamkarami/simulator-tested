@@ -202,7 +202,22 @@ cfg.extract.minExtent_deg = 2; % minimum azimuth extent of the detections of a p
                                % (noise false alarms last only a few CPIs, targets about one beamwidth)
 cfg.extract.maxMiss = 2;       % CPIs without a detection before a plot is closed
 
-%% Target tracking: extended Kalman filter (EKF) on the plots
+%% Target tracking
+% Method of the tracking block:
+%   'ekf'   extended Kalman filter (EKF) per track, global nearest neighbour (GNN)
+%           association, M-of-N confirmation (this section below)
+%   'pmbm'  multi-target Bayesian tracker: Poisson multi-Bernoulli mixture (PMBM)
+%           filter with an IMM-UKF estimator of every target state (interacting
+%           multiple models CV / CA / CT, each an unscented Kalman filter);
+%           settings in cfg.track.pmbm (next section) and the common ones here
+%           (dim, measurement errors, radial velocity, maxSpeed, maxAccel, batch,
+%           gateProb, confirmHits, maxMiss*, speed gate)
+% Both work in 2-D (one element: range and azimuth, as the 2-D EKF) and in
+% 3-D (DBF: range, azimuth and elevation), cfg.track.dim. The C receiver
+% has only the EKF (export_receiver_config warns when 'pmbm' is selected).
+cfg.track.method          = 'ekf';   % 'ekf' or 'pmbm'
+
+% EKF: extended Kalman filter on the plots
 % State relative to the antenna (x = East, y = North, z = up): position and
 % velocity ('cv': nearly constant velocity, white acceleration) or position,
 % velocity and acceleration ('ca': nearly constant acceleration, white jerk).
@@ -246,6 +261,60 @@ cfg.track.minSpeedEnable  = false;   % true: delete the tracks slower than minSp
                                      % 3-D, sqrt(vx^2+vy^2) in 2-D. Tested on every track with at least 2
                                      % updates (a new track has no measured velocity yet), tentative or confirmed
 cfg.track.minSpeed_mps    = 5;       % minimum speed of a track when minSpeedEnable is true [m/s]
+
+%% Target tracking with cfg.track.method = 'pmbm': PMBM filter, IMM-UKF state estimation
+% Poisson multi-Bernoulli mixture (PMBM, the conjugate prior of the standard
+% point-target model): the targets not yet detected are a Poisson process
+% (uniform intensity: undetectedTargets in the coverage), every detected
+% target a Bernoulli component (existence probability r and state density),
+% and the data association hypotheses a mixture: global hypotheses, each one
+% single-target hypothesis per Bernoulli, with its weight. The plots of a GNN
+% batch (gnnSector_deg / gnnMaxSector_deg above) update the mixture: every
+% global hypothesis gives its best assignments (Murty's k-best, as many as its
+% weight earns of maxHypotheses); a plot may also be a new target (a new
+% Bernoulli from the Poisson part) or a false plot. The antenna looks at a
+% Bernoulli once per scan: when it passes its predicted azimuth without a
+% plot the Bernoulli is missed (r falls with pd). Track = Bernoulli; the
+% tracks shown are those of the most likely global hypothesis (with their
+% state). A track is confirmed when its existence probability over all
+% global hypotheses is at least rConfirm and it has confirmHits plots in
+% the most likely one; when the most likely hypothesis changes, the track
+% that holds the newest plot of a confirmed track takes its number and
+% confirmation (the same target with another history). It is deleted when its existence probability over all
+% global hypotheses falls below rDelete (or after maxMiss / maxMissTentative
+% missed scans).
+% IMM-UKF: per Bernoulli the models CV (nearly constant velocity), CA
+% (nearly constant acceleration) and CT (coordinated turn, turn rate in the
+% state) on the common state [position; velocity; acceleration; turn rate]
+% (2-D: 7, 3-D: 10 values), mixed with the Markov switching probability
+% switchProb per scan. The unscented transform propagates the CT model and
+% maps every model to the measurement (range, azimuth (, elevation) and the
+% radial velocity).
+cfg.track.pmbm.pd                = 0.9;    % detection probability of a target in the beam (per scan)
+cfg.track.pmbm.ps                = 0.99;   % survival probability of a target per scan
+cfg.track.pmbm.falsePlotsPerScan = 2;      % expected false plots per scan (uniform in the measurement space)
+cfg.track.pmbm.undetectedTargets = 1;      % expected targets in the coverage not yet detected (Poisson part)
+cfg.track.pmbm.maxClimb_mps      = 100;    % 3-D: vertical velocity uncertainty of a new track: std
+                                           % maxClimb/sqrt(3) (horizontal: cfg.track.maxSpeed_mps)
+cfg.track.pmbm.maxHypotheses     = 25;     % global hypotheses kept
+cfg.track.pmbm.hypPrune          = 1e-3;   % global hypotheses below this weight (of the best one) are dropped
+cfg.track.pmbm.rPrune            = 1e-5;   % single-target hypotheses below this existence probability: no target
+cfg.track.pmbm.rConfirm          = 0.9;    % existence probability that confirms a track (with confirmHits plots)
+cfg.track.pmbm.rDelete           = 1e-4;   % a track whose existence probability falls below is deleted (a
+                                           % low value keeps the evidence of a new track that was missed once
+                                           % in dense false plots; maxMissTentative / maxMiss end it as well)
+cfg.track.pmbm.imm.models        = {'cv', 'ca', 'ct'};   % models of the IMM (any of them, in any order)
+cfg.track.pmbm.imm.mu0           = [0.8 0.1 0.1];        % model probabilities of a new track
+cfg.track.pmbm.imm.switchProb    = 0.05;   % probability per scan of switching to another model
+cfg.track.pmbm.imm.sigmaAccelCv_mps2 = 2;  % CV: horizontal white acceleration [m/s^2]
+cfg.track.pmbm.imm.sigmaJerkCa_mps3  = 1;  % CA: horizontal white jerk [m/s^3]
+cfg.track.pmbm.imm.sigmaAccelCt_mps2 = 2;  % CT: horizontal white acceleration [m/s^2]
+cfg.track.pmbm.imm.sigmaTurn_dps     = 0.5;% CT: change of the turn rate (random walk) [deg/s per sqrt(s)]
+cfg.track.pmbm.imm.maxTurn_dps       = 6;  % CT: turn rate uncertainty of a new track: std maxTurn/sqrt(3) [deg/s]
+                                           % (vertical: cfg.track.sigmaAccelZ_mps2, all models)
+cfg.track.pmbm.ukf.alpha = 1;              % unscented transform: spread of the sigma points,
+cfg.track.pmbm.ukf.beta  = 2;              % prior knowledge (2: Gaussian) and
+cfg.track.pmbm.ukf.kappa = 0;              % secondary scaling
 
 %% Ground clutter
 cfg.clutter.enable           = true;
@@ -314,11 +383,12 @@ cfg.sim.swerling    = 1;      % target RCS model: 1 = Swerling 1 (new RCS every 
 %% Targets (see make_target.m)
 % Test scenario:
 %   'six'       six_targets_scenario.m: six targets around the radar (0.5 - 10 m^2, 8 - 46 km)
-%   'challenge' challenge_targets_scenario.m: ten targets that are hard for the radar
+%   'challenge' challenge_targets_scenario.m: thirteen targets that are hard for the radar
 %               (low SNR over the mountains, slow over the hills, tangential in the MTI notch,
 %               behind a strong near target at the pulse handover, two targets 300 m apart,
-%               420 m/s, high elevation over the sea, low altitude near the horizon); some
-%               are expected to be missed
+%               420 m/s, high elevation over the sea, low altitude near the horizon) and for
+%               the tracker (a 5 deg/s weave, a constant acceleration of 8 m/s^2, a turn
+%               while slowing down and climbing); some are expected to be missed
 %   'random'    random_targets_scenario.m: cfg.scenario.random.n targets with random position,
 %               RCS and velocity in the limits below (the same seed gives the same targets)
 % cfg.targets is set from the scenario below; after changing cfg.scenario in a

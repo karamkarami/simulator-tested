@@ -121,7 +121,7 @@ for id = ids
     d = inf(1, numel(cfg.targets));
     for k = 1:numel(cfg.targets)
         tg = cfg.targets(k);
-        pos = tg.pos0_m + tg.vel_mps * last(4) - [0 0 h];
+        pos = target_state(tg, last(4)) - [0 0 h];
         d(k) = norm(last(5:7) - pos);
     end
     [dmin, k] = min(d);

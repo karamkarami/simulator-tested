@@ -204,7 +204,7 @@ function near = any_target_near(targets, t, pos, h)
 % A confirmed track within 3 km of a target (e.g. still converging) is not counted as false.
 near = false;
 for k = 1:numel(targets)
-    d = targets(k).pos0_m + targets(k).vel_mps * t - [0 0 h];
+    d = target_state(targets(k), t) - [0 0 h];
     near = near || norm(pos(1:2) - d(1:2)) < 3000;
 end
 end

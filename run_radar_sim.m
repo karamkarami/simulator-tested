@@ -24,7 +24,9 @@ function results = run_radar_sim(cfg)
 %                            Doppler window, cfg.cfar.method)
 %     9. Pruning           : local peaks only, then azimuth peak picking (plots)
 %    10. Tracking          : EKF on the plots, 2-D or 3-D, constant velocity or
-%                            constant acceleration, GNN association (optional, cfg.track)
+%                            constant acceleration, GNN association (optional, cfg.track),
+%                            or (cfg.track.method = 'pmbm') the PMBM multi-target tracker
+%                            with IMM-UKF state estimation (CV, CA, coordinated turn)
 %    11. PPI display       : updated while the radar is running: plots and/or the
 %                            CFAR detections before the extractor, tracks, mean
 %                            processing time of every block (also of the display
@@ -343,8 +345,13 @@ end
 function print_tracks(tracker)
 % List the tracks at the end of the run.
 tk = tracker.tracks;
-fprintf('\nTracks at the end (%d-D EKF, %s model, GNN): %d (%d confirmed), %d track updates\n', tracker.p.dim, ...
-        upper(tracker.p.model), numel(tk), ...
+if isfield(tracker, 'T')
+    label = sprintf('%d-D PMBM, IMM-UKF %s, %d global hypotheses', tracker.p.dim, ...
+                    upper(strjoin(tracker.p.pmbm.models, '/')), size(tracker.G, 1));
+else
+    label = sprintf('%d-D EKF, %s model, GNN', tracker.p.dim, upper(tracker.p.model));
+end
+fprintf('\nTracks at the end (%s): %d (%d confirmed), %d track updates\n', label, numel(tk), ...
         sum([tk.confirmed]), size(tracker.log, 1));
 fprintf('%5s %4s %9s %8s %8s %8s %8s %8s %5s\n', 'id', 'conf', 'R[km]', 'az[deg]', 'h[m]', 'v[m/s]', 'hdg[deg]', ...
         'vr[m/s]', 'hits');

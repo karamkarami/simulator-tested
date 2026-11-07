@@ -16,7 +16,7 @@ function ok = test_setup()
 %      up with another CFAR method or filter accepts the PRIs; the exported
 %      receiver configuration holds the same receive intervals.
 %   5. Target scenarios (cfg.scenario.type): 'six' gives 6 targets,
-%      'challenge' 10; 'random' gives cfg.scenario.random.n targets inside
+%      'challenge' 13; 'random' gives cfg.scenario.random.n targets inside
 %      its limits, the same ones with the same seed, other ones with another
 %      seed, and leaves the random state of the caller as it was. The speed
 %      gate of the tracker (cfg.track.minSpeedEnable) is off by default, set
@@ -125,7 +125,7 @@ tg = target_scenario(cfg);
 ok = report(sprintf('scenario ''six'': %d targets', numel(tg)), numel(tg) == 6) && ok;
 c = cfg;  c.scenario.type = 'challenge';
 tg = target_scenario(c);
-ok = report(sprintf('scenario ''challenge'': %d targets (%s)', numel(tg), strjoin({tg.name}, ' ')), numel(tg) == 10) && ok;
+ok = report(sprintf('scenario ''challenge'': %d targets (%s)', numel(tg), strjoin({tg.name}, ' ')), numel(tg) == 13) && ok;
 c.scenario.type = 'random';
 rng(5);  before = rand;  rng(5);
 tg = target_scenario(c);
