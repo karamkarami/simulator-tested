@@ -6,7 +6,7 @@ function export_receiver_config(cfg, fileName)
 %   simulator streams over UDP (DBF matrix, pulse compression filters:
 %   matched or, for a phase code, mismatch; range axes, CPI length, MTI
 %   weights, Doppler window and noise gains, CFAR method, window, factor and
-%   tested range cells, noise floor of the SNR, plot extraction and tracker
+%   tested range cells, CFAR detector (CA, GO, SO, OS), noise floor of the SNR, plot extraction and tracker
 %   settings). Export again
 %   whenever cfg changes, before starting the C receiver. Default file:
 %   radar_receiver_<os>/config/radar_config.bin.
@@ -78,7 +78,11 @@ r{end+1} = {'trainRange', sys.cfar.trainRange};
 r{end+1} = {'guardDoppler', sys.cfar.guardDoppler};
 r{end+1} = {'trainDoppler', sys.cfar.trainDoppler};
 r{end+1} = {'nTrain', sys.cfar.nTrain};
-r{end+1} = {'alpha', sys.cfar.alpha};
+r{end+1} = {'alpha', sys.cfar.alpha};               % threshold factor of the selected detector
+r{end+1} = {'cfarType', find(strcmp(sys.cfar.type, {'ca', 'go', 'so', 'os'})) - 1};   % 0 CA, 1 GO, 2 SO, 3 OS
+r{end+1} = {'cfarNHalf', sys.cfar.nHalf};            % GO, SO: training cells per half window
+r{end+1} = {'cfarOsK', sys.cfar.osK};                % OS: rank of the statistic
+r{end+1} = {'cfarNoiseScale', sys.cfar.noiseScale};  % noise estimate = statistic / this
 r{end+1} = {'nLooks', sys.dop.nLooks};               % Pfa of the threshold
 r{end+1} = {'sidelobeMargin_dB', cfg.prune.sidelobeMargin_dB};
 r{end+1} = {'snrNoise', double(strcmp(sys.report.snrNoise, 'cfar'))};   % SNR noise: 0 median, 1 CFAR window

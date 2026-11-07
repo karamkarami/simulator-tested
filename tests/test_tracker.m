@@ -1,5 +1,5 @@
 function ok = test_tracker()
-%TEST_TRACKER  EKF tracker (track_update.m) on synthetic plots, 3-D and 2-D, CV and CA models.
+%TEST_TRACKER  EKF tracker (track_ekf.m, through track_update.m) on synthetic plots, 3-D and 2-D, CV and CA models.
 %   1. The six targets of six_targets_scenario.m are seen once per scan (when
 %      the antenna passes them) for 5 scans, with the plot errors of
 %      cfg.track (range, azimuth, elevation), plus 8 random false plots per

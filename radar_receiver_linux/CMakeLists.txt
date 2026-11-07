@@ -53,6 +53,7 @@ add_library(radar_core STATIC
     src/config.c
     src/fft.c
     src/extractor.c
+    src/cfar.c
     src/tracker.c
     src/processor.c
     src/udp_input.c
@@ -194,7 +195,7 @@ if(RADAR_BUILD_TESTS)
     add_test(NAME core_1ch COMMAND test_core ${CMAKE_CURRENT_SOURCE_DIR}/config/radar_config_1ch.bin)
 
     # the CFAR against direct sums (white-box: the test includes processor.c)
-    add_executable(test_cfar tests/test_cfar.c src/config.c src/fft.c src/extractor.c src/tracker.c src/platform.c)
+    add_executable(test_cfar tests/test_cfar.c src/config.c src/fft.c src/cfar.c src/extractor.c src/tracker.c src/platform.c)
     target_include_directories(test_cfar PRIVATE src)
     target_link_libraries(test_cfar PRIVATE Threads::Threads)
     if(OpenMP_C_FOUND)

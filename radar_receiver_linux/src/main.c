@@ -24,7 +24,7 @@
  *     --idle-timeout S       stop when no data came for S seconds after the first PRI (default 0 = never)
  *     --queue N              PRIs buffered between the input thread and the processing (default 64)
  *     --no-skip              never skip Doppler/CFAR updates when the processing falls behind
- *     --cfar-threshold DB    CA-CFAR threshold factor in dB (default from the configuration,
+ *     --cfar-threshold DB    CFAR threshold factor in dB (default from the configuration,
  *                            i.e. from cfg.cfar.pfa); can also be changed in the PPI
  *     --quiet                do not print every plot and confirmed track
  *     --print-plots          print them (the default comes from the configuration,
@@ -301,7 +301,7 @@ static void print_timing(const App *app, const Processor *proc, const UdpInput *
 static void report_cfar(App *app, const Processor *proc, double default_dB, int changed)
 {
     const double alpha = processor_cfar_alpha(proc), dB = 10.0 * log10(alpha);
-    const double pfa = cfar_pfa(alpha, app->cfg.nTrain, app->cfg.nLooks);
+    const double pfa = cfar_pfa(&app->cfg, alpha);
     if (changed || fabs(dB - default_dB) > 1e-9) {
         const double t0 = now_seconds();
         if (isnan(pfa)) fprintf(stderr, "CFAR threshold %.2f dB\n", dB);
@@ -353,7 +353,7 @@ static int worker(void *arg)
     ProcessorCallbacks cb = { on_detections, on_plot, on_antenna, app, on_track };
 #ifdef RADAR_WITH_QT
     char detName[32], trackName[32];
-    snprintf(detName, sizeof detName, "CFAR %s", cfar_method_name(app->cfg.cfarMethod));
+    snprintf(detName, sizeof detName, "CFAR %s %s", cfar_type_name(app->cfg.cfarType), cfar_method_name(app->cfg.cfarMethod));
     if (app->cfg.trackEnable)
         snprintf(trackName, sizeof trackName, "Tracking %d-D %s", app->cfg.trackDim, app->cfg.trackModel == TRACK_CA ? "CA" : "CV");
     else snprintf(trackName, sizeof trackName, "Tracking (off)");
@@ -515,8 +515,8 @@ int main(int argc, char **argv)
             fprintf(stderr, "%s pulse: LFM, matched filter of %d taps (%.2f ... %.2f km)\n", pulse_name(i), pc->nTaps,
                     pc->range_m[0] / 1e3, pc->range_m[pc->nRange - 1] / 1e3);
     }
-    fprintf(stderr, "CFAR %s (window: range %d+%d, Doppler %d+%d guard+training cells per side), SNR noise: %s, ",
-            cfar_method_name(app.cfg.cfarMethod), app.cfg.guardRange, app.cfg.trainRange, app.cfg.guardDoppler,
+    fprintf(stderr, "CFAR %s %s (window: range %d+%d, Doppler %d+%d guard+training cells per side), SNR noise: %s, ",
+            cfar_type_name(app.cfg.cfarType), cfar_method_name(app.cfg.cfarMethod), app.cfg.guardRange, app.cfg.trainRange, app.cfg.guardDoppler,
             app.cfg.trainDoppler, app.cfg.snrNoise == SNR_NOISE_CFAR ? "CFAR window" : "median of the map");
     if (app.cfg.trackEnable)
         fprintf(stderr, "tracking: EKF %d-D, %s model, GNN association\n", app.cfg.trackDim,

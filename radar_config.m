@@ -142,19 +142,38 @@ cfg.proc.nfft         = [];    % Doppler FFT length ([] = next power of 2: of th
                                % with a fixed PRF (114 -> 128), of the samples per row when staggered (28 -> 32))
 cfg.proc.updateEvery  = 1;     % run MTI/Doppler/CFAR every N new pulses (1 = every pulse)
 
-%% Detection: cell-averaging CFAR on every range-Doppler map
-% method: '2d'      window in range and Doppler around the cell under test
+%% Detection: CFAR on every range-Doppler map
+% type (detector; the noise statistic of the training cells of the window):
+%         'ca'      cell averaging: the mean of the training cells (best in
+%                   homogeneous noise)
+%         'go'      greatest of: the larger of the means of the two halves of
+%                   the window (fewer false alarms at clutter edges, more
+%                   masking of close targets)
+%         'so'      smallest of: the smaller of them (resolves close targets,
+%                   more false alarms at clutter edges)
+%         'os'      order statistic: the k-th smallest training cell,
+%                   k = round(osRank * training cells) (robust against other
+%                   targets in the window; more work)
+%         Halves (GO, SO): with the 2-D and the range window the cells at a
+%         smaller and at a larger range than the cell under test, with the
+%         Doppler window the bins below and above it.
+% method (window):
+%         '2d'      window in range and Doppler around the cell under test
 %         'range'   1-D window along range (same Doppler bin)
 %         'doppler' 1-D window along Doppler (same range cell; circular)
-% Every method has its own window and threshold. The threshold factor alpha
-% comes from pfa (and the training cells), unless threshold_dB is given:
-% alpha = 10^(threshold_dB/10). The PPI threshold field changes the threshold
-% of the selected method while the radar runs.
+% Every type works with every window. Every window has its own size and
+% threshold. The threshold factor alpha multiplies the statistic; it comes
+% from pfa (and the training cells, the type and the looks: cfar_alpha.m),
+% unless threshold_dB is given: alpha = 10^(threshold_dB/10). The PPI
+% threshold field changes the threshold of the selected type and window
+% while the radar runs.
 % Doppler is circular, so the window is always complete. At the first and
 % last range cells of a sub-pulse the range window is shifted inwards (same
 % number of training cells, the cell under test is no longer in the middle),
 % so every range cell can be tested.
-cfg.cfar.method = '2d';
+cfg.cfar.type   = 'ca';   % 'ca', 'go', 'so' or 'os'
+cfg.cfar.method = '2d';   % '2d', 'range' or 'doppler'
+cfg.cfar.osRank = 0.75;   % OS: rank of the statistic as a fraction of the training cells (0 ... 1]
 
 cfg.cfar.twoD.guardRange   = 3;     % guard cells on each side in range
 cfg.cfar.twoD.trainRange   = 8;     % training cells on each side in range

@@ -1,16 +1,16 @@
-function alpha = cfar_alpha(pfa, nTrain, nLooks)
-%CFAR_ALPHA  Threshold factor of a cell-averaging CFAR.
-%   alpha = CFAR_ALPHA(pfa, nTrain, nLooks) returns the factor that multiplies
-%   the mean of nTrain training cells. The noise power of every cell is the
-%   average of nLooks independent exponential (square-law) samples, i.e. a
-%   Gamma(nLooks) variable (nLooks = 1: no integration; non-integer values
-%   approximate correlated rows). With S the cell under test and Q the sum of
-%   the training cells, Pfa = P(S > (alpha/nTrain) Q) and S/(S+Q) is Beta
-%   distributed. For nLooks = 1: alpha = nTrain*(pfa^(-1/nTrain) - 1).
-
-N = nTrain;
-L = nLooks;
-pfaOf  = @(a) betainc(1 ./ (1 + a/N), N*L, L);
-alpha0 = N * (pfa^(-1/N) - 1);                           % single-look value
-alpha  = fzero(@(a) log(pfaOf(a)) - log(pfa), [1e-3 10] * alpha0);
+function alpha = cfar_alpha(pfa, c, nLooks)
+%CFAR_ALPHA  Threshold factor of a CFAR detector (CA, GO, SO or OS) for a false alarm probability.
+%   alpha = CFAR_ALPHA(pfa, c, nLooks) inverts cfar_pfa.m: the factor that
+%   multiplies the noise statistic of the training cells (c = sys.cfar, or
+%   the number of training cells for CA) so that a cell of pure noise
+%   (Gamma(nLooks), nLooks looks) exceeds it with probability pfa.
+%   CA, one look: alpha = nTrain*(pfa^(-1/nTrain) - 1).
+if isnumeric(c), c = struct('type', 'ca', 'nTrain', c); end
+N = c.nTrain;
+alpha0 = N * (pfa^(-1/N) - 1);                           % CA, single look
+f = @(a) log(cfar_pfa(a, c, nLooks)) - log(pfa);
+lo = 1e-3 * alpha0;  hi = 10 * alpha0;
+while f(hi) > 0, hi = 4 * hi; end                        % SO, OS with a high rank: larger factors
+while f(lo) < 0, lo = lo / 4; end
+alpha = fzero(f, [lo hi]);
 end

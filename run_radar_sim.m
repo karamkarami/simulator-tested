@@ -337,8 +337,8 @@ end
 fprintf('CPI: %.1f ms in the beam -> %d pulses = %d row(s) x %d samples, FFT %d, Doppler bin %.2f m/s, unambiguous +-%.1f m/s\n', ...
     sys.cpi.time_s*1e3, sys.cpi.length, sys.cpi.nRows, sys.cpi.rowLen, sys.dop.nfft, abs(diff(sys.dop.v_mps(1:2))), ...
     sys.lambda/(4*sys.dop.rowPri_s));
-fprintf('CFAR %s: Pfa = %.0e, %d training cells, %.1f looks, alpha = %.2f (%.1f dB)\n', sys.cfar.label, ...
-    sys.cfar.pfa, sys.cfar.nTrain, sys.dop.nLooks, sys.cfar.alpha, 10*log10(sys.cfar.alpha));
+fprintf('CFAR %s: Pfa = %.0e, %d training cells%s, %.1f looks, alpha = %.2f (%.1f dB)\n', sys.cfar.label, ...
+    sys.cfar.pfa, sys.cfar.nTrain, cfar_detail(sys.cfar), sys.dop.nLooks, sys.cfar.alpha, 10*log10(sys.cfar.alpha));
 fprintf('Simulated pulses: %d of %d (%.1f s of radar time)\n', sum(sched.active), sched.nPulses, sched.time_s(end));
 end
 
@@ -375,5 +375,14 @@ for i = 1:numel(plots)
     p = plots(i);
     fprintf('%8.3f %8.2f %9.3f %7.2f %8.2f %7.1f %6s %5d\n', p.time_s, p.az_deg, p.range_m/1e3, ...
         p.el_deg, p.vr_mps, p.snr_dB, p.pulse, p.hits);
+end
+end
+
+function s = cfar_detail(c)
+% Rank of the OS statistic, half windows of GO / SO.
+switch c.type
+    case 'os',        s = sprintf(' (rank %d)', c.osK);
+    case {'go', 'so'}, s = sprintf(' (%d per half)', c.nHalf);
+    otherwise,        s = '';
 end
 end

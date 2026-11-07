@@ -99,7 +99,7 @@ switch action
         dB = varargin{1};
         set(S.h.ui.cfar, 'String', sprintf('%.2f', dB));
         set(S.h.ui.cfarInfo, 'String', sprintf('%s: %.2f dB (Pfa %.1e)', S.sys.cfar.label, dB, ...
-            cfar_pfa(10^(dB/10), S.sys.cfar.nTrain, S.sys.dop.nLooks)));
+            cfar_pfa(10^(dB/10), S.sys.cfar, S.sys.dop.nLooks)));
     case 'reset'
         S = set_limits(S, S.home(1:2), S.home(3:4));
     case 'clear'

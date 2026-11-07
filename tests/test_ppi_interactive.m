@@ -158,7 +158,7 @@ ok = check(sys4.cfar.alpha == sys3.cfar.alpha && ~isempty(strfind(get(S.h.ui.cfa
 ppi_callbacks('cfar', fig, dB0);                           % Default button
 sys5 = ppi_update(ppi, sys4, 104, 12.4, 2, p, dets);
 ok = check(abs(sys5.cfar.alpha - alpha0) < 1e-9*alpha0, 'Default restores the threshold of cfg.cfar.pfa') && ok;
-ok = check(abs(cfar_pfa(alpha0, sys.cfar.nTrain, sys.dop.nLooks) - cfg.cfar.twoD.pfa) < 1e-3*cfg.cfar.twoD.pfa, ...
+ok = check(abs(cfar_pfa(alpha0, sys.cfar, sys.dop.nLooks) - cfg.cfar.twoD.pfa) < 1e-3*cfg.cfar.twoD.pfa, ...
            'cfar_pfa is the inverse of cfar_alpha') && ok;
 
 %% Tracks and block processing times

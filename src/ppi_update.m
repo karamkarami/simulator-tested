@@ -22,7 +22,7 @@ if ~isempty(dB)
     sys.cfar.alpha = 10^(dB/10);
     if sys.cfg.console.enable
         fprintf('  CFAR threshold set to %.2f dB (Pfa %.1e) at t = %.3f s\n', dB, ...
-                cfar_pfa(sys.cfar.alpha, sys.cfar.nTrain, sys.dop.nLooks), t_s);
+                cfar_pfa(sys.cfar.alpha, sys.cfar, sys.dop.nLooks), t_s);
     end
 end
 S = getappdata(ppi.fig, 'ppi');

@@ -14,7 +14,7 @@ function p = track_setup(cfg, sys)
 %   true one) and the chi-square gate with the radial velocity p.gateVr.
 %   Speed gate: p.minSpeed_mps (cfg.track.minSpeed_mps with
 %   cfg.track.minSpeedEnable, else 0 = off); a track with at least
-%   p.minSpeedHits updates that is slower is deleted (track_update.m).
+%   p.minSpeedHits updates that is slower is deleted (track_ekf.m, track_pmbm.m).
 t = cfg.track;
 p.enable = logical(t.enable);
 p.method = 'ekf';

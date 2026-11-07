@@ -1,6 +1,6 @@
 function tr = track_pmbm(tr, plots, t_s, flush)
 %TRACK_PMBM  Multi-target Bayesian tracker: PMBM filter with IMM-UKF state estimation.
-%   tr = TRACK_PMBM(tr, plots, t_s, flush) is track_update.m for
+%   tr = TRACK_PMBM(tr, plots, t_s, flush) is the tracker of track_update.m for
 %   cfg.track.method = 'pmbm' (tr from track_init.m, parameters p.pmbm from
 %   track_setup.m). Call it every PRI with the new plots of time t_s (also
 %   without plots); flush = true also associates the plots still waiting in
@@ -765,7 +765,7 @@ end
 
 function rowOf = hungarian(A)
 % Minimum-cost assignment of every row of A (n x m, n <= m) to its own column
-% (shortest augmenting paths with potentials, as in track_update.m).
+% (shortest augmenting paths with potentials, as in track_ekf.m).
 [n, m] = size(A);
 u = zeros(n+1, 1);  v = zeros(m+1, 1);
 p = zeros(m+1, 1);  way = zeros(m+1, 1);

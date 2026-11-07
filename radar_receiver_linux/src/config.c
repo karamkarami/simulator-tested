@@ -270,6 +270,16 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         cfg->trainDoppler = get_int(&rs, "trainDoppler");
         cfg->nTrain       = get_int(&rs, "nTrain");
         cfg->cfarMethod   = get_int(&rs, "cfarMethod");
+        {                                              /* optional: CA in older files */
+            const Record *r = find_optional(&rs, "cfarType");
+            cfg->cfarType = (r && r->rows * r->cols >= 1) ? (int)lround(r->data[0]) : CFAR_CA;
+            r = find_optional(&rs, "cfarNHalf");
+            cfg->cfarNHalf = (r && r->rows * r->cols >= 1) ? (int)lround(r->data[0]) : 0;
+            r = find_optional(&rs, "cfarOsK");
+            cfg->cfarOsK = (r && r->rows * r->cols >= 1) ? (int)lround(r->data[0]) : 0;
+            r = find_optional(&rs, "cfarNoiseScale");
+            cfg->cfarNoiseScale = (r && r->rows * r->cols >= 1) ? r->data[0] : 1.0;
+        }
         cfg->alpha        = get_scalar(&rs, "alpha");
         cfg->nLooks       = get_scalar(&rs, "nLooks");
         cfg->sidelobeMargin_dB = get_scalar(&rs, "sidelobeMargin_dB");
@@ -332,6 +342,10 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         }
         if (!rs.failed && (cfg->cfarMethod < CFAR_2D || cfg->cfarMethod > CFAR_DOPPLER))
             set_error(&rs, "invalid CFAR method in the configuration");
+        if (!rs.failed && (cfg->cfarType < CFAR_CA || cfg->cfarType > CFAR_OS || !(cfg->cfarNoiseScale > 0.0) ||
+                           ((cfg->cfarType == CFAR_GO || cfg->cfarType == CFAR_SO) && cfg->cfarNHalf < 1) ||
+                           (cfg->cfarType == CFAR_OS && (cfg->cfarOsK < 1 || cfg->cfarOsK > cfg->nTrain))))
+            set_error(&rs, "invalid CFAR detector (type, half window, rank or noise scale) in the configuration");
         if (!rs.failed) {                                  /* CFAR window */
             const int gR = cfg->guardRange, oR = gR + cfg->trainRange;
             const int gD = cfg->guardDoppler, oD = gD + cfg->trainDoppler;

@@ -386,17 +386,35 @@ sys.dop.nLooks = min(nLooks(tested));
 L = sys.dop.nLooks;
 sys.dop.medianToMean = fzero(@(x) gammainc(L*x, L) - 0.5, [0.1 2]);
 
-%% CFAR threshold of the selected method
+%% CFAR threshold of the selected detector and window
 c = sys.cfar;
 nOuter = (2*(c.guardRange + c.trainRange) + 1) * (2*(c.guardDoppler + c.trainDoppler) + 1);
 nGuard = (2*c.guardRange + 1) * (2*c.guardDoppler + 1);
 sys.cfar.nTrain = nOuter - nGuard;
+% GO / SO: cells per half window (2-D and range: leading / lagging in range,
+% without the training cells on the range of the cell; Doppler: below / above)
+oR = c.guardRange + c.trainRange;  oD = c.guardDoppler + c.trainDoppler;
+if strcmp(c.method, 'doppler')
+    sys.cfar.nHalf = c.trainDoppler;
+else
+    sys.cfar.nHalf = oR * (2*oD + 1) - c.guardRange * (2*c.guardDoppler + 1);
+end
+sys.cfar.osK = min(sys.cfar.nTrain, max(1, round(c.osRank * sys.cfar.nTrain)));   % OS: rank of the statistic
+if any(strcmp(c.type, {'go', 'so'})) && sys.cfar.nHalf < 1
+    error('cfg.cfar.type = ''%s'' needs training cells on both sides of the cell (cfg.cfar.%s).', c.type, c.method);
+end
 if isempty(c.threshold_dB)
-    sys.cfar.alpha = cfar_alpha(c.pfa, sys.cfar.nTrain, sys.dop.nLooks);
+    sys.cfar.alpha = cfar_alpha(c.pfa, sys.cfar, sys.dop.nLooks);
 else
     sys.cfar.alpha = 10^(c.threshold_dB/10);
 end
-sys.cfar.pfa = cfar_pfa(sys.cfar.alpha, sys.cfar.nTrain, sys.dop.nLooks);   % of the threshold in use
+sys.cfar.pfa = cfar_pfa(sys.cfar.alpha, sys.cfar, sys.dop.nLooks);   % of the threshold in use
+% mean of the statistic for noise of mean 1: the noise estimate of a cell is statistic / noiseScale
+sys.cfar.noiseScale = 1;
+if ~strcmp(c.type, 'ca')
+    [zq, wq] = cfar_quadrature(sys.dop.nLooks);
+    sys.cfar.noiseScale = sum(wq .* (1 - cfar_statistic(zq, sys.cfar, sys.dop.nLooks)));
+end
 if 2*(c.guardDoppler + c.trainDoppler) + 1 > nfft
     error('CFAR Doppler window (%d bins) is larger than the FFT length (%d).', ...
           2*(c.guardDoppler + c.trainDoppler) + 1, nfft);
@@ -471,10 +489,20 @@ end
 end
 
 function w = cfar_window(cfg)
-% Window and threshold settings of the selected CFAR method, as a range x Doppler window.
+% Detector, window and threshold settings of the selected CFAR method, as a range x Doppler window.
 c = cfg.cfar;
 w.method = lower(c.method);
 w.notchWidth = c.notchWidth;
+w.type = 'ca';                                     % detector: cfg.cfar.type
+if isfield(c, 'type') && ~isempty(c.type), w.type = lower(c.type); end
+if ~any(strcmp(w.type, {'ca', 'go', 'so', 'os'}))
+    error('cfg.cfar.type must be ''ca'', ''go'', ''so'' or ''os''.');
+end
+w.osRank = 0.75;
+if isfield(c, 'osRank') && ~isempty(c.osRank), w.osRank = c.osRank; end
+if ~(w.osRank > 0 && w.osRank <= 1)
+    error('cfg.cfar.osRank must lie in (0, 1].');
+end
 switch w.method
     case '2d'
         m = c.twoD;
@@ -492,6 +520,8 @@ switch w.method
     otherwise
         error('cfg.cfar.method must be ''2d'', ''range'' or ''doppler''.');
 end
+w.windowLabel = w.label;
+w.label = [upper(w.type) ' ' w.label];             % e.g. 'CA 2-D', 'OS 1-D range'
 w.pfa = m.pfa;
 w.threshold_dB = m.threshold_dB;
 end

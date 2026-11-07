@@ -28,12 +28,14 @@ extern "C" {
 
 enum { PULSE_SHORT = 0, PULSE_LONG = 1, N_PULSES = 2 };
 enum { MF_AUTO = 0, MF_DIRECT = 1, MF_FFT = 2 };
-enum { CFAR_2D = 0, CFAR_RANGE = 1, CFAR_DOPPLER = 2 };
+enum { CFAR_2D = 0, CFAR_RANGE = 1, CFAR_DOPPLER = 2 };        /* window (cfg.cfar.method)  */
+enum { CFAR_CA = 0, CFAR_GO = 1, CFAR_SO = 2, CFAR_OS = 3 };     /* detector (cfg.cfar.type)  */
 enum { TRACK_CV = 0, TRACK_CA = 1 };
 enum { WAVE_LFM = 0, WAVE_PHASE_CODE = 1 };
 enum { COMPRESSION_MATCHED = 0, COMPRESSION_MISMATCH = 1 };
 enum { SNR_NOISE_MEDIAN = 0, SNR_NOISE_CFAR = 1 };   /* noise floor of the SNR of the reports */
 const char *cfar_method_name(int method);   /* "2-D", "1-D range", "1-D Doppler" */
+const char *cfar_type_name(int type);       /* "CA", "GO", "SO", "OS" */
 
 typedef struct {
     int     rxFirst;       /* receive interval of this sub-pulse: DDC samples rxFirst ... */
@@ -95,9 +97,15 @@ typedef struct {
     double  medianToMean;  /* median / mean of the noise power (noise floor estimate) */
 
     /* CFAR, pruning, plot extraction */
+    int     cfarType;      /* detector CFAR_CA, CFAR_GO, CFAR_SO or CFAR_OS (cfar.c; optional
+                              in the file: CA)                                            */
     int     cfarMethod;    /* CFAR_2D, CFAR_RANGE or CFAR_DOPPLER: the window below   */
     int     guardRange, trainRange, guardDoppler, trainDoppler, nTrain;
-    double  alpha;         /* CA-CFAR threshold factor (design value from cfg.cfar.pfa) */
+    int     cfarNHalf;     /* GO, SO: training cells per half window                  */
+    int     cfarOsK;       /* OS: rank of the statistic (of nTrain)                    */
+    double  cfarNoiseScale;  /* mean of the statistic for unit noise (noise estimate =
+                                statistic / this; 1 for CA)                            */
+    double  alpha;         /* CFAR threshold factor (design value from cfg.cfar.pfa)  */
     double  nLooks;        /* looks of the noise power in a cell (for cfar_pfa)       */
     double  sidelobeMargin_dB;
     int     snrNoise;      /* SNR = power / noise - 1 of the reports with the noise of
@@ -261,14 +269,16 @@ void processor_flush(Processor *p, const ProcessorCallbacks *cb);   /* close all
  * (so the CPI buffers stay complete), their Doppler/CFAR/extraction updates
  * are skipped. Used by the input loop when it falls behind the stream. */
 void processor_set_slow_time(Processor *p, int enabled);
-/* CA-CFAR threshold factor used from the next CPI update on (starts at
- * cfg->alpha). threshold [dB] = 10*log10(alpha). Call from the processing thread. */
+/* CFAR threshold factor (of the configured detector) used from the next
+ * CPI update on (starts at cfg->alpha). threshold [dB] = 10*log10(alpha).
+ * Call from the processing thread. */
 void   processor_set_cfar_alpha(Processor *p, double alpha);
 double processor_cfar_alpha(const Processor *p);
-/* False alarm probability of the CA-CFAR with factor alpha (inverse of
- * cfar_alpha.m): I(1/(1 + alpha/nTrain); nTrain*nLooks, nLooks). NaN if
- * nLooks <= 0. */
-double cfar_pfa(double alpha, int nTrain, double nLooks);
+/* False alarm probability of the configured CFAR detector (cfg->cfarType,
+ * window, nLooks) with factor alpha (cfar.c, as cfar_pfa.m; the inverse of
+ * cfar_alpha.m): CA I(1/(1 + alpha/nTrain); nTrain*nLooks, nLooks), GO, SO
+ * and OS by numerical integration. NaN if nLooks <= 0. */
+double cfar_pfa(const RadarConfig *cfg, double alpha);
 void processor_timing(const Processor *p, ProcessorTiming *t);
 int  processor_threads(const Processor *p);    /* processing threads (OpenMP team size) */
 void processor_destroy(Processor *p);
