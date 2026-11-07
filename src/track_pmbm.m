@@ -35,9 +35,11 @@ function tr = track_pmbm(tr, plots, t_s, flush)
 %   below p.pmbm.logHypPrune or beyond p.pmbm.maxHyp are dropped, tracks
 %   whose existence (sum over the global hypotheses) is below p.pmbm.rDelete
 %   are deleted. Speed gate (p.minSpeed_mps) and maxMiss as with the EKF.
-%   Confirmation: the existence probability of the track over all global
-%   hypotheses is at least p.pmbm.rConfirm and it has at least
-%   p.confirmHits plots in the most likely one (it stays confirmed). The tracks shown are those of the most likely global
+%   Confirmation: the probability that a target made the newest plot of the
+%   track (sum over all global hypotheses of the existence of the track that
+%   holds this plot as its newest one, whatever its earlier plots) is at
+%   least p.pmbm.rConfirm, and the track has at least p.confirmHits plots in
+%   the most likely hypothesis (it stays confirmed). The tracks shown are those of the most likely global
 %   hypothesis; when it changes, a confirmed track that is no longer in it
 %   hands its number (and its confirmation) to the track of the new one that
 %   holds its newest plot (the same target, another history: e.g. its first
@@ -59,7 +61,8 @@ function tr = track_pmbm(tr, plots, t_s, flush)
 %
 %   Output as the EKF: tr.tracks (the tracks of the most likely global
 %   hypothesis: id, confirmed, x = the IMM estimate [position; velocity;
-%   acceleration; turn rate], P, t, hits, misses, r = existence, mu = model
+%   acceleration; turn rate], P, t, hits, misses, r = probability that a
+%   target made its newest plot (its existence), mu = model
 %   probabilities) and tr.log (one row per plot that updates a track of the
 %   most likely hypothesis: [time id confirmed x y z vx vy vz hits plotIndex]).
 
@@ -218,7 +221,7 @@ for j = 1:nPl                                       % new tracks, one per plot
     born = new_sth(Z(:, j), Zvr(j), B(j, :), rNew(j), p);
     born.batch = tr.batch;
     born.tNext = next_look(born, p);
-    tr.T(end+1) = struct('id', 0, 'confirmed', false, 'h', [empty_sth(), born], 'rMarg', rNew(j), ...
+    tr.T(end+1) = struct('id', 0, 'confirmed', false, 'h', [empty_sth(), born], 'rMarg', rNew(j), 'rTarget', 0, ...
                          'plot', B(j, 5));
 end
 tr.G = newRows;
@@ -314,6 +317,23 @@ for i = 1:numel(tr.T)
     tr.T(i).h = tr.T(i).h(used);
     tr.G(:, i) = idx;
 end
+% probability that a target made a plot: sum over the global hypotheses of
+% the existence of the track that holds it as its newest plot (whatever its
+% earlier plots: the hypotheses may differ only in the history of a target)
+w = exp(tr.logw);
+pl = zeros(0, 1);  pw = zeros(0, 1);
+for i = 1:numel(tr.T)
+    H = tr.T(i).h;
+    for g = 1:numel(w)
+        sth = H(tr.G(g, i));
+        if sth.r > 0
+            pl(end+1, 1) = sth.plot; %#ok<AGROW>
+            pw(end+1, 1) = w(g) * sth.r; %#ok<AGROW>
+        end
+    end
+end
+[up, ~, k] = unique(pl);
+pSum = accumarray(k, pw, [numel(up) 1]);
 % track numbers (in the order of their first plot) and confirmation
 [~, best] = max(tr.logw);
 [~, o] = sort([tr.T.plot]);
@@ -322,9 +342,12 @@ for i = o
         tr.T(i).id = tr.nextId;
         tr.nextId = tr.nextId + 1;
     end
+    tr.T(i).rTarget = 0;
     if isempty(best), continue; end
     sth = tr.T(i).h(tr.G(best, i));
-    if sth.r > 0 && tr.T(i).rMarg >= m.rConfirm && sth.hits >= p.confirmHits
+    if sth.r <= 0, continue; end
+    tr.T(i).rTarget = min(1, pSum(up == sth.plot));
+    if tr.T(i).rTarget >= m.rConfirm && sth.hits >= p.confirmHits
         tr.T(i).confirmed = true;
     end
 end
@@ -360,7 +383,7 @@ if ~isempty(tr.logw) && ~isempty(tr.T)
         if sth.r <= 0, continue; end
         [x, P] = imm_estimate(sth);
         tk(end+1) = struct('id', tr.T(i).id, 'confirmed', tr.T(i).confirmed, 'x', x, 'P', P, 't', sth.t, ...
-                           'hits', sth.hits, 'misses', sth.misses, 'r', tr.T(i).rMarg, 'mu', sth.mu); %#ok<AGROW>
+                           'hits', sth.hits, 'misses', sth.misses, 'r', tr.T(i).rTarget, 'mu', sth.mu); %#ok<AGROW>
         if sth.batch == tr.batch && sth.plot > tr.logged   % updated by a plot of this batch
             xyz = zeros(1, 6);
             xyz([1:d, 4:3+d]) = x(1:2*d).';

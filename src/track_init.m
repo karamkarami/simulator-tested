@@ -11,7 +11,7 @@ tr.pendingLast = -Inf;
 if isfield(params, 'method') && strcmp(params.method, 'pmbm')
     tr.tracks = struct('id', {}, 'confirmed', {}, 'x', {}, 'P', {}, 't', {}, 'hits', {}, 'misses', {}, ...
                        'r', {}, 'mu', {});
-    tr.T = struct('id', {}, 'confirmed', {}, 'h', {}, 'rMarg', {}, 'plot', {});   % Bernoulli components
+    tr.T = struct('id', {}, 'confirmed', {}, 'h', {}, 'rMarg', {}, 'rTarget', {}, 'plot', {});   % Bernoulli components
     tr.G = zeros(1, 0);        % global hypotheses: STH of every track (one row each)
     tr.logw = 0;               % their log weights
     tr.batch = 0;              % batches associated

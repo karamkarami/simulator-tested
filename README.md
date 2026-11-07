@@ -623,7 +623,9 @@ there, at the same beam and Doppler, behind very strong far targets.
   beyond 25, single-target hypotheses below `rPrune`, tracks whose
   existence (over all global hypotheses) is below `rDelete` (1e-4), as well
   as after `maxMiss` / `maxMissTentative` missed scans and with the speed
-  gate as the EKF. A track is confirmed when its existence is at least
+  gate as the EKF. A track is confirmed when the probability that a target
+  made its newest plot (the sum over all global hypotheses of the existence
+  of the track holding that plot, whatever its earlier plots) is at least
   `rConfirm` (0.9) and it has `confirmHits` (3) plots in the most likely
   global hypothesis; the tracks shown and logged are those of the most
   likely global hypothesis. When that hypothesis changes (e.g. the first plot

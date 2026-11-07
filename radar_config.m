@@ -276,9 +276,10 @@ cfg.track.minSpeed_mps    = 5;       % minimum speed of a track when minSpeedEna
 % Bernoulli once per scan: when it passes its predicted azimuth without a
 % plot the Bernoulli is missed (r falls with pd). Track = Bernoulli; the
 % tracks shown are those of the most likely global hypothesis (with their
-% state). A track is confirmed when its existence probability over all
-% global hypotheses is at least rConfirm and it has confirmHits plots in
-% the most likely one; when the most likely hypothesis changes, the track
+% state). A track is confirmed when the probability that a target made its
+% newest plot (over all global hypotheses, whatever the earlier plots of
+% that target) is at least rConfirm and it has confirmHits plots in the
+% most likely hypothesis; when the most likely hypothesis changes, the track
 % that holds the newest plot of a confirmed track takes its number and
 % confirmation (the same target with another history). It is deleted when its existence probability over all
 % global hypotheses falls below rDelete (or after maxMiss / maxMissTentative
@@ -299,7 +300,7 @@ cfg.track.pmbm.maxClimb_mps      = 100;    % 3-D: vertical velocity uncertainty 
 cfg.track.pmbm.maxHypotheses     = 25;     % global hypotheses kept
 cfg.track.pmbm.hypPrune          = 1e-3;   % global hypotheses below this weight (of the best one) are dropped
 cfg.track.pmbm.rPrune            = 1e-5;   % single-target hypotheses below this existence probability: no target
-cfg.track.pmbm.rConfirm          = 0.9;    % existence probability that confirms a track (with confirmHits plots)
+cfg.track.pmbm.rConfirm          = 0.9;    % probability of a target that confirms a track (with confirmHits plots)
 cfg.track.pmbm.rDelete           = 1e-4;   % a track whose existence probability falls below is deleted (a
                                            % low value keeps the evidence of a new track that was missed once
                                            % in dense false plots; maxMissTentative / maxMiss end it as well)
