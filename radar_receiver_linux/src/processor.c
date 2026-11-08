@@ -120,6 +120,19 @@ struct Processor {
     double lastTime;            /* time of the newest PRI                          */
     int havePulse;
     ProcessorTiming timing;
+    /* display taps (processor_set_profile, processor_set_rdmap) */
+    int profileKind, profileBeam;
+    int rdEnabled, rdBeam;
+    double rdPeriod_s, rdLast;
+    int nBins;                  /* range bins of the taps (dR from 0 to maxRange)  */
+    double dR;
+    float *profile;             /* [nBins]                                         */
+    int *profileCnt;            /* [nBins]                                         */
+    float *rd;                  /* [nfft][nBins]                                   */
+    double *rdVel;              /* [nfft]                                          */
+    Detection *rdDets;
+    int nRdDets, capRdDets, rdUpdated;
+    float *rdWork;
 };
 
 /* ------------------------------------------------------------------------ */
@@ -307,6 +320,7 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
 void processor_destroy(Processor *p)
 {
     if (!p) return;
+    free(p->profile); free(p->profileCnt); free(p->rd); free(p->rdVel); free(p->rdDets); free(p->rdWork);
     for (int i = 0; i < N_PULSES; i++) {
         PulseState *s = &p->ps[i];
         free(s->segRe); free(s->segIm); free(s->beamRe); free(s->beamIm);
@@ -1153,6 +1167,135 @@ static void peak_interpolation(const Processor *p, int pulse, PulseState *s)
 }
 
 /* ------------------------------------------------------------------------ */
+/* Display taps: profile of a beam after DBF / pulse compression, range-     */
+/* Doppler map of a beam                                                     */
+/* ------------------------------------------------------------------------ */
+
+static void taps_alloc(Processor *p)
+{
+    if (p->profile) return;
+    const RadarConfig *cfg = p->cfg;
+    p->dR = 299792458.0 / (2.0 * cfg->fsOut_Hz);
+    p->nBins = (int)ceil(cfg->maxRange_m / p->dR);
+    if (p->nBins < 1) p->nBins = 1;
+    p->profile = xcalloc((size_t)p->nBins, sizeof(float));
+    p->profileCnt = xcalloc((size_t)p->nBins, sizeof(int));
+    p->rd = xcalloc((size_t)p->nBins * cfg->nfft, sizeof(float));
+    p->rdVel = xcalloc((size_t)cfg->nfft, sizeof(double));
+    p->rdWork = xcalloc((size_t)p->nBins * cfg->nfft + 1, sizeof(float));
+    for (int d = 0; d < cfg->nfft; d++) p->rdVel[d] = -cfg->dopFreq_Hz[d] * cfg->pulse[PULSE_LONG].lambda_m / 2;
+}
+
+void processor_set_profile(Processor *p, int kind, int beam)
+{
+    if (beam < 0 || beam >= p->cfg->nBeams) beam = 0;
+    p->profileKind = kind == PROFILE_DBF || kind == PROFILE_MF ? kind : PROFILE_NONE;
+    p->profileBeam = beam;
+    if (p->profileKind) taps_alloc(p);
+}
+
+void processor_set_rdmap(Processor *p, int enabled, int beam, double minPeriod_s)
+{
+    if (beam < 0 || beam >= p->cfg->nBeams) beam = 0;
+    if (enabled && (!p->rdEnabled || beam != p->rdBeam)) {   /* a new map: no old cells */
+        taps_alloc(p);
+        memset(p->rd, 0, sizeof(float) * (size_t)p->nBins * p->cfg->nfft);
+        p->nRdDets = 0;
+        p->rdLast = -1e300;
+    }
+    p->rdEnabled = enabled != 0;
+    p->rdBeam = beam;
+    p->rdPeriod_s = minPeriod_s;
+}
+
+/* Range bin of a range (-1 outside the taps). */
+static int tap_bin(const Processor *p, double r)
+{
+    const int b = (int)floor(r / p->dR);
+    return b >= 0 && b < p->nBins ? b : -1;
+}
+
+/* Adds |x|^2 of the selected beam after DBF (pulse compression input inside the
+ * receive interval) or after the pulse compression to the profile. */
+static void profile_add(Processor *p, int pulse, const PulseState *s)
+{
+    const RadarConfig *cfg = p->cfg;
+    const PulseConfig *pc = &cfg->pulse[pulse];
+    const double handover = cfg->pulse[PULSE_LONG].range_m[0];
+    const int b = p->profileBeam;
+    if (p->profileKind == PROFILE_DBF) {
+        const int n = pc->ddcCount;
+        const float *xr = s->beamRe + (size_t)b * n, *xi = s->beamIm + (size_t)b * n;
+        for (int k = 0; k < pc->rxCount; k++) {
+            const int j = pc->rxFirst + k - pc->ddcFirst;        /* segment index of rx sample k */
+            const double r = pc->range_m[0] + k * p->dR;
+            if (pulse == PULSE_SHORT && !(r < handover)) break;
+            const int bin = tap_bin(p, r);
+            if (bin < 0 || j < 0 || j >= n) continue;
+            p->profile[bin] += xr[j] * xr[j] + xi[j] * xi[j];
+            p->profileCnt[bin]++;
+        }
+    } else {
+        const float *yr = s->cpiRe + (size_t)s->mfLast * s->nCells + (size_t)b * s->nR;
+        const float *yi = s->cpiIm + (size_t)s->mfLast * s->nCells + (size_t)b * s->nR;
+        for (int r = 0; r < s->nR; r++) {
+            if (pulse == PULSE_SHORT && !(pc->range_m[r] < handover)) break;
+            const int bin = tap_bin(p, pc->range_m[r]);
+            if (bin < 0) continue;
+            p->profile[bin] += yr[r] * yr[r] + yi[r] * yi[r];
+            p->profileCnt[bin]++;
+        }
+    }
+}
+
+/* The cells of the selected beam of a sub-pulse's map into the joined range-Doppler map. */
+static void rdmap_add(Processor *p, int pulse, const PulseState *s)
+{
+    const RadarConfig *cfg = p->cfg;
+    const PulseConfig *pc = &cfg->pulse[pulse];
+    const double handover = cfg->pulse[PULSE_LONG].range_m[0];
+    const int b = p->rdBeam, nfft = cfg->nfft;
+    for (int r = 0; r < s->nR; r++) {
+        if (pulse == PULSE_SHORT && !(pc->range_m[r] < handover)) break;
+        const int bin = tap_bin(p, pc->range_m[r]);
+        if (bin < 0) continue;
+        for (int d = 0; d < nfft; d++) p->rd[(size_t)d * p->nBins + bin] = P_at(s, d, b, r);
+    }
+    for (int i = 0; i < s->nReports; i++) {                /* the reports of this beam */
+        if (s->reports[i].beam != b) continue;
+        if (p->nRdDets == p->capRdDets) {
+            p->capRdDets = p->capRdDets ? 2 * p->capRdDets : 64;
+            p->rdDets = xrealloc(p->rdDets, sizeof(Detection) * p->capRdDets);
+        }
+        p->rdDets[p->nRdDets++] = s->reports[i];
+    }
+    p->rdUpdated = 1;
+}
+
+static void rdmap_post(Processor *p, const PriData *pri, const ProcessorCallbacks *cb)
+{
+    const RadarConfig *cfg = p->cfg;
+    const size_t n = (size_t)p->nBins * cfg->nfft;
+    size_t m = 0;
+    for (size_t i = 0; i < n; i++) if (p->rd[i] > 0) p->rdWork[m++] = p->rd[i];
+    RdMap map;
+    memset(&map, 0, sizeof map);
+    map.beam = p->rdBeam;
+    map.nBins = p->nBins;
+    map.nfft = cfg->nfft;
+    map.dR_m = p->dR;
+    map.power = p->rd;
+    map.vel_mps = p->rdVel;
+    map.notchBins = cfg->notchBins;
+    map.noise = m ? select_kth(p->rdWork, (int)m, (int)(m / 2)) : 0.0;
+    map.time_s = pri->time_s;
+    map.az_deg = pri->az_deg;
+    map.dets = p->rdDets;
+    map.nDets = p->nRdDets;
+    cb->rdmap(cb->user, &map);
+}
+
+/* ------------------------------------------------------------------------ */
 /* One PRI                                                                  */
 /* ------------------------------------------------------------------------ */
 
@@ -1267,6 +1410,14 @@ void processor_process(Processor *p, const PriData *pri, const ProcessorCallback
     if (cb && cb->antenna) cb->antenna(cb->user, pri->az_deg, pri->time_s, pri->scanNumber);
 
     const double tStart = now_seconds();
+    const int profileKind = cb && cb->profile ? p->profileKind : PROFILE_NONE;
+    const int rdOn = cb && cb->rdmap && p->rdEnabled && pri->time_s - p->rdLast >= p->rdPeriod_s;
+    if (profileKind) {
+        memset(p->profile, 0, sizeof(float) * (size_t)p->nBins);
+        memset(p->profileCnt, 0, sizeof(int) * (size_t)p->nBins);
+    }
+    if (p->rdEnabled && pri->time_s < p->rdLast) p->rdLast = -1e300;   /* a new run */
+    if (rdOn) { p->nRdDets = 0; p->rdUpdated = 0; }
     for (int i = 0; i < N_PULSES; i++) {
         const PulseConfig *pc = &cfg->pulse[i];
         PulseState *s = &p->ps[i];
@@ -1276,9 +1427,11 @@ void processor_process(Processor *p, const PriData *pri, const ProcessorCallback
         load_segment(cfg, pc, pri, s);
         beamform(cfg, pc, s, p->nThreads);
         p->timing.dbf_ms += elapsed_ms(&t0);
+        if (profileKind == PROFILE_DBF) profile_add(p, i, s);   /* (the display's time, not the block's) */
         const int slot = (s->last + 1) % s->nSlots;
         s->mfLast = (s->mfLast + 1) % cfg->nMtiTaps;
         matched_filter(cfg, pc, s, s->mfLast, p->nThreads);
+        if (profileKind == PROFILE_MF) profile_add(p, i, s);
         s->last = slot;
         s->staggerIdx[slot] = pri->staggerIndex >= 1 && pri->staggerIndex <= cfg->nStagger ? pri->staggerIndex : 1;
         s->az[slot] = pri->az_deg;
@@ -1308,12 +1461,21 @@ void processor_process(Processor *p, const PriData *pri, const ProcessorCallback
         p->timing.cfar_ms += elapsed_ms(&t0);
         peak_interpolation(p, i, s);
         p->timing.interp_ms += elapsed_ms(&t0);
+        if (rdOn) rdmap_add(p, i, s);
         if (cb && cb->detections) cb->detections(cb->user, i, s->reports, s->nReports);
         t0 = now_seconds();
         extractor_update(&s->ext, s->reports, s->nReports, 0, plot_callback, p);
         p->timing.extract_ms += elapsed_ms(&t0);
         plots_out(p, cb);
         if (i == 0) p->timing.updates++;
+    }
+    if (profileKind) {                                     /* mean of the samples in every bin */
+        for (int b = 0; b < p->nBins; b++) p->profile[b] = p->profileCnt[b] ? p->profile[b] / p->profileCnt[b] : 0.0f;
+        cb->profile(cb->user, profileKind, p->profile, p->nBins, p->dR, pri->az_deg, pri->time_s);
+    }
+    if (rdOn && p->rdUpdated) {
+        rdmap_post(p, pri, cb);
+        p->rdLast = pri->time_s;
     }
     run_tracker(p, pri->time_s, 0, cb);                    /* plots of this PRI, missed scans, deletion */
     p->timing.total_ms += (now_seconds() - tStart) * 1e3;

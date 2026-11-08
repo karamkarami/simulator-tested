@@ -247,7 +247,8 @@ file was built for other values (for example after you change
 | `src/prune_peaks.m`, `detection_reports.m`, `plot_extractor*.m` | pruning (local peaks, sidelobes) and plot extraction |
 | `src/peak_interpolation.m` | interpolation of the detected peaks: radial velocity across the Doppler bins, elevation across the beams (`cfg.report.dopplerInterp`, `elevationInterp`) |
 | `src/ppi_init.m`, `ppi_update.m`, `ppi_callbacks.m` | interactive PPI display |
-| `src/ppi_video_init.m`, `ppi_video_add.m`, `ppi_video_image.m`, `ppi_video_colormap.m` | raw video of the PPI (display mode *Video*) |
+| `src/ppi_video_init.m`, `ppi_video_add.m`, `ppi_video_add_row.m`, `ppi_video_reset.m`, `ppi_video_image.m`, `ppi_video_colormap.m` | raw data map of the PPI (display modes *Video*, *DBF out*, *MF out*) |
+| `src/ppi_profile_row.m`, `ppi_rd_map.m` | DBF / pulse compression output of the selected beam joined in range (*DBF out*, *MF out*); range-Doppler map of the selected beam (second tab of the PPI) |
 | `src/detection_log_init.m`, `detection_log_add.m` | CFAR detections kept for the PPI |
 | `src/cfar_pfa.m` | false alarm probability of a CFAR threshold of any detector (inverse of `cfar_alpha.m`) |
 | `src/snr_budget.m`, `print_snr_budget.m` | expected SNR after every block (incl. STC, ADC noise and DDC rounding; blind speeds marked) |
@@ -762,8 +763,25 @@ The PPI (`ppi_init.m`) is interactive, also while the simulation runs:
 | click on a plot or detection | pin its data tip (click again to remove it) |
 | keys `+` `-`, arrows | zoom, pan |
 | key `c` | remove the pinned data tips |
-| key `d` | next display mode (plots / detections / both / video) |
+| key `d` | next display mode (plots / detections / both / video / DBF out / MF out) |
 | key space | pause/resume the display (the simulation continues) |
+
+The figure opens maximized and has two tabs (buttons above the display;
+start value `cfg.display.tab`, `'ppi'` or `'rd'`). **PPI**: the PPI as
+below. **Range-Doppler (selected beam)**: the range-Doppler map of the beam
+chosen under *Beam* (both sub-pulses joined in range like the video, after
+the MTI, the Doppler FFT and the noise-gain equalisation, i.e. the map the
+CFAR tests), colour = dB above the noise floor of the map (its median), from
+-3 dB (black) to the strongest cell (at least 20 dB), with a colour scale,
+the CFAR detections of that beam as white circles and the MTI notch as
+dashed lines. Below it the Doppler spectrum (dB) of one range bin: the bin
+under the cursor, else the bin of the strongest detection (or the strongest
+cell), so a peak and the shape of the spectrum around it (Doppler mainlobe,
+sidelobes, clutter residue near zero) are seen directly; hovering over the
+map shows the range, velocity and power of the cell. The PPI is drawn small
+next to the map, so both can be watched live. The map is taken from the
+processing only while this tab is shown (at the display updates); the panel
+on the right serves both tabs.
 
 The panel on the right has:
 * **Show**: *Plots (after extractor)*, the plots of the plot extractor as
@@ -792,6 +810,23 @@ The panel on the right has:
   in the corner. A pixel shows the largest range bin under it, so a small
   echo does not disappear when zoomed out. The video costs about 0.3 ms per
   PRI in MATLAB and is computed only while it is shown (display time).
+  *DBF out* and *MF out*: the same kind of display for the beam chosen
+  under **Beam** (default 1; the list shows the elevation of every beam
+  after the DBF). *DBF out*: in every PRI the output of the beamformer of
+  that beam, |x|^2 of the pulse compression input of the short and of the
+  long sub-pulse inside their receive intervals; *MF out*: |y|^2 of the
+  pulse compression output (the matched filter, or the mismatch filter of a
+  phase code) of both sub-pulses. Both are joined like the video (the short
+  pulse up to the first long-pulse range cell, then the long pulse) and drawn
+  at the antenna azimuth, colour = power above the noise floor. One complex
+  sample per range bin has an exponential power distribution, so its noise
+  floor is the 10th percentile + 9.77 dB. A target is a short arc in *MF
+  out*, while in *DBF out* its uncompressed echo is spread over the pulse
+  length (22.5 km for the long pulse) and only a strong one stands out. The
+  profile is computed only while one of these modes is shown (display time);
+  changing the mode or the beam starts an empty map.
+* **Beam**: the beam after the DBF of *DBF out*, *MF out* and of the
+  range-Doppler tab (start value `cfg.display.beam`, default 1).
 * show/hide of the short- and long-pulse data, the true targets, range
   rings, plot labels (range and velocity next to each plot), the antenna and
   the **tracks**; a minimum SNR and a choice of what is shown (all, last

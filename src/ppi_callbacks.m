@@ -11,11 +11,16 @@ function out = ppi_callbacks(action, fig, varargin)
 %                                 (out = its text, '' if nothing is close)
 %     'pin', [x y]                pin (or remove) the data tip of the nearest object
 %     'key', evt                  + - arrows r c d space
-%     'option', name, value       showMode ('plots', 'detections', 'both' or 'video'),
+%     'option', name, value       showMode ('plots', 'detections', 'both', 'video',
+%                                 'dbf' or 'mf'), beam (1 ... beams),
 %                                 showShort, showLong, showTruth, showRings,
 %                                 showLabels, showAntenna, showTracks,
 %                                 minSnr_dB, history
 %     'timing'                    write the block processing times into the panel
+%     'tab', k                    tab 1 (PPI) or 2 (range-Doppler map of the
+%                                 selected beam, small PPI next to it)
+%     'rdhover', [range_km v]     readout and spectrum of the range-Doppler map at
+%                                 that point (out = the readout text)
 %     'reset' 'clear' 'cleartips' 'pause'   buttons of the panel
 %     'save' [, fileName]         save a screenshot of the PPI as a PNG file
 %                                 (without fileName: file dialog; out = file)
@@ -32,6 +37,12 @@ switch action
         S = redraw(S);
     case 'timing'
         show_timing(S);
+    case 'tab'
+        S.opt.tab = varargin{1};
+        S = layout_tab(S);
+        S = redraw(S);
+    case 'rdhover'
+        [S, out] = rd_hover(S, varargin{1});
     case 'scroll'
         evt = varargin{1};
         p = cursor_km(S);
@@ -61,6 +72,15 @@ switch action
                 S = set_limits(S, S.drag.xl - d(1)*k, S.drag.yl - d(2)*k);
             end
         else
+            if S.opt.tab == 2                               % over the range-Doppler map: readout, spectrum
+                q = get(S.h.rdAx, 'CurrentPoint');
+                xl = get(S.h.rdAx, 'XLim');  yl = get(S.h.rdAx, 'YLim');
+                if q(1, 1) >= xl(1) && q(1, 1) <= xl(2) && q(1, 2) >= yl(1) && q(1, 2) <= yl(2)
+                    [S, out] = rd_hover(S, q(1, 1:2));
+                    setappdata(fig, 'ppi', S);
+                    return
+                end
+            end
             p = cursor_km(S);
             S = show_cursor(S, p);
             [S, out] = hover(S, p);
@@ -80,7 +100,11 @@ switch action
     case 'option'
         S.opt.(varargin{1}) = varargin{2};
         if strcmp(varargin{1}, 'showMode')
-            set(S.h.ui.showMode, 'Value', find(strcmp(varargin{2}, {'plots', 'detections', 'both', 'video'})));
+            set(S.h.ui.showMode, 'Value', find(strcmp(varargin{2}, {'plots', 'detections', 'both', 'video', 'dbf', 'mf'})));
+        elseif strcmp(varargin{1}, 'beam')
+            set(S.h.ui.beam, 'Value', varargin{2});
+            S.data.rd = [];                                 % the map of the new beam comes with the next update
+            S.rdCursorBin = [];
         end
         S = redraw(S);
     case 'cfar'
@@ -167,7 +191,7 @@ else
 end
 
 % Plots that pass the filters (shown unless only the detections are selected)
-showVideo = strcmp(o.showMode, 'video');                   % raw video instead of plots and detections
+showVideo = any(strcmp(o.showMode, {'video', 'dbf', 'mf'}));   % raw data instead of plots and detections
 showPlots = ~strcmp(o.showMode, 'detections') && ~showVideo;
 showDets  = ~strcmp(o.showMode, 'plots') && ~showVideo;
 S = draw_video(S, showVideo);
@@ -227,6 +251,7 @@ S.visDet = struct('x', xd(showD), 'y', yd(showD), 'idx', find(showD).');
 
 % Tracks: hollow triangle at the last update (around its plot), velocity leader, number
 S = draw_tracks(S);
+S = draw_rd(S);
 show_timing(S);
 
 % Labels next to the plots
@@ -242,7 +267,11 @@ end
 counts = '';
 if showPlots, counts = sprintf('plots %d / %d   ', sum(show), nAll); end
 if showDets, counts = [counts sprintf('detections %d   ', sum(showD))]; end
-if showVideo, counts = sprintf('video (noise %.1f dB)   ', d.video.noise_dB); end
+if showVideo
+    what = 'video';
+    if ~strcmp(o.showMode, 'video'), what = sprintf('%s out, beam %d', upper(o.showMode), o.beam); end
+    counts = sprintf('%s (noise %.1f dB)   ', what, d.video.noise_dB);
+end
 if o.showTracks && ~isempty(d.tracks)
     counts = [counts sprintf('tracks %d   ', sum([d.tracks.confirmed]))];
 end
@@ -251,17 +280,145 @@ set(h.title, 'String', sprintf('Scan %d   t = %.2f s   az = %5.1f deg   %szoom x
 end
 
 function S = draw_video(S, on)
-% Raw video: the map as an image (transparent where there is no data), and its colour scale.
+% Raw data (video, DBF out, MF out): the map as an image (transparent where there is no data), and
+% its colour scale. The map must hold the data of the selected mode (and beam).
 h = S.h;
 vis = {'off', 'on'};
 set([h.video h.videoBar h.videoBarImg h.videoBarLabel], 'Visible', vis{1 + on});
 if ~on || ~isfield(S.data, 'video') || isempty(S.data.video), return; end
+V = S.data.video;
+names = struct('video', 'video', 'dbf', 'DBF out', 'mf', 'MF out');
+if strcmp(S.opt.showMode, 'video')
+    set(h.videoBarLabel, 'String', 'video [dB above noise]');
+else
+    set(h.videoBarLabel, 'String', sprintf('%s, beam %d [dB above noise]', names.(S.opt.showMode), S.opt.beam));
+end
+if ~isfield(V, 'kind') || ~strcmp(V.kind, S.opt.showMode) || (~strcmp(V.kind, 'video') && V.beam ~= S.opt.beam)
+    set(h.video, 'AlphaData', zeros(size(get(h.video, 'AlphaData'))));   % other data: not shown
+    return
+end
 tMin = S.opt.clearTime_s;
 if S.opt.history > 0
     tMin = max(tMin, S.data.t_s - S.opt.history * 360 / S.sys.ant.rate_dps);
 end
 [rgb, alpha] = ppi_video_image(S.data.video, tMin);
 set(h.video, 'CData', rgb, 'AlphaData', alpha, 'AlphaDataMapping', 'none');
+end
+
+function S = layout_tab(S)
+% Tab 1: the PPI over the whole display area. Tab 2: the range-Doppler map of the selected beam
+% with its colour scale and the Doppler spectrum on the left, the PPI small on the right.
+h = S.h;
+two = S.opt.tab == 2;
+vis = {'off', 'on'};
+set(h.tabBtn(1), 'Value', ~two, 'BackgroundColor', [0.12 0.12 0.12] + 0.13*~two);
+set(h.tabBtn(2), 'Value', two, 'BackgroundColor', [0.12 0.12 0.12] + 0.13*two);
+set([h.rdAx h.rdBar h.specAx], 'Visible', vis{1 + two});
+set([h.rdImg h.rdNotch h.rdDet h.rdCut h.rdInfo h.rdBarImg h.specLine h.specDet], 'Visible', vis{1 + two});
+labels = [get(h.rdAx, 'XLabel') get(h.rdAx, 'YLabel') h.rdTitle get(h.specAx, 'XLabel') get(h.specAx, 'YLabel') h.specTitle];
+set(labels, 'Visible', vis{1 + two});                      % (Octave shows them also on hidden axes)
+if two
+    set(S.ax, 'Position', [0.56 0.22 0.19 0.62]);
+    set(h.videoBar, 'Position', [0.59 0.87 0.15 0.012]);
+    set(h.legend, 'Visible', 'off');
+    set(h.title, 'FontSize', 8);
+else
+    set(S.ax, 'Position', h.axPos);
+    set(h.videoBar, 'Position', [0.57 0.872 0.15 0.012]);
+    set(h.legend, 'Visible', 'on');
+    set(h.title, 'FontSize', get(0, 'DefaultAxesFontSize') * 1.1);
+end
+end
+
+function S = draw_rd(S)
+% Range-Doppler map of the selected beam (tab 2): dB above the noise floor of the map (its
+% median), -3 dB (black) ... the strongest cell (at least 20 dB); the beam's CFAR detections
+% (circles), the MTI notch (dashed), and the Doppler spectrum of the range bin under the cursor
+% or else of the strongest detection (strongest cell).
+h = S.h;
+if S.opt.tab ~= 2, return; end
+rd = S.data.rd;
+if isempty(rd) || rd.beam ~= S.opt.beam || all(isnan(rd.P(:)))
+    set(h.rdTitle, 'String', sprintf('Range-Doppler map, beam %d: waiting for a CPI update ...', S.opt.beam));
+    set([h.rdImg h.specLine h.specDet h.rdDet h.rdNotch h.rdCut], 'Visible', 'off');
+    return
+end
+cols = find(any(~isnan(rd.P), 2));
+b0 = cols(1);  b1 = cols(end);
+dB = 10*log10(rd.P(b0:b1, :).' / rd.noise);              % [nfft x nBins]
+hi = max(20, ceil(max(dB(:)) / 5) * 5);  lo = -3;
+nB = b1 - b0 + 1;
+W = min(nB, 600);                                          % columns: the largest bin of each (peaks stay)
+if W < nB
+    e = floor((0:W) * nB / W);
+    D = NaN(size(dB, 1), W);
+    for c = 1:W, D(:, c) = max(dB(:, e(c)+1:max(e(c+1), e(c)+1)), [], 2); end
+else
+    D = dB;
+end
+cmap = S.data.video.cmap;
+k = round((D - lo) / (hi - lo) * 255) + 1;
+k = min(max(k, 1), 256);
+rgb = reshape(cmap(k(:), :), [size(D) 3]);
+rgb(repmat(isnan(D), [1 1 3])) = 0;
+x = [b0 - 0.5, b1 - 0.5] * rd.dR_m / 1e3;  y = rd.vel_mps([1 end]);
+set(h.rdImg, 'CData', rgb, 'XData', x, 'YData', y, 'Visible', 'on');
+dv = abs(diff(rd.vel_mps(1:2)));
+set(h.rdAx, 'XLim', [b0 - 1, b1] * rd.dR_m / 1e3, 'YLim', sort(y) + [-dv dv]/2);
+z = floor(numel(rd.vel_mps)/2) + 1;                        % zero Doppler
+yn = rd.vel_mps(z) + [1 -1] * (rd.notchBins + 0.5) * dv;
+xl = get(h.rdAx, 'XLim');
+set(h.rdNotch, 'XData', [xl NaN xl], 'YData', [yn(1) yn(1) NaN yn(2) yn(2)], 'Visible', 'on');
+if ~isempty(rd.dets)
+    set(h.rdDet, 'XData', rd.dets(:, 1).' / 1e3, 'YData', rd.vel_mps(rd.dets(:, 2)), 'Visible', 'on');
+else
+    set(h.rdDet, 'XData', NaN, 'YData', NaN);
+end
+set(h.rdBarImg, 'XData', [0 1], 'YData', [lo hi], 'Visible', 'on');
+set(h.rdBar, 'YLim', [lo hi], 'YTick', 0:10:hi);
+set(h.rdTitle, 'FontSize', 9, 'String', sprintf('Range-Doppler, beam %d   t = %.2f s   az %.1f deg   peak %.1f dB', ...
+    rd.beam, rd.t_s, rd.az_deg, max(dB(:))));
+% Doppler spectrum: the bin under the cursor, else the strongest detection, else the strongest cell
+bin = S.rdCursorBin;
+if isempty(bin) || bin < b0 || bin > b1
+    if ~isempty(rd.dets)
+        [~, i] = max(rd.dets(:, 3));
+        bin = floor(rd.dets(i, 1) / rd.dR_m) + 1;
+    else
+        [~, i] = max(rd.P(:));
+        [bin, ~] = ind2sub(size(rd.P), i);
+    end
+end
+s = 10*log10(rd.P(bin, :) / rd.noise);
+set(h.specLine, 'XData', rd.vel_mps, 'YData', s, 'Visible', 'on');
+m = [];
+if ~isempty(rd.dets), m = rd.dets(floor(rd.dets(:, 1) / rd.dR_m) + 1 == bin, 2); end
+set(h.specDet, 'XData', rd.vel_mps(m), 'YData', s(m), 'Visible', 'on');
+set(h.specAx, 'XLim', sort(rd.vel_mps([1 end])), 'YLim', [-10 max(hi, 10)]);
+set(h.rdCut, 'XData', [1 1] * (bin - 0.5) * rd.dR_m / 1e3, 'YData', get(h.rdAx, 'YLim'), 'Visible', 'on');
+src = 'strongest peak';  if ~isempty(S.rdCursorBin), src = 'cursor'; end
+set(h.specTitle, 'String', sprintf('Doppler spectrum at %.2f km (%s), circles: detections', ...
+    (bin - 0.5) * rd.dR_m / 1e3, src));
+end
+
+function [S, txt] = rd_hover(S, p)
+% Readout of the range-Doppler cell at p = [range_km velocity]; the spectrum follows the cursor.
+txt = '';
+rd = S.data.rd;
+if isempty(rd) || S.opt.tab ~= 2, return; end
+bin = floor(p(1) * 1e3 / rd.dR_m) + 1;
+[~, d] = min(abs(rd.vel_mps - p(2)));
+if bin < 1 || bin > size(rd.P, 1), return; end
+v = rd.P(bin, d);
+if isnan(v)
+    txt = sprintf('R %.2f km   v %.1f m/s   no cell', (bin - 0.5) * rd.dR_m / 1e3, rd.vel_mps(d));
+else
+    txt = sprintf('R %.2f km   v %.1f m/s   %.1f dB above noise', (bin - 0.5) * rd.dR_m / 1e3, rd.vel_mps(d), ...
+                  10*log10(v / rd.noise));
+end
+set(S.h.rdInfo, 'String', txt);
+S.rdCursorBin = bin;
+S = draw_rd(S);
 end
 
 function set_datatip_rows(hLine, plots)
@@ -487,8 +644,8 @@ switch evt.Key
     case {'r', 'home'}, S = set_limits(S, S.home(1:2), S.home(3:4));
     case 'c',           S = clear_pins(S);
     case 'd'                                                % next display mode
-        modes = {'plots', 'detections', 'both', 'video'};
-        S.opt.showMode = modes{mod(find(strcmp(S.opt.showMode, modes)), 4) + 1};
+        modes = {'plots', 'detections', 'both', 'video', 'dbf', 'mf'};
+        S.opt.showMode = modes{mod(find(strcmp(S.opt.showMode, modes)), 6) + 1};
         set(S.h.ui.showMode, 'Value', find(strcmp(S.opt.showMode, modes)));
         S = redraw(S);
     case 'space'

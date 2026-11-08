@@ -161,7 +161,7 @@ int main(int argc, char **argv)
            "MF", "MTI", "Doppler", "CFAR+pr", "interp", "extract", "track", "total", "det/upd", "plots");
     Counts cnt;
     memset(&cnt, 0, sizeof cnt);
-    ProcessorCallbacks cb = { on_detections, on_plot, NULL, &cnt, NULL };
+    ProcessorCallbacks cb = { on_detections, on_plot, NULL, &cnt, NULL, NULL, NULL };
     uint32_t pulseNumber = 1;
     for (int t = 0; t < nThr; t++) {
         processor_set_cfar_alpha(proc, pow(10.0, thr[t] / 10.0));

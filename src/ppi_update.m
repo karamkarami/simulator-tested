@@ -1,7 +1,7 @@
-function [sys, showVideo] = ppi_update(ppi, sys, az_deg, t_s, scan, plots, dets, tracks, timing_us, timingPris, video)
+function [sys, want] = ppi_update(ppi, sys, az_deg, t_s, scan, plots, dets, tracks, timing_us, timingPris, video, rd)
 %PPI_UPDATE  Refresh the PPI: antenna, true targets, plots, detections, tracks, block times.
-%   [sys, showVideo] = PPI_UPDATE(ppi, sys, az_deg, t_s, scan, plots, dets, tracks, timing_us,
-%                                 timingPris, video)
+%   [sys, want] = PPI_UPDATE(ppi, sys, az_deg, t_s, scan, plots, dets, tracks, timing_us,
+%                            timingPris, video, rd)
 %   stores the data in the figure, so the interactive options of
 %   ppi_callbacks.m (filters, zoom, data tips) can redraw it at any time.
 %   dets are the CFAR detections before the plot extractor (rows of
@@ -9,9 +9,13 @@ function [sys, showVideo] = ppi_update(ppi, sys, az_deg, t_s, scan, plots, dets,
 %   timing_us the mean time per PRI of DBF, matched filter, MTI, Doppler,
 %   detection, peak interpolation, plot extractor, tracking, console output
 %   and display [us]
-%   over the last timingPris PRIs ([] = the whole run), video the video map
-%   (ppi_video_add.m; [] = the one stored) (all optional). showVideo is true
-%   when the PPI shows the video (the caller then fills the map every PRI).
+%   over the last timingPris PRIs ([] = the whole run), video the raw data map
+%   (ppi_video_add.m, ppi_video_add_row.m; [] = the one stored), rd the
+%   range-Doppler map of the selected beam (ppi_rd_map.m; [] = the one stored)
+%   (all optional). want says what the display needs from the caller:
+%   want.raw = 'video', 'dbf', 'mf' (fill the map every PRI with that data of
+%   beam want.beam) or '' (none), want.rd = true while the range-Doppler tab
+%   is shown (pass the map of beam want.beam).
 %   While the display is paused (space key or the Pause button) the data is
 %   still stored but not drawn.
 %   When the user applied a new CFAR threshold in the panel, the returned sys
@@ -21,7 +25,8 @@ if nargin < 8, tracks = []; end
 if nargin < 9, timing_us = []; end
 if nargin < 10, timingPris = []; end
 if nargin < 11, video = []; end
-showVideo = false;
+if nargin < 12, rd = []; end
+want = struct('raw', '', 'beam', 1, 'rd', false);
 if ~ishandle(ppi.fig), return; end                       % the window was closed
 dB = ppi_callbacks('takeCfar', ppi.fig);
 if ~isempty(dB)
@@ -34,9 +39,12 @@ end
 S = getappdata(ppi.fig, 'ppi');
 S.sys = sys;
 if isempty(video), video = S.data.video; end
+if isempty(rd), rd = S.data.rd; end
 S.data = struct('az_deg', az_deg, 't_s', t_s, 'scan', scan, 'plots', plots, 'dets', dets, ...
-                'tracks', tracks, 'timing_us', timing_us, 'timingPris', timingPris, 'video', video);
-showVideo = strcmp(S.opt.showMode, 'video');
+                'tracks', tracks, 'timing_us', timing_us, 'timingPris', timingPris, 'video', video, 'rd', rd);
+if any(strcmp(S.opt.showMode, {'video', 'dbf', 'mf'})), want.raw = S.opt.showMode; end
+want.beam = S.opt.beam;
+want.rd = S.opt.tab == 2;
 setappdata(ppi.fig, 'ppi', S);
 if ~isempty(dB)
     ppi_callbacks('cfarApplied', ppi.fig, dB);

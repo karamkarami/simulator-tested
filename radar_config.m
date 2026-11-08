@@ -485,7 +485,12 @@ cfg.display.showMode          = 'plots';  % PPI shows 'plots' (after the plot ex
                                           % (CFAR detections before it: arcs), 'both' or 'video' (the
                                           % DDC output of the elements averaged non-coherently, receive
                                           % intervals of both sub-pulses joined, colour = power; also in
-                                          % the panel)
+                                          % the panel), 'dbf' (DBF output of the selected beam) or 'mf'
+                                          % (pulse compression output of the selected beam)
+cfg.display.beam              = 1;        % beam after the DBF shown by 'dbf', 'mf' and the range-Doppler
+                                          % tab (also in the panel: Beam)
+cfg.display.tab               = 'ppi';    % tab at the start: 'ppi', or 'rd' (range-Doppler map of the
+                                          % selected beam next to a small PPI; computed only in this tab)
 cfg.display.maxDetections     = 100000;   % CFAR detections kept for the PPI (the newest)
 cfg.display.showTracks        = true;     % draw the tracks (hollow triangles; also a checkbox in the panel)
 cfg.display.trackLeader_s     = 30;       % length of the velocity leader of a track [s of flight]

@@ -217,7 +217,55 @@ typedef struct {
     PlotList plots;
     int updates[N_PULSES];
     int dets[N_PULSES];
+    /* display taps (processor_set_profile / processor_set_rdmap) */
+    int nProfile[3], nRd;
+    double dR;
+    int mfPeakBin;              /* bin of the largest MF profile value (latest PRI with the target) */
+    double dbfTarget, dbfElse;  /* DBF profile: mean power at the echo, elsewhere (latest PRI) */
+    int dbfLo, dbfHi;           /* bins of the echo                                          */
+    int rdPeakBin, rdPeakDop;   /* largest cell of the latest map outside the MTI notch     */
+    int rdDetsOk;               /* the map lists only detections of its beam                */
+    int beam, withTarget;
 } Sink;
+
+static void on_profile(void *user, int kind, const float *row, int nBins, double dR_m, double az, double t)
+{
+    Sink *s = user;
+    (void)az; (void)t;
+    s->nProfile[kind]++;
+    s->dR = dR_m;
+    if (!s->withTarget) return;
+    if (kind == PROFILE_MF) {
+        int best = 0;
+        for (int b = 1; b < nBins; b++) if (row[b] > row[best]) best = b;
+        s->mfPeakBin = best;
+    } else {
+        double in = 0, out = 0;
+        int nin = 0, nout = 0;
+        for (int b = 0; b < nBins; b++) {
+            if (!(row[b] > 0)) continue;
+            if (b >= s->dbfLo && b <= s->dbfHi) { in += row[b]; nin++; } else { out += row[b]; nout++; }
+        }
+        s->dbfTarget = nin ? in / nin : 0;
+        s->dbfElse = nout ? out / nout : 0;
+    }
+}
+
+static void on_rdmap(void *user, const RdMap *m)
+{
+    Sink *s = user;
+    s->nRd++;
+    if (!s->withTarget) return;
+    float best = -1;
+    const int z = m->nfft / 2;
+    for (int d = 0; d < m->nfft; d++) {
+        if (abs(d - z) <= m->notchBins) continue;
+        for (int b = 0; b < m->nBins; b++)
+            if (m->power[(size_t)d * m->nBins + b] > best) { best = m->power[(size_t)d * m->nBins + b]; s->rdPeakBin = b; s->rdPeakDop = d; }
+    }
+    s->rdDetsOk = 1;
+    for (int i = 0; i < m->nDets; i++) s->rdDetsOk &= m->dets[i].beam == s->beam;
+}
 
 static void on_detections(void *user, int pulse, const Detection *d, int n)
 {
@@ -310,7 +358,10 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
     if (!isnan(threshold_dB)) processor_set_cfar_alpha(proc, pow(10.0, threshold_dB / 10.0));
     Sink sink;
     memset(&sink, 0, sizeof sink);
-    ProcessorCallbacks cb = { on_detections, on_plot, NULL, &sink, NULL };
+    ProcessorCallbacks cb = { on_detections, on_plot, NULL, &sink, NULL, on_profile, on_rdmap };
+    const int taps = !mfDirect && isnan(threshold_dB) && snrNoise == SNR_NOISE_MEDIAN;   /* (one of the runs) */
+    sink.beam = beam;
+    if (taps) processor_set_rdmap(proc, 1, beam, 0.0);
     srand(42);
     double tProc = 0;
     for (int k = 0; k < nPulses; k++) {
@@ -335,6 +386,15 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
                     v[1] = sat16(v[1] + cr * si + ci * sr);
                 }
             }
+        }
+        if (taps) {
+            processor_set_profile(proc, k % 2 ? PROFILE_MF : PROFILE_DBF, beam);   /* both outputs, alternating */
+            sink.withTarget = k < nWith;
+            const double dR = 299792458.0 / (2 * cfg.fsOut_Hz);
+            sink.dbfLo = (int)floor((pc->range_m[0] + (pc->ddcFirst + r0 + pc->mfShift - pc->rxFirst) * dR) / dR);
+            sink.dbfHi = sink.dbfLo + nEcho - 1;
+        } else {
+            processor_set_profile(proc, PROFILE_NONE, 0);
         }
         const double t0 = now_seconds();
         processor_process(proc, &pri, &cb);
@@ -378,6 +438,26 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
         }
     }
     CHECK(found == 1, "expected the target as one long-pulse plot at cell %d, %.1f m/s, beam %d", r0, vr, beam);
+    if (taps) {                          /* the display taps of the target's beam */
+        const int tb = (int)floor(pc->range_m[r0] / sink.dR);
+        const int dExp = (int)lround(cfg.nfft / 2 - vr / dv);   /* Doppler bin of vr (after fftshift) */
+        printf("taps: %d DBF and %d MF profiles, %d range-Doppler maps; MF peak in bin %d (target %d), DBF echo "
+               "%.1f dB above the rest, map peak at bin %d / Doppler %d (target %d / %d)\n", sink.nProfile[PROFILE_DBF],
+               sink.nProfile[PROFILE_MF], sink.nRd, sink.mfPeakBin, tb, 10 * log10(sink.dbfTarget / sink.dbfElse),
+               sink.rdPeakBin, sink.rdPeakDop, tb, dExp);
+        CHECK(sink.nProfile[PROFILE_DBF] == nPulses / 2 && sink.nProfile[PROFILE_MF] == nPulses / 2,
+              "a profile every PRI (%d DBF, %d MF)", sink.nProfile[PROFILE_DBF], sink.nProfile[PROFILE_MF]);
+        /* one PRI: the echo is spread over the pulse (about 1 dB above the noise per sample after the DBF with
+         * 48 elements); after the pulse compression it stands out (with one element its SNR in one PRI is
+         * too low for a check: the range-Doppler map below integrates the CPI) */
+        if (cfg.nCh > 1) {
+            CHECK(abs(sink.mfPeakBin - tb) <= 1, "MF profile peak at bin %d, target %d", sink.mfPeakBin, tb);
+            CHECK(sink.dbfTarget > 1.15 * sink.dbfElse, "DBF profile: echo %.1f, elsewhere %.1f", sink.dbfTarget, sink.dbfElse);
+        }
+        CHECK(sink.nRd >= nWith - cfg.cpiLength && abs(sink.rdPeakBin - tb) <= 1 && abs(sink.rdPeakDop - dExp) <= 1 &&
+              sink.rdDetsOk, "range-Doppler map: %d maps, peak bin %d / %d, Doppler %d / %d", sink.nRd,
+              sink.rdPeakBin, tb, sink.rdPeakDop, dExp);
+    }
     CHECK(sink.plots.n == 1, "expected exactly one plot, got %d", sink.plots.n);
 
     processor_destroy(proc);

@@ -42,6 +42,24 @@ for on = [true false]
                     'options off: centres of the Doppler bin and of the beam') && ok;
     end
 end
+% several reports, one of them at the lowest beam (only the others are interpolated in elevation)
+sys.report.dopplerInterp = true;  sys.report.elevationInterp = true;
+pk = [nfft/4 + 0.3, round(nB/2) - 0.35, 5;  nfft/2 + 7.2, 1.2, 9;  nfft/4 - 3.4, round(nB/2) + 2.3, 14];
+P = zeros(nB, nR, nfft, 'single');
+for i = 1:size(pk, 1)
+    for dd = 1:nfft
+        P(:, pk(i, 3), dd) = single(1e4 * exp(-0.3*(dd - pk(i, 1))^2 - 0.4*((1:nB) - pk(i, 2)).^2));
+    end
+end
+k = round(pk(:, 1));  bb = round(pk(:, 2));
+dets = struct('beam', bb.', 'rIdx', pk(:, 3).', 'dIdx', k.', 'power', 1, 'noise', 1);
+wv = sys.wave.long;  wv.range_m = (1:nR) * 75;
+rep = detection_reports(dets, P, sys, wv, struct('tCenter_s', 0, 'azCenter_deg', 0));
+vr = -(sys.dop.f_Hz(k).' + (pk(:, 1) - k) * df) * sys.lambda / 2;
+el = sys.ant.tilt_deg + asind(interp1(1:nB, sys.dbf.beamU, pk(:, 2)));
+el(2) = sys.ant.tilt_deg + asind(sys.dbf.beamU(1));
+ok = report(numel(rep) == 3 && max(abs([rep.vr_mps].' - vr)) < 1e-3 && max(abs([rep.el_deg].' - el)) < 1e-3, ...
+            'three reports in different cells (one at the lowest beam)') && ok;
 fprintf('Peak interpolation: %s\n', ternary(ok, 'PASS', 'FAIL'));
 end
 

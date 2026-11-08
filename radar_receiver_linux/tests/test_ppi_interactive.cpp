@@ -217,10 +217,16 @@ int main(int argc, char **argv)
     check(w.displayMode() == DisplayMode::Video && w.visibleDetectionCount() == 0 && w.visibleCount() == 0,
           "key D again: the raw video (no plots, no detections)");
     send_key(w, Qt::Key_D, "d");
+    check(w.displayMode() == DisplayMode::DbfOut && w.visibleCount() == 0, "key D again: DBF out of the selected beam");
+    send_key(w, Qt::Key_D, "d");
+    check(w.displayMode() == DisplayMode::MfOut && w.visibleCount() == 0, "key D again: MF out of the selected beam");
+    send_key(w, Qt::Key_D, "d");
     check(w.displayMode() == DisplayMode::Plots, "key D again: plots");
     w.resetView();
 
     /* window: display mode box, CFAR threshold, screenshot */
+    const double beamEl[3] = { 1.5, 4.0, 7.5 };     /* the beam selector: 3 beams */
+    ppi_set_beams(3, beamEl);
     PpiWindow win(60e3, nullptr);
     win.resize(1030, 800);
     win.show();
@@ -248,9 +254,18 @@ int main(int argc, char **argv)
     send_key(win.ppi(), Qt::Key_D, "d");
     win.refresh();
     check(win.modeBox()->currentIndex() == 3 && ppi_video_wanted() == 1, "the box follows a mode change by key D (video)");
+    for (int k = 4; k <= 5; k++) {
+        send_key(win.ppi(), Qt::Key_D, "d");
+        win.refresh();
+        int bm = -1;
+        check(win.modeBox()->currentIndex() == k && ppi_video_wanted() == 0 &&
+              ppi_profile_wanted(&bm) == (k == 4 ? PROFILE_DBF : PROFILE_MF) && bm == 0,
+              k == 4 ? "key D: DBF out, the profile of beam 1 wanted" : "key D: MF out, the profile of beam 1 wanted");
+    }
     send_key(win.ppi(), Qt::Key_D, "d");
     win.refresh();
-    check(win.modeBox()->currentIndex() == 0 && ppi_video_wanted() == 0, "key D from the video back to the plots");
+    check(win.modeBox()->currentIndex() == 0 && ppi_video_wanted() == 0 && ppi_profile_wanted(nullptr) == PROFILE_NONE,
+          "key D from MF out back to the plots");
     /* block times in the panel, CFAR method name */
     ProcessorTiming tm;
     std::memset(&tm, 0, sizeof tm);
@@ -382,6 +397,111 @@ int main(int argc, char **argv)
         check(pw.videoBinsFilled() == 0, "Clear display also clears the video");
         win.modeBox()->setCurrentIndex(0);
         check(ppi_video_wanted() == 0, "back to the plots: no video wanted");
+    }
+
+    /* DBF out / MF out of the selected beam */
+    {
+        check(win.beamBox()->count() == 3 && win.beamBox()->itemText(1).contains("4.0"), "beam selector: 3 beams with elevations");
+        win.beamBox()->setCurrentIndex(2);
+        int bm = -1;
+        check(pw.beam() == 2 && ppi_profile_wanted(&bm) == PROFILE_NONE && bm == 2, "beam 3 selected, no profile in plot mode");
+        win.modeBox()->setCurrentIndex(4);
+        check(ppi_profile_wanted(&bm) == PROFILE_DBF && bm == 2 && ppi_video_wanted() == 0, "DBF out: the profile of beam 3 wanted");
+        const double dR = 74.948;
+        const int nBins = (int)std::ceil(60e3 / dR);
+        std::vector<float> row(nBins);
+        uint32_t seed = 3;
+        for (double az = 100.0; az < 120.0; az += 0.036) {
+            for (int i = 0; i < nBins; i++) {                     /* exponential noise of mean 500 (one sample) */
+                seed = seed * 1664525u + 1013904223u;
+                row[i] = i < 55 ? 0.0f : (float)(-500.0 * std::log(((seed >> 8) + 0.5) / 16777216.0));
+            }
+            row[300] = 50000.0f;                                  /* an echo at 22.5 km */
+            ppi_post_profile(PROFILE_DBF, row.data(), nBins, dR, az, 30.0 + az / 36.0);
+            ppi_post_profile(PROFILE_MF, row.data(), nBins, dR, az, 30.0 + az / 36.0);   /* other kind: dropped */
+            ppi_post_video(row.data(), nBins, dR, az + 180.0, 30.0 + az / 36.0);           /* video: dropped */
+        }
+        win.refresh();
+        const double r = (300 + 0.5) * dR;
+        check(pw.videoBinsFilled() == 80 && pw.videoIndexAt(r * std::sin(110 * kDeg), r * std::cos(110 * kDeg)) > 100 &&
+              pw.videoIndexAt(20e3 * std::sin(290 * kDeg), 20e3 * std::cos(290 * kDeg)) == 0,
+              "DBF out: only the DBF rows (100 ... 120 deg), the echo bright, no video drawn");
+        check(std::fabs(pw.videoNoise_dB() - 10.0 * std::log10(500.0)) < 1.0,
+              "DBF out: noise floor from one sample per bin (10th percentile + 9.77 dB)");
+        const QImage img = pw.grab().toImage();
+        check(!img.isNull(), "the PPI draws the DBF output");
+        if (!folder.empty()) pw.saveSnapshot(QString::fromStdString(folder + "/ppi_dbf_out.png"));
+        win.modeBox()->setCurrentIndex(5);
+        check(pw.videoBinsFilled() == 0 && ppi_profile_wanted(&bm) == PROFILE_MF, "MF out: the DBF data cleared, MF wanted");
+        ppi_post_profile(PROFILE_MF, row.data(), nBins, dR, 50.0, 31.0);
+        win.beamBox()->setCurrentIndex(1);                        /* posted for beam 3: no longer shown */
+        win.refresh();
+        check(pw.videoBinsFilled() == 0 && pw.beam() == 1, "a profile of the previous beam is not shown");
+        ppi_post_profile(PROFILE_MF, row.data(), nBins, dR, 50.0, 31.1);
+        win.refresh();
+        check(pw.videoBinsFilled() == 1, "MF out of beam 2 shown");
+        win.modeBox()->setCurrentIndex(0);
+        check(ppi_profile_wanted(nullptr) == PROFILE_NONE, "back to the plots: no profile wanted");
+    }
+
+    /* the range-Doppler tab: the map of the selected beam next to a small PPI */
+    {
+        int bm = -1;
+        check(win.tabs()->count() == 2 && win.tabs()->currentIndex() == 0 && ppi_rdmap_wanted(&bm) == 0 &&
+              pw.parentWidget() == win.tabs()->widget(0), "two tabs; the map is computed only in the second");
+        win.resize(1400, 800);
+        win.tabs()->setCurrentIndex(1);
+        QCoreApplication::processEvents();
+        check(ppi_rdmap_wanted(&bm) == 1 && bm == 1 && pw.parentWidget() == win.tabs()->widget(1) &&
+              !win.rd().hasFrame(), "second tab: map of beam 2 wanted, the PPI moved next to it");
+        const int nB = 800, nfft = 64, pb = 400, pd = 20;
+        const double dR = 74.948;
+        std::vector<float> P((size_t)nB * nfft);
+        std::vector<double> vel(nfft);
+        uint32_t seed = 7;
+        for (size_t i = 0; i < P.size(); i++) {
+            seed = seed * 1664525u + 1013904223u;
+            P[i] = (i % nB) < 100 ? 0.0f : 0.5f + (float)(seed >> 8) / 16777216.0f;   /* no cells below bin 100 */
+        }
+        for (int d = pd - 2; d <= pd + 2; d++) P[(size_t)d * nB + pb] = (float)(1000.0 * std::exp(-0.5 * (d - pd) * (d - pd)));
+        for (int d = 0; d < nfft; d++) vel[d] = -(d - nfft / 2) * 6.9;
+        Detection det;
+        std::memset(&det, 0, sizeof det);
+        det.range_m = (pb + 0.5) * dR;  det.dIdx = pd;  det.beam = 1;  det.power = 1000.0;
+        RdMap m;
+        std::memset(&m, 0, sizeof m);
+        m.beam = 1;  m.nBins = nB;  m.nfft = nfft;  m.dR_m = dR;  m.power = P.data();  m.vel_mps = vel.data();
+        m.notchBins = 2;  m.noise = 1.0;  m.time_s = 40.0;  m.az_deg = 123.0;  m.dets = &det;  m.nDets = 1;
+        ppi_post_rdmap(&m);
+        win.refresh();
+        RdWidget &rdw = win.rd();
+        check(rdw.hasFrame() && std::fabs(rdw.maxDb() - 30.0) < 0.01 && rdw.spectrumBin() == pb,
+              "map taken (peak 30 dB above noise), the spectrum at the strongest detection");
+        const QImage gi = win.grab().toImage();
+        const QPointF pk = rdw.mapToGlobal(rdw.screenOf(det.range_m, pd).toPoint()) - win.mapToGlobal(QPoint(0, 0));
+        QColor c(0, 0, 0);                                        /* (a peak of one range bin is one pixel wide) */
+        for (int dy = -2; dy <= 2; dy++)
+            for (int dx = -2; dx <= 2; dx++) {
+                const QColor q = gi.pixelColor(pk.toPoint() + QPoint(dx, dy));
+                if (q.red() + q.green() + q.blue() > c.red() + c.green() + c.blue()) c = q;
+            }
+        const QPointF bg = rdw.mapToGlobal(rdw.screenOf(50e3, 50).toPoint()) - win.mapToGlobal(QPoint(0, 0));
+        const QColor cb = gi.pixelColor(bg.toPoint());
+        check(c.red() + c.green() + c.blue() > 400 && cb.red() + cb.green() + cb.blue() < 200,
+              "the peak is drawn bright, the noise dark");
+        rdw.hoverAt(rdw.screenOf(det.range_m, pd));
+        check(rdw.readout().contains("30.0 dB above noise") && rdw.spectrumBin() == pb, "hover: the cell's values, its spectrum");
+        m.beam = 2;  m.time_s = 41.0;
+        ppi_post_rdmap(&m);                                       /* a map of another beam is not shown */
+        win.refresh();
+        check(rdw.frame().time_s == 40.0, "a map of another beam is not taken");
+        if (!folder.empty()) {
+            const QString shot = QString::fromStdString(folder + "/ppi_rd_tab.png");
+            check(win.saveSnapshot(shot) && QImage(shot).width() == win.tabs()->currentWidget()->width(),
+                  "screenshot of the second tab: map and small PPI");
+        }
+        win.tabs()->setCurrentIndex(0);
+        check(ppi_rdmap_wanted(nullptr) == 0 && pw.parentWidget() == win.tabs()->widget(0), "back to the PPI tab");
     }
 
     if (!folder.empty()) {

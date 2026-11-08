@@ -29,9 +29,9 @@ doEl  = (~isfield(sys, 'report') || ~isfield(sys.report, 'elevationInterp') || s
 if ~doDop && ~doEl, return; end
 [nB, nR, nfft] = size(P);
 b = [rep.beam];  r = [rep.rIdx];  d = [rep.dIdx];
-lin = @(bb, dd) bb + nB*(r - 1) + nB*nR*(dd - 1);
+lin = @(bb, rr, dd) bb + nB*(rr - 1) + nB*nR*(dd - 1);
 if doDop
-    [delta, ok] = vertex(P, lin(b, mod(d - 2, nfft) + 1), lin(b, d), lin(b, mod(d, nfft) + 1));
+    [delta, ok] = vertex(P, lin(b, r, mod(d - 2, nfft) + 1), lin(b, r, d), lin(b, r, mod(d, nfft) + 1));
     df = 1 / (nfft * sys.dop.rowPri_s);                        % Doppler bin width [Hz]
     for i = find(ok)
         rep(i).vr_mps = -(sys.dop.f_Hz(d(i)) + delta(i) * df) * sys.lambda / 2;
@@ -39,7 +39,7 @@ if doDop
 end
 if doEl
     mid = find(b > 1 & b < sys.nBeams);
-    [delta, ok] = vertex(P, lin(b(mid) - 1, d(mid)), lin(b(mid), d(mid)), lin(b(mid) + 1, d(mid)));
+    [delta, ok] = vertex(P, lin(b(mid) - 1, r(mid), d(mid)), lin(b(mid), r(mid), d(mid)), lin(b(mid) + 1, r(mid), d(mid)));
     for i = mid(ok)
         k = find(mid == i);
         u = interp1(1:sys.nBeams, sys.dbf.beamU, b(i) + delta(k));

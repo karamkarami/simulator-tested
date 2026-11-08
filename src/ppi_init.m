@@ -18,7 +18,9 @@ function ppi = ppi_init(sys)
 %   an arc over the azimuth step of its CPI update, so a target appears as an
 %   arc about one beamwidth long), both, or the raw video (the DDC output of
 %   the elements averaged non-coherently, the receive intervals of both
-%   sub-pulses joined, colour = power above the noise; ppi_video_init.m);
+%   sub-pulses joined, colour = power above the noise; ppi_video_init.m),
+%   the DBF output or the pulse compression output of the beam chosen in
+%   'Beam' (DBF out, MF out; the same colours);
 %   shows or hides the short/long-pulse
 %   data, the true targets, range rings, plot labels and the antenna; filters
 %   by SNR and age; shows or hides the tracks (hollow triangles: confirmed
@@ -37,6 +39,14 @@ if cfg.display.visible, vis = 'on'; else, vis = 'off'; end
 
 fig = figure('Name', 'PPI', 'Color', 'k', 'Visible', vis, 'InvertHardcopy', 'off', ...
              'NumberTitle', 'off', 'Position', [100 60 1040 880]);
+if cfg.display.visible                                     % maximized at the start
+    try
+        set(fig, 'WindowState', 'maximized');              % MATLAB R2018a and newer
+    catch
+        scr = get(0, 'ScreenSize');                        % Octave: the whole screen
+        if all(scr(3:4) > 100), set(fig, 'Position', [1 1 scr(3) scr(4)]); end
+    end
+end
 ax  = axes('Parent', fig, 'Color', 'k', 'XColor', [0.6 0.6 0.6], 'YColor', [0.6 0.6 0.6], ...
            'Units', 'normalized', 'Position', [0.07 0.12 0.66 0.8]);
 hold(ax, 'on');
@@ -108,7 +118,43 @@ h.videoBarImg = image('Parent', h.videoBar, 'XData', [-3 video.span_dB], 'YData'
 set(h.videoBar, 'XLim', [-3 video.span_dB], 'YLim', [-0.5 1.5], 'XTick', 0:10:video.span_dB);
 h.videoBarLabel = text(0.5, 2.4, 'video [dB above noise]', 'Parent', h.videoBar, 'Units', 'normalized', ...
                        'Color', [0.7 0.7 0.7], 'FontSize', 7, 'HorizontalAlignment', 'center', 'Visible', 'off');
+% Second tab: range-Doppler map of the selected beam (colour = dB above the noise floor of the
+% map), its colour scale, the Doppler spectrum of one range bin, and the PPI small next to them
+h.rdAx = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.06 0.42 0.40 0.48], 'Color', 'k', ...
+              'XColor', [0.6 0.6 0.6], 'YColor', [0.6 0.6 0.6], 'Visible', 'off', 'Layer', 'top');
+hold(h.rdAx, 'on');
+h.rdImg = image('Parent', h.rdAx, 'XData', [0 1], 'YData', [0 1], 'CData', zeros(2, 2, 3), 'Visible', 'off');
+set(h.rdAx, 'YDir', 'normal');
+h.rdNotch = plot(h.rdAx, NaN, NaN, '--', 'Color', [0.8 0.8 0.8], 'Visible', 'off', 'HitTest', 'off');
+h.rdDet = plot(h.rdAx, NaN, NaN, 'o', 'Color', 'w', 'MarkerSize', 8, 'LineWidth', 1.2, 'Visible', 'off', 'HitTest', 'off');
+h.rdCut = plot(h.rdAx, NaN, NaN, ':', 'Color', [1 1 1], 'Visible', 'off', 'HitTest', 'off');
+xlabel(h.rdAx, 'Range [km]');  ylabel(h.rdAx, 'Radial velocity [m/s]');
+h.rdTitle = title(h.rdAx, '', 'Color', 'w');
+h.rdInfo = text(0, 1.015, '', 'Parent', h.rdAx, 'Units', 'normalized', 'Color', [0.7 0.7 0.7], ...
+                'FontSize', 8, 'VerticalAlignment', 'bottom', 'Visible', 'off', 'HitTest', 'off');
+h.rdBar = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.468 0.42 0.012 0.48], 'Color', 'k', ...
+               'XColor', 'k', 'YColor', [0.6 0.6 0.6], 'XTick', [], 'YAxisLocation', 'right', 'FontSize', 7, ...
+               'Visible', 'off', 'HitTest', 'off');
+h.rdBarImg = image('Parent', h.rdBar, 'XData', [0 1], 'YData', [0 1], 'CData', reshape(video.cmap, [], 1, 3), ...
+                   'Visible', 'off', 'HitTest', 'off');
+set(h.rdBar, 'YDir', 'normal', 'XLim', [0 1]);
+h.specAx = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.06 0.10 0.42 0.22], 'Color', 'k', ...
+                'XColor', [0.6 0.6 0.6], 'YColor', [0.6 0.6 0.6], 'Visible', 'off', 'FontSize', 8);
+hold(h.specAx, 'on');
+h.specLine = plot(h.specAx, NaN, NaN, '-', 'Color', [0 0.9 1], 'LineWidth', 1.2, 'Visible', 'off');
+h.specDet = plot(h.specAx, NaN, NaN, 'o', 'Color', 'w', 'Visible', 'off');
+xlabel(h.specAx, 'Radial velocity [m/s]');  ylabel(h.specAx, 'dB above noise');
+h.specTitle = title(h.specAx, '', 'Color', [0.8 0.8 0.8], 'FontSize', 8);
 set(fig, 'CurrentAxes', ax);                               % (axes(ax) would raise it above the scale)
+% Tabs (Octave has no uitabgroup: two toggle buttons above the display)
+h.tabBtn(1) = uicontrol(fig, 'Style', 'togglebutton', 'String', 'PPI', 'Units', 'normalized', ...
+    'Position', [0.07 0.962 0.10 0.03], 'Value', 1, 'BackgroundColor', [0.25 0.25 0.25], 'ForegroundColor', 'w', ...
+    'Callback', @(src, evt) ppi_callbacks('tab', fig, 1));
+h.tabBtn(2) = uicontrol(fig, 'Style', 'togglebutton', 'String', 'Range-Doppler (selected beam)', ...
+    'Units', 'normalized', 'Position', [0.175 0.962 0.20 0.03], 'Value', 0, 'BackgroundColor', [0.12 0.12 0.12], ...
+    'ForegroundColor', [0.85 0.85 0.85], 'Callback', @(src, evt) ppi_callbacks('tab', fig, 2));
+h.legend = hLeg;
+h.axPos = get(ax, 'Position');                             % the PPI in the first tab
 
 %% Data tip (hover) and selection marker
 h.tip = text(0, 0, '', 'Parent', ax, 'Color', 'w', 'BackgroundColor', [0.12 0.12 0.12], ...
@@ -127,22 +173,41 @@ uicontrol(fig, 'Style', 'text', 'String', 'Display', 'Units', 'normalized', 'Pos
           'BackgroundColor', 'k', 'ForegroundColor', 'w', 'FontWeight', 'bold', 'HorizontalAlignment', 'left');
 y = y - rowH;
 label('Show', [x0 y 0.05 rowH]);
-modes = {'plots', 'detections', 'both', 'video'};
+modes = {'plots', 'detections', 'both', 'video', 'dbf', 'mf'};
 h.ui.showMode = uicontrol(fig, 'Style', 'popupmenu', 'Units', 'normalized', 'Position', [x0+0.05 y w-0.05 rowH], ...
     'String', {'Plots (after extractor)', 'Detections (before extractor)', 'Plots and detections', ...
-               'Video (DDC, elements averaged)'}, ...
+               'Video (DDC, elements averaged)', 'DBF out (selected beam)', 'MF out (selected beam)'}, ...
     'Value', find(strcmp(cfg.display.showMode, modes)), ...
     'BackgroundColor', bg, 'ForegroundColor', fg, ...
     'Callback', @(src, evt) ppi_callbacks('option', fig, 'showMode', modes{get(src, 'Value')}));
 opt.showMode = cfg.display.showMode;
+% Beam after the DBF: DBF out, MF out and the range-Doppler map
+y = y - rowH;
+label('Beam', [x0 y 0.05 rowH]);
+beamNames = cell(1, sys.nBeams);
+for b = 1:sys.nBeams
+    if sys.dbf.enabled
+        beamNames{b} = sprintf('%d  (el %.1f deg)', b, sys.dbf.beamEl_deg(b));
+    else
+        beamNames{b} = sprintf('%d  (no DBF)', b);
+    end
+end
+beam0 = 1;
+if isfield(cfg.display, 'beam') && ~isempty(cfg.display.beam), beam0 = min(max(1, round(cfg.display.beam)), sys.nBeams); end
+h.ui.beam = uicontrol(fig, 'Style', 'popupmenu', 'Units', 'normalized', 'Position', [x0+0.05 y w-0.05 rowH], ...
+    'String', beamNames, 'Value', beam0, 'BackgroundColor', bg, 'ForegroundColor', fg, ...
+    'Callback', @(src, evt) ppi_callbacks('option', fig, 'beam', get(src, 'Value')));
+opt.beam = beam0;
+opt.tab = 1;
 checks = {'showShort', 'Short pulse', true;  'showLong', 'Long pulse', true;
           'showTruth', 'True targets', logical(cfg.display.showTruth);  'showRings', 'Range rings', true;
           'showLabels', 'Plot labels', false;  'showAntenna', 'Antenna', true;
           'showTracks', 'Tracks', logical(cfg.display.showTracks)};
-for i = 1:size(checks, 1)
-    y = y - rowH;
+for i = 1:size(checks, 1)                                  % two checkboxes per row
+    if mod(i, 2), y = y - rowH; end
+    xc = x0 + (1 - mod(i, 2)) * w/2;
     h.ui.(checks{i, 1}) = uicontrol(fig, 'Style', 'checkbox', 'String', checks{i, 2}, 'Value', checks{i, 3}, ...
-        'Units', 'normalized', 'Position', [x0 y w rowH], 'BackgroundColor', bg, 'ForegroundColor', fg, ...
+        'Units', 'normalized', 'Position', [xc y w/2 rowH], 'BackgroundColor', bg, 'ForegroundColor', fg, ...
         'Callback', @(src, evt) ppi_callbacks('option', fig, checks{i, 1}, logical(get(src, 'Value'))));
     opt.(checks{i, 1}) = checks{i, 3};
 end
@@ -213,7 +278,8 @@ S.home = rMax*[-1.05 1.05 -1.05 1.05];
 S.opt = opt;
 S.sys = sys;
 S.data = struct('az_deg', 0, 't_s', 0, 'scan', 1, 'plots', [], 'dets', zeros(0, 10), ...
-                'tracks', [], 'timing_us', [], 'timingPris', [], 'video', video);
+                'tracks', [], 'timing_us', [], 'timingPris', [], 'video', video, 'rd', []);
+S.rdCursorBin = [];                                        % range bin of the spectrum under the cursor
 S.vis = struct('x', [], 'y', [], 'idx', []);               % visible plots (for picking)
 S.visDet = struct('x', [], 'y', [], 'idx', []);            % visible detections
 S.visTrk = struct('x', [], 'y', [], 'idx', []);            % visible tracks
@@ -227,6 +293,9 @@ set(fig, 'WindowScrollWheelFcn',  @(src, evt) ppi_callbacks('scroll', fig, evt),
          'WindowButtonUpFcn',     @(src, evt) ppi_callbacks('up', fig), ...
          'KeyPressFcn',           @(src, evt) ppi_callbacks('key', fig, evt));
 ppi_callbacks('cfarApplied', fig, cfar_dB);
+if isfield(cfg.display, 'tab') && strcmpi(cfg.display.tab, 'rd')
+    ppi_callbacks('tab', fig, 2);
+end
 
 ppi.fig = fig;
 ppi.ax = ax;

@@ -273,6 +273,30 @@ typedef struct {
 /* Name of the configured tracker, e.g. "EKF 3-D CV", "PMBM 2-D IMM CV/CA/CT" (tracker.c). */
 void tracker_name(const RadarConfig *cfg, char *buf, size_t len);
 
+/* Range-Doppler map of one beam (processor_set_rdmap, callback rdmap): the
+ * power maps of both sub-pulses after the CFAR's noise-gain equalisation,
+ * joined in range like the video (short-pulse cells nearer than the first
+ * long-pulse cell, then the long-pulse cells), in range bins of dR_m from 0
+ * (power[d * nBins + b], 0 = no cell in the bin) and the nfft Doppler bins
+ * (after fftshift). dets: the reports of that beam in the same update. */
+typedef struct {
+    int           beam, nBins, nfft;
+    double        dR_m;
+    const float  *power;       /* [nfft][nBins]                                    */
+    const double *vel_mps;     /* [nfft] radial velocity of every bin (+ = away)  */
+    int           notchBins;   /* bins on each side of zero Doppler not tested     */
+    double        noise;       /* median power of the cells (noise floor estimate) */
+    double        time_s, az_deg;
+    const Detection *dets;
+    int           nDets;
+} RdMap;
+
+/* Profile of the selected beam (processor_set_profile): PROFILE_DBF the
+ * beamformer output |x|^2 of both receive intervals, PROFILE_MF the pulse
+ * compression output |y|^2 of both sub-pulses, joined like the video (short
+ * pulse up to the first long-pulse range cell, then the long pulse). */
+enum { PROFILE_NONE = 0, PROFILE_DBF = 1, PROFILE_MF = 2 };
+
 typedef struct {
     /* called for the pruned CFAR detections of every CPI update (n may be 0) */
     void (*detections)(void *user, int pulse, const Detection *dets, int n);
@@ -283,6 +307,11 @@ typedef struct {
     void *user;
     /* called for every track update and deletion (tracking enabled in the configuration) */
     void (*track)(void *user, const Track *track);
+    /* called once per PRI with the profile of processor_set_profile(): row[nBins], range
+     * bins of dR_m from 0 (0 = no sample in the bin) */
+    void (*profile)(void *user, int kind, const float *row, int nBins, double dR_m, double az_deg, double time_s);
+    /* called with the range-Doppler map of processor_set_rdmap() */
+    void (*rdmap)(void *user, const RdMap *map);
 } ProcessorCallbacks;
 
 typedef struct {
@@ -306,6 +335,13 @@ void processor_flush(Processor *p, const ProcessorCallbacks *cb);   /* close all
  * (so the CPI buffers stay complete), their Doppler/CFAR/extraction updates
  * are skipped. Used by the input loop when it falls behind the stream. */
 void processor_set_slow_time(Processor *p, int enabled);
+/* Profile of one beam (0-based) for the display, every PRI: kind PROFILE_DBF,
+ * PROFILE_MF or PROFILE_NONE (default: nothing is computed). */
+void processor_set_profile(Processor *p, int kind, int beam);
+/* Range-Doppler map of one beam (0-based) for the display: enabled = 0
+ * (default) computes nothing; else it is handed to the callback after the
+ * CPI updates of a PRI, at most every minPeriod_s seconds. */
+void processor_set_rdmap(Processor *p, int enabled, int beam, double minPeriod_s);
 /* CFAR threshold factor (of the configured detector) used from the next
  * CPI update on (starts at cfg->alpha). threshold [dB] = 10*log10(alpha).
  * Call from the processing thread. */
@@ -391,8 +427,24 @@ void ppi_post_cfar_threshold(double threshold_dB, double pfa, double default_dB)
 int  ppi_take_cfar_request(double *threshold_dB);
 /* Display mode at the start of ppi_run (call before it): plots after the plot
  * extractor (default), CFAR detections before it, both, or the raw video. */
-enum { PPI_SHOW_PLOTS = 0, PPI_SHOW_DETECTIONS = 1, PPI_SHOW_BOTH = 2, PPI_SHOW_VIDEO = 3 };
+enum { PPI_SHOW_PLOTS = 0, PPI_SHOW_DETECTIONS = 1, PPI_SHOW_BOTH = 2, PPI_SHOW_VIDEO = 3, PPI_SHOW_DBF = 4,
+       PPI_SHOW_MF = 5 };
 void ppi_set_display_mode(int mode);
+/* Beams after the DBF for the beam selector of the panel (call before ppi_run):
+ * their number and elevations (NaN without DBF); the beam (0-based) and the
+ * tab (0 PPI, 1 range-Doppler map with a small PPI) at the start. */
+void ppi_set_beams(int nBeams, const double *beamEl_deg);
+void ppi_set_beam(int beam);
+void ppi_set_tab(int tab);
+/* Display modes PPI_SHOW_DBF / PPI_SHOW_MF: ppi_profile_wanted() returns
+ * PROFILE_DBF / PROFILE_MF (else PROFILE_NONE) and the selected beam; the worker
+ * then hands the profile of every PRI to ppi_post_profile(). The range-Doppler
+ * tab: ppi_rdmap_wanted() is 1 while it is shown (with the selected beam), the
+ * worker hands the maps to ppi_post_rdmap() (which copies them). */
+int  ppi_profile_wanted(int *beam);
+void ppi_post_profile(int kind, const float *row, int nBins, double dR_m, double az_deg, double time_s);
+int  ppi_rdmap_wanted(int *beam);
+void ppi_post_rdmap(const RdMap *map);
 /* Raw video (display mode PPI_SHOW_VIDEO): ppi_video_wanted() is 1 while the
  * PPI shows the video (the worker then computes it, video.c); ppi_post_video()
  * hands the video of one PRI (row[nBins], range bins of dR_m from 0) to the

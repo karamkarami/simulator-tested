@@ -1,9 +1,14 @@
 function V = ppi_video_init(sys, rMax_m)
-%PPI_VIDEO_INIT  Raw video of the PPI ('Video' display mode): map and pixel lookup.
+%PPI_VIDEO_INIT  Raw data map of the PPI (display modes Video, DBF out, MF out): map and pixel lookup.
 %   V = PPI_VIDEO_INIT(sys, rMax_m) prepares the video map of the PPI out to
 %   the range rMax_m: azimuth bins of V.azRes_deg x range bins of V.dR_m.
 %   ppi_video_add.m writes the video of every PRI into the bins of its
 %   azimuth, ppi_video_image.m draws the map as an image (colour = power).
+%   The same map holds the DBF output or the pulse compression output of the
+%   selected beam (V.kind 'dbf', 'mf'; ppi_profile_row.m, ppi_video_add_row.m);
+%   V.dbf{p}, V.mf{p} (p = 1 short, 2 long) give the samples and range bins of
+%   both outputs, joined like the video; ppi_rd_map.m puts the range-Doppler
+%   map of the selected beam into the same range bins.
 %
 %   Video of a PRI: the DDC output of all receive elements averaged
 %   non-coherently (mean of I^2 + Q^2 over the elements, before the
@@ -22,6 +27,25 @@ idx = [ws.rxIdx(keepS), wl.rxIdx];                            % DDC samples of t
 r   = [rS(keepS), rL];
 V.dR_m = dR;
 V.nR = max(1, ceil(rMax_m / dR));                             % range bins (at least one sample each)
+V.kind = 'video';                                             % what the map holds: 'video', 'dbf', 'mf'
+V.beam = 1;                                                   % beam of 'dbf' / 'mf'
+% DBF output: the pulse compression input of a sub-pulse (wv.ddcIdx, ddc_segment.m) inside its
+% receive interval; MF output: its range cells. Short pulse: nearer than the long pulse's first cell.
+waves = {ws, wl};                                             % (own variable names: r, ok follow below)
+for p = 1:2
+    wv = waves{p};
+    jj = find(ismember(wv.ddcIdx, wv.rxIdx));                 % segment samples in the receive interval
+    rr = wv.range_m(1) + (wv.ddcIdx(jj) - wv.rxIdx(1)) * dR;
+    keep = rr < wl.range_m(1) | p == 2;
+    bb = floor(rr(keep) / dR) + 1;  inside = bb >= 1 & bb <= V.nR;
+    jj = jj(keep);
+    V.dbf{p} = struct('idx', jj(inside), 'bin', bb(inside));
+    rr = wv.range_m(:).';
+    keep = rr < wl.range_m(1) | p == 2;
+    bb = floor(rr(keep) / dR) + 1;  inside = bb >= 1 & bb <= V.nR;
+    kk = find(keep);
+    V.mf{p} = struct('idx', kk(inside), 'bin', bb(inside));
+end
 bin = floor(r / dR) + 1;
 ok = bin >= 1 & bin <= V.nR;
 V.sampleIdx = idx(ok);

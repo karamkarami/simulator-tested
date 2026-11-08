@@ -11,7 +11,11 @@
  *     --ppi-snapshot FILE    save the PPI as PNG at the end and close it
  *     --ppi-show MODE        PPI shows 'plots' (default, after the plot extractor),
  *                            'detections' (CFAR detections before it), 'both' or
- *                            'video' (DDC output averaged over the elements)
+ *                            'video' (DDC output averaged over the elements), 'dbf'
+ *                            (DBF output of the selected beam) or 'mf' (pulse
+ *                            compression output of the selected beam)
+ *     --ppi-beam N           beam shown by dbf / mf and the range-Doppler tab (1 ... beams, default 1)
+ *     --ppi-tab TAB          tab at the start: 'ppi' (default) or 'rd' (range-Doppler map + small PPI)
  *     --serial DEVICE        send the CFAR detections to a serial port (e.g. /dev/ttyUSB0, COM3)
  *     --baud N               serial baud rate (default 921600)
  *     --serial-content X     'detections' (default) or 'plots'
@@ -49,7 +53,8 @@
 
 typedef struct {
     const char *configPath, *recordPath, *replayPath, *snapshotPath;
-    const char *serialDevice, *serialContent, *plotsCsv, *detectionsCsv, *tracksCsv, *mf, *ppiShow;
+    const char *serialDevice, *serialContent, *plotsCsv, *detectionsCsv, *tracksCsv, *mf, *ppiShow, *ppiTab;
+    int ppiBeam;                  /* 1-based */
     int port, baud, threads, updateEvery, ppi, quiet, queue, noSkip;
     int rtPriority, mlock;        /* real time (Linux) */
     const char *cpus, *inputCpus;
@@ -101,6 +106,8 @@ static int parse_options(int argc, char **argv, Options *o)
     o->plotsCsv = "plots.csv";
     o->mf = "auto";
     o->ppiShow = "plots";
+    o->ppiTab = "ppi";
+    o->ppiBeam = 1;
     o->queue = 64;
     o->cfarThreshold_dB = NAN;
     o->quiet = -1;                                   /* from the configuration (consolePlots) */
@@ -115,6 +122,8 @@ static int parse_options(int argc, char **argv, Options *o)
         else if (!strcmp(a, "--ppi"))            o->ppi = 1;
         else if (!strcmp(a, "--ppi-snapshot"))   TAKE((o->snapshotPath = v, o->ppi = 1));
         else if (!strcmp(a, "--ppi-show"))       TAKE(o->ppiShow = v);
+        else if (!strcmp(a, "--ppi-beam"))       TAKE(o->ppiBeam = atoi(v));
+        else if (!strcmp(a, "--ppi-tab"))        TAKE(o->ppiTab = v);
         else if (!strcmp(a, "--serial"))         TAKE(o->serialDevice = v);
         else if (!strcmp(a, "--baud"))           TAKE(o->baud = atoi(v));
         else if (!strcmp(a, "--serial-content")) TAKE(o->serialContent = v);
@@ -151,8 +160,16 @@ static int parse_options(int argc, char **argv, Options *o)
         return -1;
     }
     if (strcmp(o->ppiShow, "plots") && strcmp(o->ppiShow, "detections") && strcmp(o->ppiShow, "both") &&
-        strcmp(o->ppiShow, "video")) {
-        fprintf(stderr, "--ppi-show must be 'plots', 'detections', 'both' or 'video'\n");
+        strcmp(o->ppiShow, "video") && strcmp(o->ppiShow, "dbf") && strcmp(o->ppiShow, "mf")) {
+        fprintf(stderr, "--ppi-show must be 'plots', 'detections', 'both', 'video', 'dbf' or 'mf'\n");
+        return -1;
+    }
+    if (strcmp(o->ppiTab, "ppi") && strcmp(o->ppiTab, "rd")) {
+        fprintf(stderr, "--ppi-tab must be 'ppi' or 'rd'\n");
+        return -1;
+    }
+    if (o->ppiBeam < 1) {
+        fprintf(stderr, "--ppi-beam must be 1 or more\n");
         return -1;
     }
     if (strcmp(o->serialContent, "detections") && strcmp(o->serialContent, "plots")) {
@@ -270,6 +287,32 @@ static void on_track(void *user, const Track *t)
 #endif
 }
 
+/* DBF / pulse compression output of the selected beam (PPI display modes dbf, mf). */
+static void on_profile(void *user, int kind, const float *row, int nBins, double dR_m, double az_deg, double time_s)
+{
+    App *app = user;
+#ifdef RADAR_WITH_QT
+    const double t0 = now_seconds();
+    ppi_post_profile(kind, row, nBins, dR_m, az_deg, time_s);
+    app->display_ms += ms_since(t0);
+#else
+    (void)app; (void)kind; (void)row; (void)nBins; (void)dR_m; (void)az_deg; (void)time_s;
+#endif
+}
+
+/* Range-Doppler map of the selected beam (range-Doppler tab of the PPI). */
+static void on_rdmap(void *user, const RdMap *map)
+{
+    App *app = user;
+#ifdef RADAR_WITH_QT
+    const double t0 = now_seconds();
+    ppi_post_rdmap(map);
+    app->display_ms += ms_since(t0);
+#else
+    (void)app; (void)map;
+#endif
+}
+
 static void on_antenna(void *user, double az_deg, double time_s, uint32_t scan)
 {
     App *app = user;
@@ -372,14 +415,15 @@ static int worker(void *arg)
         app->exitCode = 1;
         return 1;
     }
-    ProcessorCallbacks cb = { on_detections, on_plot, on_antenna, app, on_track };
+    ProcessorCallbacks cb = { on_detections, on_plot, on_antenna, app, on_track, on_profile, on_rdmap };
 #ifdef RADAR_WITH_QT
     char detName[48], trackName[64];
     snprintf(detName, sizeof detName, "CFAR %s %s", cfar_type_name(app->cfg.cfarType), cfar_method_name(app->cfg.cfarMethod));
     if (app->cfg.trackEnable) {       /* short: the timing panel has 15 characters for a label */
-        char tn[40];
-        tracker_name(&app->cfg, tn, sizeof tn);
-        snprintf(trackName, sizeof trackName, "Track %s", tn);
+        if (app->cfg.trackMethod == TRACK_METHOD_PMBM)
+            snprintf(trackName, sizeof trackName, "Track PMBM %dD", app->cfg.trackDim);
+        else
+            snprintf(trackName, sizeof trackName, "Track EKF %dD %s", app->cfg.trackDim, app->cfg.trackModel == TRACK_CA ? "CA" : "CV");
     } else {
         snprintf(trackName, sizeof trackName, "Track (off)");
     }
@@ -469,6 +513,15 @@ static int worker(void *arg)
                 ppi_post_video(videoRow, video.nBins, video.dR_m, pri->az_deg, pri->time_s);
             }
             app->display_ms += ms_since(tVideo);
+        }
+#endif
+#ifdef RADAR_WITH_QT
+        if (app->opt.ppi) {                                  /* what the PPI shows: profile, range-Doppler map */
+            int beam = 0;
+            const int kind = ppi_profile_wanted(&beam);
+            processor_set_profile(proc, kind, beam);
+            const int rd = ppi_rdmap_wanted(&beam);
+            processor_set_rdmap(proc, rd, beam, 0.1);         /* at most 10 maps per second */
         }
 #endif
         if (live && !app->opt.noSkip)
@@ -597,7 +650,19 @@ int main(int argc, char **argv)
 #ifdef RADAR_WITH_QT
         ppi_set_display_mode(!strcmp(app.opt.ppiShow, "detections") ? PPI_SHOW_DETECTIONS
                              : !strcmp(app.opt.ppiShow, "both") ? PPI_SHOW_BOTH
-                             : !strcmp(app.opt.ppiShow, "video") ? PPI_SHOW_VIDEO : PPI_SHOW_PLOTS);
+                             : !strcmp(app.opt.ppiShow, "video") ? PPI_SHOW_VIDEO
+                             : !strcmp(app.opt.ppiShow, "dbf") ? PPI_SHOW_DBF
+                             : !strcmp(app.opt.ppiShow, "mf") ? PPI_SHOW_MF : PPI_SHOW_PLOTS);
+        {
+            double el[256];
+            const int nB = app.cfg.nBeams < 256 ? app.cfg.nBeams : 256;
+            for (int b = 0; b < nB; b++)
+                el[b] = app.cfg.dbfEnabled ? app.cfg.tilt_deg + asin(app.cfg.beamU[b]) * 180.0 / 3.14159265358979323846 : NAN;
+            ppi_set_beams(nB, el);
+            if (app.opt.ppiBeam > nB) fprintf(stderr, "--ppi-beam %d: only %d beam(s), beam 1 is shown\n", app.opt.ppiBeam, nB);
+            ppi_set_beam(app.opt.ppiBeam <= nB ? app.opt.ppiBeam - 1 : 0);
+            ppi_set_tab(!strcmp(app.opt.ppiTab, "rd"));
+        }
         app.exitCode = ppi_run(argc, argv, app.cfg.maxRange_m, worker, &app, &g_stop, app.opt.snapshotPath);
 #else
         fprintf(stderr, "this build has no Qt: --ppi is not available\n");

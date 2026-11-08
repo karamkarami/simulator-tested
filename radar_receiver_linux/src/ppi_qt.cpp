@@ -67,6 +67,8 @@
 #include <QFileDialog>
 #include <QDateTime>
 #include <QHBoxLayout>
+#include <QResizeEvent>
+#include <QTabWidget>
 #include <QImage>
 #include <QLabel>
 #include <QLinearGradient>
@@ -183,7 +185,9 @@ struct CfarState {
     double   request_dB = 0.0;
 };
 
-struct VideoRow {                 /* the video of one PRI (ppi_post_video) */
+struct VideoRow {                 /* the raw data of one PRI (ppi_post_video, ppi_post_profile) */
+    int                kind = 0;      /* 0 video, PROFILE_DBF, PROFILE_MF */
+    int                beam = 0;      /* DBF / MF: the beam (0-based)     */
     double             az_deg = 0.0, time_s = 0.0, dR_m = 0.0;
     std::vector<float> v;
 };
@@ -203,6 +207,24 @@ QRgb video_colour(int i)
 }
 
 std::atomic<int> g_videoWanted(0);   /* the PPI shows the video: the worker computes it */
+std::atomic<int> g_profileKind(0);   /* PROFILE_DBF / PROFILE_MF while the PPI shows that output */
+std::atomic<int> g_beam(0);          /* the beam of the DBF / MF output and the range-Doppler map */
+std::atomic<int> g_rdWanted(0);      /* the range-Doppler tab is shown */
+std::vector<double> &beam_elevations()   /* the beams of the beam selector (ppi_set_beams) */
+{
+    static std::vector<double> el(1, NAN);
+    return el;
+}
+
+/* Range-Doppler map of one beam (ppi_post_rdmap): the copy for the GUI thread. */
+struct RdFrame {
+    bool                valid = false;
+    int                 beam = 0, nBins = 0, nfft = 0, notchBins = 0;
+    double              dR_m = 0.0, noise = 0.0, time_s = 0.0, az_deg = 0.0;
+    std::vector<float>  power;        /* [nfft][nBins] */
+    std::vector<double> vel;          /* [nfft]        */
+    std::vector<Detection> dets;
+};
 
 struct Shared {
     std::mutex            mutex;
@@ -210,6 +232,8 @@ struct Shared {
     std::vector<PlotMark> newPlots;   /* plots not yet taken by the GUI thread */
     std::vector<PlotMark> newDets;    /* CFAR detections not yet taken         */
     std::vector<VideoRow> newVideo;   /* video rows not yet taken              */
+    RdFrame               rd;         /* newest range-Doppler map              */
+    uint64_t              rdSerial = 0;
     bool                  clear = false;   /* a new run started: clear the display */
     uint64_t              nextId = 1;
     CfarState             cfar;
@@ -239,6 +263,8 @@ void reset_shared()
     s.newPlots.clear();
     s.newDets.clear();
     s.newVideo.clear();
+    s.rd = RdFrame();
+    s.rdSerial = 0;
     s.clear = true;
     s.cfar = CfarState();
     s.trackUpdates.clear();
@@ -370,8 +396,23 @@ QPointF event_pos(const QWheelEvent *e)
 /* ------------------------------------------------------------------------ */
 
 enum class History { UntilSwept, TwoScans, All };
-/* after / before the plot extractor, both, raw video (the order of the panel's box) */
-enum class DisplayMode { Plots, Detections, Both, Video };
+/* after / before the plot extractor, both, raw video, DBF output and pulse compression
+ * output of the selected beam (the order of the panel's box and of PPI_SHOW_...) */
+enum class DisplayMode { Plots, Detections, Both, Video, DbfOut, MfOut };
+
+/* The kind of raw data a display mode shows: 0 video, PROFILE_DBF, PROFILE_MF; -1 none. */
+int raw_kind(DisplayMode m)
+{
+    return m == DisplayMode::Video ? 0 : m == DisplayMode::DbfOut ? PROFILE_DBF : m == DisplayMode::MfOut ? PROFILE_MF : -1;
+}
+
+QString beam_text(int beam)
+{
+    const std::vector<double> &el = beam_elevations();
+    const double e = beam >= 0 && beam < (int)el.size() ? el[beam] : NAN;
+    return std::isfinite(e) ? QStringLiteral("beam %1 (el %2)").arg(beam + 1).arg(deg_text(e, 1))
+                            : QStringLiteral("beam %1").arg(beam + 1);
+}
 
 class PpiWidget : public QWidget {
 public:
@@ -424,11 +465,22 @@ public:
     size_t visibleDetectionCount() const;
     void   setDisplayMode(DisplayMode m)
     {
+        if (raw_kind(m) != raw_kind(mode_)) clearVideo();  /* other raw data */
         mode_ = m;
         g_videoWanted.store(m == DisplayMode::Video);
+        g_profileKind.store(raw_kind(m) > 0 ? raw_kind(m) : PROFILE_NONE);
         videoImageDirty_ = true;
         update();
     }
+    /* beam (0-based) of the DBF / MF output and of the range-Doppler map */
+    void   setBeam(int beam)
+    {
+        if (beam == g_beam.load()) return;
+        g_beam.store(beam);
+        if (raw_kind(mode_) > 0) clearVideo();
+        update();
+    }
+    int    beam() const { return g_beam.load(); }
     /* video: azimuth bins with data, noise floor [dB], colour index of a ground point (0 = none) */
     int    videoBinsFilled() const
     {
@@ -579,7 +631,8 @@ void PpiWidget::refresh()
         s.clear = false;
     }
     if (clear) { plots_.clear(); dets_.clear(); tracks_.clear(); pinned_.clear(); clearVideo(); }
-    for (const VideoRow &row : incomingVideo_) addVideoRow(row);
+    for (const VideoRow &row : incomingVideo_)           /* only the raw data of this mode (and beam) */
+        if (row.kind == raw_kind(mode_) && (row.kind == 0 || row.beam == g_beam.load())) addVideoRow(row);
     incomingVideo_.clear();
     for (const auto &u : incomingTracks_) {             /* newest state of every track */
         if (u.second.deleted) tracks_.erase(u.first);
@@ -617,7 +670,7 @@ bool PpiWidget::expired(const PlotMark &m) const
 
 bool PpiWidget::shown(const PlotMark &m) const
 {
-    if (mode_ == DisplayMode::Video) return false;      /* the video instead of plots and detections */
+    if (raw_kind(mode_) >= 0) return false;            /* raw data instead of plots and detections */
     const bool modeOk = m.isDet ? mode_ != DisplayMode::Plots : mode_ != DisplayMode::Detections;
     return modeOk && (m.pulse == PULSE_LONG ? showLong_ : showShort_) && !(m.det.snr_dB < minSnr_dB_);
 }
@@ -796,7 +849,9 @@ void PpiWidget::keyPressEvent(QKeyEvent *event)
     case Qt::Key_T:     setShowTracks(!showTracks_); break;
     case Qt::Key_D:     setDisplayMode(mode_ == DisplayMode::Plots ? DisplayMode::Detections
                                        : mode_ == DisplayMode::Detections ? DisplayMode::Both
-                                       : mode_ == DisplayMode::Both ? DisplayMode::Video : DisplayMode::Plots);
+                                       : mode_ == DisplayMode::Both ? DisplayMode::Video
+                                       : mode_ == DisplayMode::Video ? DisplayMode::DbfOut
+                                       : mode_ == DisplayMode::DbfOut ? DisplayMode::MfOut : DisplayMode::Plots);
                         break;
     case Qt::Key_Space: setPaused(!paused_); break;
     case Qt::Key_S: {
@@ -822,7 +877,9 @@ void PpiWidget::contextMenuEvent(QContextMenuEvent *event)
         { "Plots (after the plot extractor)", DisplayMode::Plots },
         { "CFAR detections (before the extractor)", DisplayMode::Detections },
         { "Plots and detections", DisplayMode::Both },
-        { "Video (DDC output, elements averaged)", DisplayMode::Video } };
+        { "Video (DDC output, elements averaged)", DisplayMode::Video },
+        { "DBF out (selected beam)", DisplayMode::DbfOut },
+        { "MF out (pulse compression, selected beam)", DisplayMode::MfOut } };
     for (const auto &item : modeItems) {
         QAction *a = modeMenu->addAction(QString::fromLatin1(item.first));
         a->setCheckable(true);
@@ -1203,7 +1260,9 @@ void PpiWidget::addVideoRow(const VideoRow &row)
     if (!videoTmp_.empty()) {
         auto mid = videoTmp_.begin() + (videoTmp_.size() - 1) / 10;
         std::nth_element(videoTmp_.begin(), mid, videoTmp_.end());
-        const double m = 10.0 * std::log10((double)*mid);
+        /* DBF / MF out: one complex sample per bin (exponential power): its 10th
+         * percentile is 9.77 dB below the mean (the video averages the elements) */
+        const double m = 10.0 * std::log10((double)*mid) + (row.kind == 0 ? 0.0 : 9.77);
         videoNoise_dB_ = std::isfinite(videoNoise_dB_) ? 0.98 * videoNoise_dB_ + 0.02 * m : m;
     }
     bool requantise = false;
@@ -1242,7 +1301,7 @@ void PpiWidget::addVideoRow(const VideoRow &row)
  * changes; the image is rebuilt when new video arrived). */
 void PpiWidget::drawVideo(QPainter &p)
 {
-    if (mode_ != DisplayMode::Video || videoBins_ < 1) return;
+    if (raw_kind(mode_) < 0 || videoBins_ < 1) return;
     const QSize sz = size();
     if (sz.isEmpty()) return;
     if (lutSize_ != sz || lutZoom_ != zoom_ || lutE_ != viewE_ || lutN_ != viewN_ || lutBins_ != videoBins_) {
@@ -1331,12 +1390,14 @@ void PpiWidget::drawStatus(QPainter &p) const
                     .arg(antenna_.scan)
                     .arg(antenna_.time_s, 0, 'f', 2)
                     .arg(deg_text(antenna_.az_deg, 1));
-        if (mode_ == DisplayMode::Video)
-            line1 += std::isfinite(videoNoise_dB_) ? QStringLiteral("    Video (noise %1 dB)").arg(videoNoise_dB_, 0, 'f', 1)
-                                                   : QStringLiteral("    Video (no data yet)");
-        else if (mode_ != DisplayMode::Detections)
+        if (raw_kind(mode_) >= 0) {
+            const QString what = mode_ == DisplayMode::Video ? QStringLiteral("Video")
+                               : QStringLiteral("%1 %2").arg(mode_ == DisplayMode::DbfOut ? "DBF out" : "MF out").arg(beam_text(g_beam.load()));
+            line1 += std::isfinite(videoNoise_dB_) ? QStringLiteral("    %1 (noise %2 dB)").arg(what).arg(videoNoise_dB_, 0, 'f', 1)
+                                                   : QStringLiteral("    %1 (no data yet)").arg(what);
+        } else if (mode_ != DisplayMode::Detections)
             line1 += QStringLiteral("    Plots %1 / %2").arg((qulonglong)visibleCount()).arg((qulonglong)plots_.size());
-        if (mode_ != DisplayMode::Plots && mode_ != DisplayMode::Video)
+        if (mode_ != DisplayMode::Plots && raw_kind(mode_) < 0)
             line1 += QStringLiteral("    Detections %1").arg((qulonglong)visibleDetectionCount());
         if (showTracks_ && !tracks_.empty())
             line1 += QStringLiteral("    Tracks %1").arg((qulonglong)confirmedCount());
@@ -1372,15 +1433,17 @@ void PpiWidget::drawLegend(QPainter &p) const
 {
     enum Kind { PlotS, PlotL, DetS, DetL, VideoK, TrackK, Antenna, Help };
     std::vector<std::pair<Kind, QString>> rows;
-    if (mode_ == DisplayMode::Video) {
-        rows.emplace_back(Help, QStringLiteral("Video [dB above noise], elements averaged"));
+    if (raw_kind(mode_) >= 0) {
+        rows.emplace_back(Help, mode_ == DisplayMode::Video ? QStringLiteral("Video [dB above noise], elements averaged")
+                                : mode_ == DisplayMode::DbfOut ? QStringLiteral("DBF out [dB above noise], %1").arg(beam_text(g_beam.load()))
+                                : QStringLiteral("MF out [dB above noise], %1").arg(beam_text(g_beam.load())));
         rows.emplace_back(VideoK, QString());
         rows.emplace_back(Help, QString());              /* (room for the scale labels) */
     } else if (mode_ != DisplayMode::Detections) {
         rows.emplace_back(PlotS, QStringLiteral("Plot, short pulse"));
         rows.emplace_back(PlotL, QStringLiteral("Plot, long pulse"));
     }
-    if (mode_ != DisplayMode::Plots && mode_ != DisplayMode::Video) {
+    if (mode_ != DisplayMode::Plots && raw_kind(mode_) < 0) {
         rows.emplace_back(DetS, QStringLiteral("CFAR detection, short pulse"));
         rows.emplace_back(DetL, QStringLiteral("CFAR detection, long pulse"));
     }
@@ -1392,7 +1455,7 @@ void PpiWidget::drawLegend(QPainter &p) const
     const QFontMetrics fm(font);
     int textWidth = 0;
     for (const auto &r : rows) textWidth = std::max(textWidth, fm.horizontalAdvance(r.second));
-    if (mode_ == DisplayMode::Video) textWidth = std::max(textWidth, 230);
+    if (raw_kind(mode_) >= 0) textWidth = std::max(textWidth, 230);
     const double rowH = 18.0, pad = 8.0, n = (double)rows.size();
     const QRectF box(8.0, height() - 8.0 - n * rowH - 2.0 * pad, 2.0 * pad + 26.0 + textWidth, n * rowH + 2.0 * pad);
     p.setPen(QPen(kColorGrid, 1.0));
@@ -1471,9 +1534,267 @@ void PpiWidget::paintEvent(QPaintEvent *event)
     drawLegend(p);
 }
 
-bool save_snapshot(PpiWidget &widget, const char *path)
+
+/* ------------------------------------------------------------------------ */
+/* Range-Doppler map of the selected beam (second tab)                       */
+/* ------------------------------------------------------------------------ */
+
+/* "Nice" axis step (1, 2, 5 x 10^k) for about n ticks over a span. */
+double nice_step(double span, int n)
 {
-    return widget.saveSnapshot(QString::fromLocal8Bit(path));
+    const double raw = span / std::max(1, n), p = std::pow(10.0, std::floor(std::log10(raw)));
+    const double f = raw / p;
+    return (f < 1.5 ? 1.0 : f < 3.5 ? 2.0 : f < 7.5 ? 5.0 : 10.0) * p;
+}
+
+/* The power map of the beam (range x radial velocity, colour = dB above the
+ * noise floor of the map, from -3 dB to the strongest cell), the CFAR
+ * detections of the beam (white circles), the MTI notch (dashed), and below
+ * it the Doppler spectrum (dB) of one range bin: the one under the cursor, or
+ * else the bin of the strongest detection (or of the strongest cell). */
+class RdWidget : public QWidget {
+public:
+    RdWidget()
+    {
+        setMouseTracking(true);
+        setMinimumSize(300, 250);
+        setAttribute(Qt::WA_OpaquePaintEvent);
+    }
+    void setFrame(const RdFrame &f)
+    {
+        frame_ = f;
+        if (!frame_.valid) { update(); return; }
+        /* range bins with data, dB above noise, the scale */
+        first_ = frame_.nBins; last_ = -1;
+        maxDb_ = -1e9;
+        const double noise = frame_.noise > 0 ? frame_.noise : 1.0;
+        db_.assign(frame_.power.size(), NAN);
+        for (int d = 0; d < frame_.nfft; d++)
+            for (int b = 0; b < frame_.nBins; b++) {
+                const float v = frame_.power[(size_t)d * frame_.nBins + b];
+                if (!(v > 0)) continue;
+                const double x = 10.0 * std::log10(v / noise);
+                db_[(size_t)d * frame_.nBins + b] = (float)x;
+                first_ = std::min(first_, b);
+                last_ = std::max(last_, b);
+                maxDb_ = std::max(maxDb_, x);
+            }
+        hiDb_ = std::max(20.0, std::ceil(maxDb_ / 5.0) * 5.0);
+        /* the bin of the spectrum without a cursor: strongest detection, else strongest cell */
+        autoBin_ = -1;
+        double best = -1e9;
+        for (const Detection &dt : frame_.dets) {
+            const int b = (int)std::floor(dt.range_m / frame_.dR_m);
+            if (b >= 0 && b < frame_.nBins && dt.power > best) { best = dt.power; autoBin_ = b; }
+        }
+        if (autoBin_ < 0) {
+            for (size_t i = 0; i < db_.size(); i++)
+                if (db_[i] == db_[i] && db_[i] > best) { best = db_[i]; autoBin_ = (int)(i % frame_.nBins); }
+        }
+        image_ = QImage();
+        update();
+    }
+    const RdFrame &frame() const { return frame_; }
+    bool   hasFrame() const { return frame_.valid && last_ >= first_; }
+    double maxDb() const { return maxDb_; }
+    int    spectrumBin() const { return cursorBin_ >= 0 ? cursorBin_ : autoBin_; }
+    QRectF mapRect() const { return mapRect_; }
+    QString readout() const { return readout_; }
+    /* screen point of a range [m] and Doppler bin (for the tests) */
+    QPointF screenOf(double range_m, int dBin) const
+    {
+        const double x0 = first_ * frame_.dR_m, x1 = (last_ + 1) * frame_.dR_m;
+        return QPointF(mapRect_.left() + (range_m - x0) / (x1 - x0) * mapRect_.width(),
+                       mapRect_.top() + (dBin + 0.5) / frame_.nfft * mapRect_.height());
+    }
+    void hoverAt(QPointF pos) { updateCursor(pos); }
+
+protected:
+    void mouseMoveEvent(QMouseEvent *e) override { updateCursor(event_pos(e)); }
+    void leaveEvent(QEvent *) override { cursorBin_ = -1; readout_.clear(); update(); }
+    void resizeEvent(QResizeEvent *) override { update(); }
+    void paintEvent(QPaintEvent *) override;
+
+private:
+    void layoutRects()
+    {
+        const double w = width(), h = height(), left = 64.0, right = 78.0, top = 46.0;
+        const double gap = 46.0, specH = std::max(80.0, 0.28 * h);
+        mapRect_ = QRectF(left, top, std::max(50.0, w - left - right), std::max(50.0, h - top - gap - specH - 30.0));
+        specRect_ = QRectF(left, mapRect_.bottom() + gap, mapRect_.width(), specH);
+    }
+    void updateCursor(QPointF pos)
+    {
+        layoutRects();
+        cursorBin_ = -1;
+        readout_.clear();
+        if (hasFrame() && mapRect_.contains(pos)) {
+            const double fx = (pos.x() - mapRect_.left()) / mapRect_.width();
+            const int b = std::min(last_, first_ + (int)std::floor(fx * (last_ - first_ + 1)));
+            const int d = std::min(frame_.nfft - 1, (int)std::floor((pos.y() - mapRect_.top()) / mapRect_.height() * frame_.nfft));
+            cursorBin_ = b;
+            const float v = db_[(size_t)d * frame_.nBins + b];
+            readout_ = QStringLiteral("R %1 km   v %2 m/s   %3")
+                           .arg((b + 0.5) * frame_.dR_m / 1e3, 0, 'f', 2).arg(frame_.vel[d], 0, 'f', 1)
+                           .arg(v == v ? QStringLiteral("%1 dB above noise").arg(v, 0, 'f', 1) : QStringLiteral("no cell"));
+        }
+        update();
+    }
+    static QRgb colour_db(double x, double lo, double hi)
+    {
+        const int i = 1 + (int)std::lround(std::max(0.0, std::min(1.0, (x - lo) / (hi - lo))) * 254.0);
+        return video_colour(i);
+    }
+
+    RdFrame            frame_;
+    std::vector<float> db_;
+    int                first_ = 0, last_ = -1, autoBin_ = -1, cursorBin_ = -1;
+    double             maxDb_ = 0.0, hiDb_ = 20.0;
+    QImage             image_;
+    QRectF             mapRect_, specRect_;
+    QString            readout_;
+};
+
+void RdWidget::paintEvent(QPaintEvent *)
+{
+    QPainter p(this);
+    p.fillRect(rect(), Qt::black);
+    layoutRects();
+    const QFont small = pixel_font(font(), 11), title = pixel_font(font(), 14, true);
+    const QFontMetrics fm(small);
+    p.setFont(title);
+    p.setPen(Qt::white);
+    if (!hasFrame()) {
+        p.drawText(QPointF(16.0, 26.0), frame_.valid ? QStringLiteral("Range-Doppler map: no range cell yet")
+                                                     : QStringLiteral("Range-Doppler map: waiting for a CPI update of %1 ...")
+                                                           .arg(beam_text(g_beam.load())));
+        return;
+    }
+    const int textW = std::max(50, width() - 24);              /* long lines are cut with "..." */
+    p.drawText(QPointF(16.0, 22.0), QFontMetrics(title).elidedText(
+                   QStringLiteral("Range-Doppler map, %1   t = %2 s   az %3   peak %4 dB above noise")
+                       .arg(beam_text(frame_.beam)).arg(frame_.time_s, 0, 'f', 2)
+                       .arg(deg_text(frame_.az_deg, 1)).arg(maxDb_, 0, 'f', 1), Qt::ElideRight, textW));
+    p.setFont(small);
+    p.setPen(kColorLabel);
+    p.drawText(QPointF(16.0, 38.0), fm.elidedText(readout_.isEmpty() ? QStringLiteral("hover: range, velocity and power of a cell; "
+                                                                                      "the spectrum below follows the cursor")
+                                                                     : readout_, Qt::ElideRight, textW));
+    const int nB = last_ - first_ + 1, nfft = frame_.nfft;
+    const double lo = -3.0, hi = hiDb_;
+    const int W = std::max(1, std::min(nB, (int)mapRect_.width()));
+    if (image_.isNull() || image_.width() != W) {
+        /* one column per pixel (at most one per range bin), scaled when drawn; a
+         * column shows the largest of its range bins, so a peak of one bin stays */
+        image_ = QImage(W, nfft, QImage::Format_RGB32);
+        for (int d = 0; d < nfft; d++) {
+            QRgb *line = reinterpret_cast<QRgb *>(image_.scanLine(d));
+            const float *row = &db_[(size_t)d * frame_.nBins + first_];
+            for (int c = 0; c < W; c++) {
+                const int b0 = (int)((long long)c * nB / W), b1 = std::max(b0 + 1, (int)((long long)(c + 1) * nB / W));
+                float v = NAN;
+                for (int b = b0; b < b1; b++) if (row[b] == row[b] && !(row[b] <= v)) v = row[b];
+                line[c] = v == v ? colour_db(v, lo, hi) : qRgb(0, 0, 0);
+            }
+        }
+    }
+    p.drawImage(mapRect_, image_);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    /* MTI notch: the Doppler bins around zero that the CFAR does not test */
+    const int z = nfft / 2;
+    p.setPen(QPen(QColor(200, 200, 200), 1.0, Qt::DashLine));
+    for (int e : { z - frame_.notchBins, z + frame_.notchBins + 1 }) {
+        const double y = mapRect_.top() + (double)e / nfft * mapRect_.height();
+        p.drawLine(QPointF(mapRect_.left(), y), QPointF(mapRect_.right(), y));
+    }
+    /* detections of the beam */
+    p.setPen(QPen(Qt::white, 1.5));
+    p.setBrush(Qt::NoBrush);
+    for (const Detection &dt : frame_.dets) {
+        const QPointF c = screenOf(dt.range_m, dt.dIdx);
+        if (mapRect_.adjusted(-4, -4, 4, 4).contains(c)) p.drawEllipse(c, 6.0, 6.0);
+    }
+    /* the range bin of the spectrum */
+    const int sb = spectrumBin();
+    if (sb >= first_ && sb <= last_) {
+        const double x = mapRect_.left() + (sb - first_ + 0.5) / nB * mapRect_.width();
+        p.setPen(QPen(QColor(255, 255, 255, 120), 1.0, Qt::DotLine));
+        p.drawLine(QPointF(x, mapRect_.top()), QPointF(x, mapRect_.bottom()));
+    }
+    /* axes: range (km) below, radial velocity (m/s) left; frame */
+    p.setPen(QPen(kColorRim, 1.0));
+    p.drawRect(mapRect_);
+    const double r0 = first_ * frame_.dR_m / 1e3, r1 = (last_ + 1) * frame_.dR_m / 1e3;
+    const double rs = nice_step(r1 - r0, 8);
+    p.setPen(kColorLabel);
+    for (double r = std::ceil(r0 / rs) * rs; r <= r1 + 1e-9; r += rs) {
+        const double x = mapRect_.left() + (r - r0) / (r1 - r0) * mapRect_.width();
+        p.drawLine(QPointF(x, mapRect_.bottom()), QPointF(x, mapRect_.bottom() + 4));
+        const QString t = QString::number(r, 'g', 4);
+        p.drawText(QPointF(x - fm.horizontalAdvance(t) / 2.0, mapRect_.bottom() + 16), t);
+    }
+    p.drawText(QPointF(mapRect_.center().x() - 30, mapRect_.bottom() + 31), QStringLiteral("Range [km]"));
+    const double v0 = frame_.vel[0], v1 = frame_.vel[nfft - 1];   /* top: +v (away), bottom: -v */
+    const double vs = nice_step(std::fabs(v0 - v1), 8);
+    for (double v = std::ceil(std::min(v0, v1) / vs) * vs; v <= std::max(v0, v1) + 1e-9; v += vs) {
+        const double y = mapRect_.top() + (v0 - v) / (v0 - v1) * (mapRect_.height() * (nfft - 1.0) / nfft)
+                         + 0.5 * mapRect_.height() / nfft;
+        p.drawLine(QPointF(mapRect_.left() - 4, y), QPointF(mapRect_.left(), y));
+        const QString t = QString::number(v, 'f', 0);
+        p.drawText(QPointF(mapRect_.left() - 8 - fm.horizontalAdvance(t), y + 4), t);
+    }
+    p.save();
+    p.translate(14, mapRect_.center().y() + 50);
+    p.rotate(-90);
+    p.drawText(QPointF(0, 0), QStringLiteral("Radial velocity [m/s]"));
+    p.restore();
+    /* colour bar */
+    const QRectF bar(mapRect_.right() + 14, mapRect_.top(), 14, mapRect_.height());
+    for (int i = 0; i < (int)bar.height(); i++) {
+        const double x = hi - (hi - lo) * i / bar.height();
+        p.setPen(QColor(colour_db(x, lo, hi)));
+        p.drawLine(QPointF(bar.left(), bar.top() + i), QPointF(bar.right(), bar.top() + i));
+    }
+    p.setPen(kColorLabel);
+    const double cs = nice_step(hi - lo, 6);
+    for (double x = 0; x <= hi + 1e-9; x += cs) {
+        const double y = bar.top() + (hi - x) / (hi - lo) * bar.height();
+        p.drawText(QPointF(bar.right() + 4, y + 4), QString::number(x, 'f', 0));
+    }
+    p.drawText(QPointF(bar.right() + 4, bar.bottom() + 14), QStringLiteral("dB"));
+    /* Doppler spectrum of the selected range bin */
+    p.setPen(QPen(kColorRim, 1.0));
+    p.drawRect(specRect_);
+    if (sb >= first_ && sb <= last_) {
+        const double sLo = -10.0, sHi = std::max(hi, 10.0);
+        auto yOf = [&](double x) { return specRect_.bottom() - (std::max(sLo, std::min(sHi, x)) - sLo) / (sHi - sLo) * specRect_.height(); };
+        p.setPen(QPen(kColorGrid, 1.0, Qt::DashLine));
+        for (double x = 0; x <= sHi; x += nice_step(sHi - sLo, 4)) p.drawLine(QPointF(specRect_.left(), yOf(x)), QPointF(specRect_.right(), yOf(x)));
+        QPainterPath path;
+        bool started = false;
+        for (int d = nfft - 1; d >= 0; d--) {                /* x: velocity from -v (left) to +v (right) */
+            const float v = db_[(size_t)d * frame_.nBins + sb];
+            if (v != v) continue;
+            const QPointF q(specRect_.left() + (nfft - 1 - d + 0.5) / nfft * specRect_.width(), yOf(v));
+            if (!started) { path.moveTo(q); started = true; } else path.lineTo(q);
+        }
+        p.setPen(QPen(QColor(0, 230, 255), 1.5));
+        p.drawPath(path);
+        p.setPen(QPen(Qt::white, 1.5));
+        for (const Detection &dt : frame_.dets)
+            if ((int)std::floor(dt.range_m / frame_.dR_m) == sb) {
+                const float v = db_[(size_t)dt.dIdx * frame_.nBins + sb];
+                if (v == v) p.drawEllipse(QPointF(specRect_.left() + (nfft - 1 - dt.dIdx + 0.5) / nfft * specRect_.width(), yOf(v)), 5.0, 5.0);
+            }
+        p.setPen(kColorLabel);
+        p.drawText(QPointF(specRect_.left(), specRect_.top() - 6), fm.elidedText(
+                   QStringLiteral("Doppler spectrum at %1 km (%2) [dB above noise]; velocity -%3 ... +%3 m/s, circles: detections")
+                       .arg((sb + 0.5) * frame_.dR_m / 1e3, 0, 'f', 2)
+                       .arg(cursorBin_ >= 0 ? QStringLiteral("cursor") : QStringLiteral("strongest peak"))
+                       .arg(std::fabs(v0), 0, 'f', 0), Qt::ElideRight, (int)specRect_.width() + 40));
+        for (double x = 0; x <= sHi; x += nice_step(sHi - sLo, 4))
+            p.drawText(QPointF(specRect_.right() + 4, yOf(x) + 4), QString::number(x, 'f', 0));
+    }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1508,9 +1829,26 @@ public:
         mode_->addItem(QStringLiteral("Detections (before extractor)"));
         mode_->addItem(QStringLiteral("Plots and detections"));
         mode_->addItem(QStringLiteral("Video (DDC, elements avg.)"));
+        mode_->addItem(QStringLiteral("DBF out (selected beam)"));
+        mode_->addItem(QStringLiteral("MF out (selected beam)"));
         v->addWidget(mode_);
         QObject::connect(mode_, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
                          [this](int i) { ppi_->setDisplayMode((DisplayMode)i); ppi_->setFocus(); });
+        QLabel *beamLabel = new QLabel(QStringLiteral("Beam after DBF (DBF out, MF out, range-Doppler)"), panel);
+        beamLabel->setWordWrap(true);
+        v->addWidget(beamLabel);
+        beam_ = new QComboBox(panel);
+        for (int b = 0; b < (int)beam_elevations().size(); b++) {
+            const double e = beam_elevations()[b];
+            beam_->addItem(std::isfinite(e) ? QStringLiteral("%1   (el %2)").arg(b + 1).arg(deg_text(e, 1))
+                                            : QStringLiteral("%1   (no DBF)").arg(b + 1));
+        }
+        v->addWidget(beam_);
+        QObject::connect(beam_, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), [this](int i) {
+            ppi_->setBeam(i);
+            rd_->setFrame(RdFrame());                    /* the map of the new beam comes with the next update */
+            ppi_->setFocus();
+        });
         tracks_ = new QCheckBox(QStringLiteral("Tracks (T)"), panel);
         tracks_->setChecked(ppi_->showTracks());
         v->addWidget(tracks_);
@@ -1567,15 +1905,58 @@ public:
         help->setStyleSheet(QStringLiteral("color: #909090;"));
         v->addWidget(help);
 
+        /* tabs: the PPI; the range-Doppler map of the selected beam with a small PPI.
+         * The one PPI widget moves between the tabs; the panel serves both. */
+        tabs_ = new QTabWidget(this);
+        tabs_->setStyleSheet(QStringLiteral("QTabWidget::pane { border: 0; } QTabBar::tab { background: #202020; "
+                                            "color: #d0d0d0; padding: 5px 16px; } QTabBar::tab:selected { "
+                                            "background: #383838; color: white; }"));
+        QWidget *page1 = new QWidget(), *page2 = new QWidget();
+        page1->setStyleSheet(QStringLiteral("background: black;"));
+        page2->setStyleSheet(QStringLiteral("background: black;"));
+        pageLayout1_ = new QVBoxLayout(page1);
+        pageLayout1_->setContentsMargins(0, 0, 0, 0);
+        pageLayout2_ = new QHBoxLayout(page2);
+        pageLayout2_->setContentsMargins(0, 0, 0, 0);
+        pageLayout2_->setSpacing(4);
+        rd_ = new RdWidget();
+        pageLayout2_->addWidget(rd_, 3);
+        pageLayout1_->addWidget(ppi_, 1);
+        tabs_->addTab(page1, QStringLiteral("PPI"));
+        tabs_->addTab(page2, QStringLiteral("Range-Doppler (selected beam)"));
+        QObject::connect(tabs_, &QTabWidget::currentChanged, [this](int i) { showTab(i); });
+
         QHBoxLayout *top = new QHBoxLayout(this);
         top->setContentsMargins(0, 0, 0, 0);
         top->setSpacing(0);
-        top->addWidget(ppi_, 1);
+        top->addWidget(tabs_, 1);
         top->addWidget(panel);
         ppi_->setFocus();
     }
 
     PpiWidget &ppi() { return *ppi_; }
+    RdWidget &rd() { return *rd_; }
+    QTabWidget *tabs() { return tabs_; }
+    QComboBox *beamBox() { return beam_; }
+    /* the PPI in the first tab (whole page), or small next to the range-Doppler map */
+    void showTab(int i)
+    {
+        if (i == 1) pageLayout2_->addWidget(ppi_, 2);
+        else pageLayout1_->addWidget(ppi_, 1);
+        ppi_->setMinimumSize(i == 1 ? 200 : 300, i == 1 ? 200 : 300);
+        g_rdWanted.store(i == 1);
+        if (tabs_->currentIndex() != i) tabs_->setCurrentIndex(i);
+        ppi_->setFocus();
+    }
+    /* screenshot: the PPI in the first tab, the whole page (map and PPI) in the second */
+    bool saveSnapshot(const QString &path)
+    {
+        if (tabs_->currentIndex() == 0) return ppi_->saveSnapshot(path);
+        const QPixmap pm = tabs_->currentWidget()->grab();
+        if (pm.save(path, "PNG")) return true;
+        std::fprintf(stderr, "PPI: cannot save the snapshot to %s\n", path.toLocal8Bit().constData());
+        return false;
+    }
     QCheckBox *tracksBox() { return tracks_; }
     QString timingText() const { return timing_->text(); }
     QComboBox *modeBox() { return mode_; }
@@ -1602,6 +1983,19 @@ public:
             tracks_->blockSignals(b);
         }
         showTiming();
+        {                                                   /* newest range-Doppler map (second tab) */
+            RdFrame f;
+            bool fresh = false;
+            {
+                Shared &s = shared();
+                std::lock_guard<std::mutex> lock(s.mutex);
+                if (s.rdSerial != rdSerial_ && tabs_->currentIndex() == 1) {
+                    rdSerial_ = s.rdSerial;
+                    if (s.rd.beam == ppi_->beam()) { f = s.rd; fresh = true; }
+                }
+            }
+            if (fresh) rd_->setFrame(f);
+        }
         if (mode_->currentIndex() != (int)ppi_->displayMode()) {   /* changed with D or the context menu */
             const bool b = mode_->blockSignals(true);
             mode_->setCurrentIndex((int)ppi_->displayMode());
@@ -1705,8 +2099,13 @@ private:
 
     PpiWidget             *ppi_;
     volatile sig_atomic_t *stopFlag_;
-    QComboBox             *mode_;
+    QComboBox             *mode_, *beam_;
     QCheckBox             *tracks_;
+    QTabWidget            *tabs_;
+    QVBoxLayout           *pageLayout1_;
+    QHBoxLayout           *pageLayout2_;
+    RdWidget              *rd_;
+    uint64_t               rdSerial_ = 0;
     QLabel                *timing_;
     uint64_t               timingSerial_ = 0;
     ProcessorTiming        timingPrev_ = {};    /* accumulated times at the start of the shown interval */
@@ -1839,10 +2238,77 @@ extern "C" int ppi_take_cfar_request(double *threshold_dB)
 }
 
 static std::atomic<int> g_startMode(PPI_SHOW_PLOTS);
+static std::atomic<int> g_startTab(0);
+
+extern "C" void ppi_set_beams(int nBeams, const double *beamEl_deg)
+{
+    std::vector<double> &el = beam_elevations();
+    el.assign(nBeams > 0 ? (size_t)nBeams : 1, NAN);
+    for (int b = 0; b < nBeams && beamEl_deg; b++) el[b] = beamEl_deg[b];
+}
+
+extern "C" void ppi_set_beam(int beam)
+{
+    g_beam.store(beam >= 0 && beam < (int)beam_elevations().size() ? beam : 0);
+}
+
+extern "C" void ppi_set_tab(int tab)
+{
+    g_startTab.store(tab == 1);
+}
+
+extern "C" int ppi_profile_wanted(int *beam)
+{
+    if (beam) *beam = g_beam.load();
+    return g_profileKind.load();
+}
+
+extern "C" void ppi_post_profile(int kind, const float *row, int nBins, double dR_m, double az_deg, double time_s)
+{
+    if (!row || nBins <= 0 || !(dR_m > 0.0) || !std::isfinite(az_deg)) return;
+    VideoRow r;
+    r.kind = kind;
+    r.beam = g_beam.load();
+    r.az_deg = az_deg;
+    r.time_s = time_s;
+    r.dR_m = dR_m;
+    r.v.assign(row, row + nBins);
+    Shared &s = shared();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (s.newVideo.size() < kMaxPendingVideo) s.newVideo.push_back(std::move(r));
+}
+
+extern "C" int ppi_rdmap_wanted(int *beam)
+{
+    if (beam) *beam = g_beam.load();
+    return g_rdWanted.load();
+}
+
+extern "C" void ppi_post_rdmap(const RdMap *map)
+{
+    if (!map || map->nBins <= 0 || map->nfft <= 0 || !map->power || !map->vel_mps) return;
+    RdFrame f;
+    f.valid = true;
+    f.beam = map->beam;
+    f.nBins = map->nBins;
+    f.nfft = map->nfft;
+    f.notchBins = map->notchBins;
+    f.dR_m = map->dR_m;
+    f.noise = map->noise;
+    f.time_s = map->time_s;
+    f.az_deg = map->az_deg;
+    f.power.assign(map->power, map->power + (size_t)map->nBins * map->nfft);
+    f.vel.assign(map->vel_mps, map->vel_mps + map->nfft);
+    if (map->dets && map->nDets > 0) f.dets.assign(map->dets, map->dets + map->nDets);
+    Shared &s = shared();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.rd = std::move(f);
+    s.rdSerial++;
+}
 
 extern "C" void ppi_set_display_mode(int mode)
 {
-    if (mode >= PPI_SHOW_PLOTS && mode <= PPI_SHOW_VIDEO) g_startMode.store(mode);
+    if (mode >= PPI_SHOW_PLOTS && mode <= PPI_SHOW_MF) g_startMode.store(mode);
 }
 
 extern "C" int ppi_run(int argc, char **argv, double maxRange_m, int (*worker)(void *), void *arg,
@@ -1867,7 +2333,9 @@ extern "C" int ppi_run(int argc, char **argv, double maxRange_m, int (*worker)(v
     window.resize(1030, 800);
     window.modeBox()->setCurrentIndex(g_startMode.load());   /* DisplayMode has the same order */
     widget.setDisplayMode((DisplayMode)g_startMode.load());    /* (also when the index did not change) */
-    window.show();
+    window.beamBox()->setCurrentIndex(g_beam.load());
+    window.showTab(g_startTab.load());
+    window.showMaximized();                                    /* the whole screen at the start */
 
     std::atomic<bool> workerDone(false);
     int workerCode = 0;
@@ -1888,7 +2356,7 @@ extern "C" int ppi_run(int argc, char **argv, double maxRange_m, int (*worker)(v
         }
         window.setFinished(workerCode);
         if (snapshotPath)
-            QCoreApplication::exit(save_snapshot(widget, snapshotPath) ? 0 : 1);
+            QCoreApplication::exit(window.saveSnapshot(QString::fromLocal8Bit(snapshotPath)) ? 0 : 1);
         else if (stopFlag && *stopFlag)
             QCoreApplication::quit();   /* stopped from outside (e.g. Ctrl+C) */
         /* otherwise the window stays open until the user closes it */

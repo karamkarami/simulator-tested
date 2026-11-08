@@ -91,12 +91,14 @@ if showPpi && exist('OCTAVE_VERSION', 'builtin') && isempty(available_graphics_t
     warning('run_radar_sim: no graphics toolkit (e.g. octave-cli): the PPI display is switched off.');
     showPpi = false;
 end
-showVideo = false;                         % the PPI shows the video: fill its map every PRI
+want = struct('raw', '', 'beam', 1, 'rd', false);   % what the PPI shows: raw data map, range-Doppler map
 if showPpi
     ppi = ppi_init(sys);
-    showVideo = strcmp(cfg.display.showMode, 'video');
     detLog = detection_log_init(cfg.display.maxDetections);   % CFAR detections for the PPI
+    [~, want] = ppi_update(ppi, sys, 0, 0, 1, []);
+    ppi.video = ppi_video_reset(ppi.video, want.raw, want.beam);
 end
+rdSlice = {[], []};  rdDets = {zeros(0, 3), zeros(0, 3)};   % range-Doppler map of the selected beam
 
 for i = 1:2
     p = names{i};
@@ -175,11 +177,12 @@ for k = 1:sched.nPulses
     if ~isempty(udp)
         udp_send_pulse(udp, hdr, I, Q);
     end
-    if showVideo                                        % video of the PPI (display time)
+    if strcmp(want.raw, 'video')                        % video of the PPI (display time)
         tb = tic;
         ppi.video = ppi_video_add(ppi.video, I, Q, az, t);
         blockUs(10) = blockUs(10) + 1e6*toc(tb);
     end
+    prof = {[], []};                                    % DBF / MF output of the selected beam (PPI)
     bb = complex(single(I), single(Q));
 
     % 4-9) Processing chain, separately for the short and the long sub-pulse
@@ -195,9 +198,11 @@ for k = 1:sched.nPulses
             bm = seg.';                                 % single element: no beamforming
         end
         blockUs(1) = blockUs(1) + 1e6*toc(tb);
+        if strcmp(want.raw, 'dbf'), prof{i} = bm(min(want.beam, size(bm, 1)), :); end
         tb = tic;
         rp = matched_filter(bm, wv);                    % [nBeams x nRange]
         blockUs(2) = blockUs(2) + 1e6*toc(tb);
+        if strcmp(want.raw, 'mf'), prof{i} = rp(min(want.beam, size(rp, 1)), :); end
         if k == cfg.display.rangeProfilePulse
             plot_range_profile(rp, wv, cfg.display.rangeProfileAxis);
         end
@@ -219,6 +224,14 @@ for k = 1:sched.nPulses
             tb = tic;                                   % Doppler and elevation of the peaks
             reports = peak_interpolation(reports, rd, sys);
             blockUs(6) = blockUs(6) + 1e6*toc(tb);
+            if want.rd                                  % range-Doppler tab: the selected beam (display time)
+                tb = tic;
+                b = min(want.beam, size(rd, 1));
+                rdSlice{i} = reshape(rd(b, :, :), size(rd, 2), size(rd, 3));
+                mine = [reports.beam] == b;
+                rdDets{i} = [[reports(mine).range_m].', [reports(mine).dIdx].', [reports(mine).power].'];
+                blockUs(10) = blockUs(10) + 1e6*toc(tb);
+            end
             if ~isempty(detLog)                         % (for the PPI: counted as display time)
                 tb = tic;
                 detLog = detection_log_add(detLog, reports);
@@ -232,6 +245,11 @@ for k = 1:sched.nPulses
         else
             blockUs(3) = blockUs(3) + 1e6*toc(tb);
         end
+    end
+    if any(strcmp(want.raw, {'dbf', 'mf'}))             % DBF / MF output of the selected beam (display time)
+        tb = tic;
+        ppi.video = ppi_video_add_row(ppi.video, ppi_profile_row(ppi.video, want.raw, prof), az, t);
+        blockUs(10) = blockUs(10) + 1e6*toc(tb);
     end
     if sys.track.enable                                 % 10) tracking (also deletes old tracks)
         tb = tic;
@@ -247,8 +265,19 @@ for k = 1:sched.nPulses
         % change, e.g. a lower CFAR threshold, shows at once, not diluted in
         % the mean since the start)
         nInt = nProcessed - timingPrev.n;
-        [sys, showVideo] = ppi_update(ppi, sys, az, t, sched.scan(k), plots, detLog.M(1:detLog.n, :), ...
-                         track_report(tracker), (blockUs - timingPrev.us) / nInt, nInt, ppi.video);   % may set a new CFAR threshold
+        rdMap = [];
+        if want.rd && (~isempty(rdSlice{1}) || ~isempty(rdSlice{2}))
+            rdMap = ppi_rd_map(ppi.video, sys, rdSlice, [rdDets{1}; rdDets{2}], want.beam, t, az);
+        end
+        old = want;
+        [sys, want] = ppi_update(ppi, sys, az, t, sched.scan(k), plots, detLog.M(1:detLog.n, :), ...
+                         track_report(tracker), (blockUs - timingPrev.us) / nInt, nInt, ppi.video, rdMap);   % may set a new CFAR threshold
+        if ~strcmp(old.raw, want.raw) || old.beam ~= want.beam   % other raw data: a new map
+            ppi.video = ppi_video_reset(ppi.video, want.raw, want.beam);
+        end
+        if old.beam ~= want.beam || ~want.rd
+            rdSlice = {[], []};  rdDets = {zeros(0, 3), zeros(0, 3)};
+        end
         timingPrev = struct('us', blockUs, 'n', nProcessed);
         blockUs(10) = blockUs(10) + 1e6*toc(tb);
     end

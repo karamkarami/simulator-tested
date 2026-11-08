@@ -8,7 +8,9 @@ function ok = test_ppi_interactive()
 %   display of the CFAR detections before the plot extractor (arcs, data
 %   tips, filters, key d) and the CFAR threshold field (request, hand-over
 %   to the processing through ppi_update, invalid input, default), and the
-%   video mode (ppi_video_add.m, image of the sector the antenna passed).
+%   video mode (ppi_video_add.m, image of the sector the antenna passed),
+%   DBF out / MF out of the selected beam (beam selector, key d) and the
+%   range-Doppler tab (map, detections, spectrum, hover, small PPI).
 
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
@@ -216,9 +218,9 @@ for az = 30:0.036:70
     V = ppi_video_add(V, I, Q, az, 14 + az/36);
 end
 ppi_callbacks('option', fig, 'showMode', 'video');
-[~, showVideo] = ppi_update(ppi, sys, 70, 16.0, 2, p, dets, tk, [], [], V);
+[~, want] = ppi_update(ppi, sys, 70, 16.0, 2, p, dets, tk, [], [], V);
 S = getappdata(fig, 'ppi');
-ok = check(showVideo && strcmp(get(S.h.video, 'Visible'), 'on') && isempty(get(S.h.long, 'XData')) ...
+ok = check(strcmp(want.raw, 'video') && ~want.rd && strcmp(get(S.h.video, 'Visible'), 'on') && isempty(get(S.h.long, 'XData')) ...
            && get(S.h.ui.showMode, 'Value') == 4, 'video mode: the video image instead of the plots') && ok;
 A = get(S.h.video, 'AlphaData');  C = get(S.h.video, 'CData');
 pix = @(r, az) round(([r*cosd(az) r*sind(az)] / (V.rMax_km*1e3) + 1) / 2 * (V.nPix - 1)) + 1;   % [row col]
@@ -230,10 +232,81 @@ ok = check(bright(pt) > bright(pn) + 0.5 && V.noise_dB < 10*log10(2*400) && V.no
            'the echo is brighter than the noise; noise floor of the video') && ok;
 ppi_callbacks('hover', fig, [0 0]);                        % (no data tip in the screenshot)
 ppi_callbacks('save', fig, fullfile(tempdir, 'ppi_video_test.png'));
-ppi_callbacks('key', fig, struct('Key', 'd', 'Character', 'd', 'Modifier', {{}}));
+keyD = struct('Key', 'd', 'Character', 'd', 'Modifier', {{}});
+ppi_callbacks('key', fig, keyD);
+S = getappdata(fig, 'ppi');
+ok = check(strcmp(S.opt.showMode, 'dbf') && get(S.h.ui.showMode, 'Value') == 5, 'key d: from the video to DBF out') && ok;
+
+%% DBF out / MF out of the selected beam: the profile rows of ppi_profile_row.m
+ok = check(numel(get(S.h.ui.beam, 'String')) == sys.nBeams && get(S.h.ui.beam, 'Value') == 1, ...
+           'beam selector: every beam after the DBF, beam 1 at the start') && ok;
+ppi_callbacks('option', fig, 'beam', 3);
+[~, want] = ppi_update(ppi, sys, 70, 16.1, 2, p, dets, tk, [], [], V);   % (V still holds the video)
+ok = check(strcmp(want.raw, 'dbf') && want.beam == 3, 'DBF out of beam 3 wanted') && ok;
+A = get(S.h.video, 'AlphaData');
+ok = check(~any(A(:)), 'the video is not shown as DBF out') && ok;
+V = ppi_video_reset(ppi.video, 'dbf', 3);
+ws = sys.wave.short;  wl = sys.wave.long;
+for az = 100:0.036:120
+    x = {complex(randn(1, numel(ws.ddcIdx)), randn(1, numel(ws.ddcIdx))), ...
+         complex(randn(1, numel(wl.ddcIdx)), randn(1, numel(wl.ddcIdx)))};
+    j = find(wl.ddcIdx == wl.rxIdx(1)) + round((tgtR - wl.range_m(1)) / dR);   % 30 km in the long pulse
+    x{2}(j + (0:2)) = 30;
+    V = ppi_video_add_row(V, ppi_profile_row(V, 'dbf', x), az, 17 + az/36);
+end
+ppi_update(ppi, sys, 120, 20.4, 2, p, dets, tk, [], [], V);
+A = get(S.h.video, 'AlphaData');  C = get(S.h.video, 'CData');
+pt = pix(tgtR + dR, 110);  pn = pix(15e3, 110);  pe = pix(20e3, 60);
+bright = @(q) max(max(sum(C(q(1)+(-1:1), q(2)+(-1:1), :), 3)));   % (of this image)
+ok = check(A(pt(1), pt(2)) == 1 && A(pe(1), pe(2)) == 0 && bright(pt) > bright(pn) + 0.5 && abs(V.noise_dB - 10*log10(2)) < 1, ...
+           'DBF out: drawn at 100 - 120 deg only, the echo at 30 km bright, noise floor') && ok;
+ok = check(~isempty(strfind(get(S.h.videoBarLabel, 'String'), 'DBF out, beam 3')), 'colour scale names DBF out and the beam') && ok;
+ppi_callbacks('save', fig, fullfile(tempdir, 'ppi_dbf_test.png'));
+ppi_callbacks('key', fig, keyD);
+[~, want] = ppi_update(ppi, sys, 120, 20.5, 2, p, dets, tk, [], [], V);
+A = get(S.h.video, 'AlphaData');
+ok = check(strcmp(want.raw, 'mf') && ~any(A(:)), 'key d: MF out wanted, the DBF data is not shown as MF out') && ok;
+rowMf = ppi_profile_row(V, 'mf', {zeros(1, ws.nRange), [zeros(1, 100) 5 zeros(1, wl.nRange - 101)]});
+b = find(rowMf > 0);
+ok = check(numel(b) == 1 && abs((b - 0.5) * dR - wl.range_m(101)) <= dR, 'MF out: a range cell in its range bin') && ok;
+ppi_callbacks('key', fig, keyD);
 S = getappdata(fig, 'ppi');
 ok = check(strcmp(S.opt.showMode, 'plots') && strcmp(get(S.h.video, 'Visible'), 'off'), ...
-           'key d: from the video back to the plots') && ok;
+           'key d: from MF out back to the plots') && ok;
+
+%% Range-Doppler tab: the map of the selected beam next to a small PPI
+pos1 = get(ppi.ax, 'Position');
+ppi_callbacks('tab', fig, 2);
+S = getappdata(fig, 'ppi');
+[~, want] = ppi_update(ppi, sys, 120, 20.6, 2, p, dets, tk);
+pos2 = get(ppi.ax, 'Position');
+ok = check(want.rd && want.beam == 3 && strcmp(get(S.h.rdAx, 'Visible'), 'on') && pos2(3) < pos1(3) ...
+           && get(S.h.tabBtn(2), 'Value') == 1 && ~isempty(strfind(get(S.h.rdTitle, 'String'), 'waiting')), ...
+           'tab 2: the map wanted, the PPI small, the map waits for a CPI update') && ok;
+nfft = sys.dop.nfft;
+slices = {rand(ws.nRange, nfft) + 0.5, rand(wl.nRange, nfft) + 0.5};
+slices{2}(101, 20 + (-2:2)) = 1000 * exp(-0.5 * (-2:2).^2);
+rdm = ppi_rd_map(V, sys, slices, [wl.range_m(101), 20, 1000], 3, 20.6, 120);
+ok = check(abs(rdm.noise - 1) < 0.05 && sum(~isnan(rdm.P(:, 1))) >= ws.nRange / 2 + wl.nRange - 2, ...
+           'the map joins both sub-pulses in range bins; noise floor = median') && ok;
+ppi_update(ppi, sys, 120, 20.7, 2, p, dets, tk, [], [], V, rdm);
+img = get(S.h.rdImg, 'CData');
+ok = check(strcmp(get(S.h.rdImg, 'Visible'), 'on') && max(img(:)) > 0.9 && ~isempty(strfind(get(S.h.rdTitle, 'String'), 'peak 30.0 dB')) ...
+           && abs(get(S.h.rdDet, 'XData') - wl.range_m(101)/1e3) < 1e-9, 'map drawn: the 30 dB peak, its detection circled') && ok;
+sp = get(S.h.specLine, 'YData');
+ok = check(abs(max(sp) - 30) < 0.01, 'the spectrum at the strongest detection shows its peak') && ok;
+txt = ppi_callbacks('rdhover', fig, [wl.range_m(101)/1e3, rdm.vel_mps(20)]);
+ok = check(~isempty(strfind(txt, '30.0 dB above noise')), 'hover over the map: the cell in dB above noise') && ok;
+ppi_callbacks('save', fig, fullfile(tempdir, 'ppi_rd_test.png'));
+ppi_callbacks('option', fig, 'beam', 2);
+S = getappdata(fig, 'ppi');
+ok = check(isempty(S.data.rd) && ~isempty(strfind(get(S.h.rdTitle, 'String'), 'beam 2: waiting')), ...
+           'another beam: the old map is dropped') && ok;
+ppi_callbacks('tab', fig, 1);
+[~, want] = ppi_update(ppi, sys, 120, 20.8, 2, p, dets, tk);
+ok = check(~want.rd && max(abs(get(ppi.ax, 'Position') - pos1)) < 1e-6 && strcmp(get(S.h.rdAx, 'Visible'), 'off') ...
+           && strcmp(get(S.h.rdTitle, 'Visible'), 'off') && strcmp(get(S.h.specTitle, 'Visible'), 'off'), ...
+           'back to tab 1: the PPI full size, no map wanted') && ok;
 
 file = [tempname() '.png'];
 ppi_callbacks('save', fig, file);
