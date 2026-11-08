@@ -7,9 +7,13 @@ function export_receiver_config(cfg, fileName)
 %   matched or, for a phase code, mismatch; range axes, CPI length, MTI
 %   weights, Doppler window and noise gains, CFAR method, window, factor and
 %   tested range cells, CFAR detector (CA, GO, SO, OS), noise floor of the SNR, plot extraction and tracker
-%   settings). Export again
+%   settings, clutter filter, peak interpolation). Export again
 %   whenever cfg changes, before starting the C receiver. Default file:
 %   radar_receiver_<os>/config/radar_config.bin.
+%
+%   Without MATLAB: the C program radar_export_config of the receiver project
+%   (CLion run configuration of the same name) reads radar_config.m itself and
+%   writes the same file (see the receiver README).
 %
 %   File format (little-endian): 8 bytes 'RADRXCFG', uint32 version (2),
 %   uint32 number of records, then per record: char name[32] (zero padded),
@@ -63,7 +67,8 @@ end
 r{end+1} = {'cpiLength', sys.cpi.length};
 r{end+1} = {'nStagger', sys.nStagger};
 r{end+1} = {'staggered', double(sys.staggered)};
-r{end+1} = {'mtiCoeffs', sys.mtiCoeffs};
+r{end+1} = {'mtiCoeffs', sys.mtiCoeffs};                  % canceller or FIR filter (cfg.mti.type)
+r{end+1} = {'mtiType', double(strcmp(sys.mti.type, 'fir'))};   % 0 canceller, 1 FIR (information)
 r{end+1} = {'nRows', sys.cpi.nRows};
 r{end+1} = {'rowLen', sys.cpi.rowLen};
 r{end+1} = {'nfft', sys.dop.nfft};
@@ -86,6 +91,8 @@ r{end+1} = {'cfarNoiseScale', sys.cfar.noiseScale};  % noise estimate = statisti
 r{end+1} = {'nLooks', sys.dop.nLooks};               % Pfa of the threshold
 r{end+1} = {'sidelobeMargin_dB', cfg.prune.sidelobeMargin_dB};
 r{end+1} = {'snrNoise', double(strcmp(sys.report.snrNoise, 'cfar'))};   % SNR noise: 0 median, 1 CFAR window
+r{end+1} = {'dopplerInterp', double(sys.report.dopplerInterp)};          % peak interpolation (peak_interpolation.m)
+r{end+1} = {'elevationInterp', double(sys.report.elevationInterp)};
 r{end+1} = {'minHits', max(1, ceil(cfg.extract.minExtent_deg / ...
                        (sys.ant.rate_dps * mean(sys.pri) * cfg.proc.updateEvery)))};
 r{end+1} = {'maxMiss', cfg.extract.maxMiss};

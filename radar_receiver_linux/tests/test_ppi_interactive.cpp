@@ -214,6 +214,9 @@ int main(int argc, char **argv)
     check(w.displayMode() == DisplayMode::Both && w.visibleDetectionCount() == 21 && w.visibleCount() == 1,
           "key D: plots and detections");
     send_key(w, Qt::Key_D, "d");
+    check(w.displayMode() == DisplayMode::Video && w.visibleDetectionCount() == 0 && w.visibleCount() == 0,
+          "key D again: the raw video (no plots, no detections)");
+    send_key(w, Qt::Key_D, "d");
     check(w.displayMode() == DisplayMode::Plots, "key D again: plots");
     w.resetView();
 
@@ -244,7 +247,10 @@ int main(int argc, char **argv)
     check(win.ppi().displayMode() == DisplayMode::Both, "display mode box switches the PPI");
     send_key(win.ppi(), Qt::Key_D, "d");
     win.refresh();
-    check(win.modeBox()->currentIndex() == 0, "the box follows a mode change by key D");
+    check(win.modeBox()->currentIndex() == 3 && ppi_video_wanted() == 1, "the box follows a mode change by key D (video)");
+    send_key(win.ppi(), Qt::Key_D, "d");
+    win.refresh();
+    check(win.modeBox()->currentIndex() == 0 && ppi_video_wanted() == 0, "key D from the video back to the plots");
     /* block times in the panel, CFAR method name */
     ProcessorTiming tm;
     std::memset(&tm, 0, sizeof tm);
@@ -252,22 +258,32 @@ int main(int argc, char **argv)
     tm.dbf_ms = 120.0;  tm.mf_ms = 340.0;  tm.mti_ms = 56.0;  tm.doppler_ms = 980.0;
     tm.cfar_ms = 760.0; tm.extract_ms = 15.0; tm.track_ms = 4.0;
     tm.console_ms = 30.0; tm.display_ms = 50.0;
-    ppi_post_timing(&tm, "CFAR 1-D range", "Tracking 3-D CV");
+    tm.interp_ms = 7.0;
+    ppi_post_timing(&tm, "CFAR 1-D range", "Tracking 3-D CV with a long name");
     win.refresh();
     const QString timing = win.timingText();
-    auto row = [](const char *name, double us) { return QStringLiteral("%1%2").arg(QString(name), -17).arg(us, 9, 'f', 1); };
-    check(timing.contains("Doppler FFT+NCI") && timing.contains("980.0") && timing.contains("CFAR 1-D range") &&
-          timing.contains("Tracking 3-D CV") && timing.contains(row("Total", 2355.0)), "mean block times per PRI in the panel");
+    auto row = [](const char *name, double us) { return QStringLiteral("%1%2").arg(QString(name), -15).arg(us, 9, 'f', 1); };
+    check(timing.contains("Doppler FFT+NCI") && timing.contains("980.0") && timing.contains(row("CFAR 1D range", 760.0)) &&
+          timing.contains(row("Peak interp.", 7.0)) && timing.contains(row("Tracking 3D CV.", 4.0)) &&
+          timing.contains(row("Total", 2362.0)), "mean block times per PRI in the panel (labels shortened)");
     check(timing.contains(row("Console output", 30.0)) && timing.contains(row("Display (post)", 50.0)) &&
-          timing.contains("PPI drawing (GUI)"), "console, display and GUI drawing times in the panel");
+          timing.contains("PPI draw (GUI)"), "console, display and GUI drawing times in the panel");
+    check(timing_label("CFAR OS 1-D Doppler") == "CFAR OS 1D Dop" && timing_label("CFAR GO 1-D range") == "CFAR GO 1D rng" &&
+          timing_label("CFAR CA 2-D") == "CFAR CA 2D" && timing_label("Track 3-D PMBM") == "Track 3D PMBM",
+          "the labels of every CFAR detector, window and tracker fit in 15 characters");
+    {
+        int longest = 0;
+        for (const QString &l : timing.split(QChar('\n')).mid(0, 12)) longest = std::max(longest, (int)l.length());
+        check(longest <= 24, "every timing row fits in 24 characters (the value is not pushed out)");
+    }
     win.grab();                                          /* draws the PPI in the GUI thread */
     tm.pris = 1200;  tm.cfar_ms += 400.0;                /* 200 more PRIs, the CFAR block slower */
-    ppi_post_timing(&tm, "CFAR 1-D range", "Tracking 3-D CV");
+    ppi_post_timing(&tm, "CFAR 1-D range", "Track 3D CV");
     win.refresh();
     const QString timing2 = win.timingText();
-    const int iGui = timing2.indexOf("PPI drawing (GUI)");
-    check(iGui >= 0 && timing2.mid(iGui + 17, 9).trimmed().toDouble() > 0.0, "the drawing time of the GUI is counted");
-    check(timing2.contains(row("CFAR 1-D range", 2000.0)) && timing2.contains(row("Total", 2000.0)) &&
+    const int iGui = timing2.indexOf("PPI draw (GUI)");
+    check(iGui >= 0 && timing2.mid(iGui + 15, 9).trimmed().toDouble() > 0.0, "the drawing time of the GUI is counted");
+    check(timing2.contains(row("CFAR 1D range", 2000.0)) && timing2.contains(row("Total", 2000.0)) &&
           timing2.contains("last 200 of 1200 PRIs") && timing2.contains("not part of Total"),
           "the times are the means over the PRIs since the last update (GUI drawing not in Total)");
     check(win.cfarInfo().contains("CFAR 1-D range: 17.50 dB"), "the CFAR line names the method");
@@ -327,6 +343,46 @@ int main(int argc, char **argv)
     win.refresh();
     check(pw.trackCount() == 1 && pw.confirmedCount() == 0, "a deleted track disappears");
     pw.resetView();
+
+    /* raw video: rows of the worker (video.c) for 30 ... 70 deg, an echo at 30 km for 45 ... 55 deg */
+    {
+        win.modeBox()->setCurrentIndex(3);
+        check(pw.displayMode() == DisplayMode::Video && ppi_video_wanted() == 1, "the box selects the video");
+        const double dR = 74.948;
+        const int nBins = (int)std::ceil(60e3 / dR);
+        std::vector<float> row(nBins);
+        uint32_t seed = 1;
+        auto noise = [&seed]() { seed = seed * 1664525u + 1013904223u; return 800.0f * (0.8f + 0.4f * (seed >> 8) / 16777216.0f); };
+        for (double az = 30.0; az < 70.0; az += 0.036) {
+            for (int i = 0; i < nBins; i++) row[i] = i < 55 ? 0.0f : noise();   /* no data inside 4.1 km */
+            if (az > 45.0 && az < 55.0)
+                for (int i = 400; i < 404; i++) row[i] = 40000.0f;
+            ppi_post_video(row.data(), nBins, dR, az, 20.0 + az / 36.0);
+        }
+        ppi_post_antenna(70.0, 22.0, 2);
+        win.refresh();
+        check(pw.videoBinsFilled() == 160 && std::fabs(pw.videoNoise_dB() - 10.0 * std::log10(800.0)) < 0.5,
+              "video of 30 ... 70 deg (160 azimuth bins), noise floor of the rows");
+        const double r = 30.1e3;
+        check(pw.videoIndexAt(r * std::sin(50 * kDeg), r * std::cos(50 * kDeg)) > 80 &&
+              pw.videoIndexAt(20e3 * std::sin(40 * kDeg), 20e3 * std::cos(40 * kDeg)) < 20 &&
+              pw.videoIndexAt(20e3 * std::sin(150 * kDeg), 20e3 * std::cos(150 * kDeg)) == 0,
+              "echo bright, noise dark, no video where the antenna did not pass");
+        const QImage img = pw.grab().toImage();
+        const QPointF se = pw.screenOf(r * std::sin(50 * kDeg), r * std::cos(50 * kDeg));
+        int best = 0;
+        for (int dy = -2; dy <= 2; dy++)
+            for (int dx = -2; dx <= 2; dx++) {
+                const QColor px = img.pixelColor(QPoint((int)se.x() + dx, (int)se.y() + dy));
+                best = std::max(best, px.red() + px.green() + px.blue());
+            }
+        check(best > 250 && pw.visibleCount() == 0, "the echo is drawn on the PPI; plots are hidden in video mode");
+        if (!folder.empty()) pw.saveSnapshot(QString::fromStdString(folder + "/ppi_video.png"));
+        pw.clearPlots();
+        check(pw.videoBinsFilled() == 0, "Clear display also clears the video");
+        win.modeBox()->setCurrentIndex(0);
+        check(ppi_video_wanted() == 0, "back to the plots: no video wanted");
+    }
 
     if (!folder.empty()) {
         const QString shot = QString::fromStdString(folder + "/ppi_window_screenshot.png");

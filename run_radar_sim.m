@@ -22,13 +22,16 @@ function results = run_radar_sim(cfg)
 %                            stagger MTI + de-interleaving + FFT + NCI (staggered PRF)
 %     8. CFAR              : on every range-Doppler map (2-D, 1-D range or 1-D
 %                            Doppler window, cfg.cfar.method)
-%     9. Pruning           : local peaks only, then azimuth peak picking (plots)
+%     9. Pruning           : local peaks only; interpolation of the peaks in Doppler
+%                            and elevation (cfg.report.dopplerInterp / elevationInterp);
+%                            azimuth peak picking (plots)
 %    10. Tracking          : EKF on the plots, 2-D or 3-D, constant velocity or
 %                            constant acceleration, GNN association (optional, cfg.track),
 %                            or (cfg.track.method = 'pmbm') the PMBM multi-target tracker
 %                            with IMM-UKF state estimation (CV, CA, coordinated turn)
 %    11. PPI display       : updated while the radar is running: plots and/or the
-%                            CFAR detections before the extractor, tracks, mean
+%                            CFAR detections before the extractor, or the raw video
+%                            (DDC output averaged over the elements), tracks, mean
 %                            processing time of every block (also of the display
 %                            and of the console output); the CFAR threshold can
 %                            be changed in the PPI panel
@@ -37,8 +40,9 @@ function results = run_radar_sim(cfg)
 %   ambiguous radial velocity, SNR, pulse type). results.tracker holds the
 %   tracks at the end and the log of all track updates (track_update.m).
 %   results.timing_us is the mean time per PRI of DBF, matched filter, MTI,
-%   Doppler, detection (CFAR + pruning), plot extractor, tracking, console
-%   output (progress lines) and display (PPI updates) [us].
+%   Doppler, detection (CFAR + pruning), peak interpolation, plot extractor,
+%   tracking, console output (progress lines) and display (PPI updates and the
+%   video of the PPI) [us].
 %   results.priTime_s is the time of every simulated PRI (simulation,
 %   processing, display): with cfg.udp.enable the DDC output of
 %   one PRI is sent per loop, so this is also the period of the UDP stream.
@@ -87,8 +91,10 @@ if showPpi && exist('OCTAVE_VERSION', 'builtin') && isempty(available_graphics_t
     warning('run_radar_sim: no graphics toolkit (e.g. octave-cli): the PPI display is switched off.');
     showPpi = false;
 end
+showVideo = false;                         % the PPI shows the video: fill its map every PRI
 if showPpi
     ppi = ppi_init(sys);
+    showVideo = strcmp(cfg.display.showMode, 'video');
     detLog = detection_log_init(cfg.display.maxDetections);   % CFAR detections for the PPI
 end
 
@@ -99,7 +105,7 @@ for i = 1:2
 end
 plots = [];
 tracker = track_init(sys.track);
-blockUs = zeros(1, 9);                     % accumulated time of the blocks, console, display [us]
+blockUs = zeros(1, 10);                    % accumulated time of the blocks, console, display [us]
 nProcessed = 0;
 wasActive = false;
 % Plot extraction options: minimum azimuth extent -> minimum number of CPI detections
@@ -111,7 +117,7 @@ flushOpt = extractOpt;
 flushOpt.flush = true;
 
 clipSum = 0;  clipMax = 0;  clipWarned = false;     % ADC overload (adc_overload.m)
-timingPrev = struct('us', zeros(1, 9), 'n', 0);      % block times at the previous display update
+timingPrev = struct('us', zeros(1, 10), 'n', 0);      % block times at the previous display update
 priTime = nan(1, sched.nPulses);                    % time of every simulated PRI (= the UDP send period)
 
 %% Pulse loop
@@ -169,6 +175,11 @@ for k = 1:sched.nPulses
     if ~isempty(udp)
         udp_send_pulse(udp, hdr, I, Q);
     end
+    if showVideo                                        % video of the PPI (display time)
+        tb = tic;
+        ppi.video = ppi_video_add(ppi.video, I, Q, az, t);
+        blockUs(10) = blockUs(10) + 1e6*toc(tb);
+    end
     bb = complex(single(I), single(Q));
 
     % 4-9) Processing chain, separately for the short and the long sub-pulse
@@ -203,16 +214,19 @@ for k = 1:sched.nPulses
             tb = tic;
             [isDet, noise] = cfar_detect(rd, sys, wv);
             dets = prune_peaks(isDet, rd, noise, sys, wv);
-            reports = detection_reports(dets, rd, sys, wv, info);
+            reports = detection_reports(dets, rd, sys, wv, info, false);
             blockUs(5) = blockUs(5) + 1e6*toc(tb);
+            tb = tic;                                   % Doppler and elevation of the peaks
+            reports = peak_interpolation(reports, rd, sys);
+            blockUs(6) = blockUs(6) + 1e6*toc(tb);
             if ~isempty(detLog)                         % (for the PPI: counted as display time)
                 tb = tic;
                 detLog = detection_log_add(detLog, reports);
-                blockUs(9) = blockUs(9) + 1e6*toc(tb);
+                blockUs(10) = blockUs(10) + 1e6*toc(tb);
             end
             tb = tic;
             [ext.(p), newPlots] = plot_extractor(ext.(p), reports, extractOpt);
-            blockUs(6) = blockUs(6) + 1e6*toc(tb);
+            blockUs(7) = blockUs(7) + 1e6*toc(tb);
             plots = [plots, newPlots]; %#ok<AGROW>
             priPlots = [priPlots, newPlots]; %#ok<AGROW>
         else
@@ -222,7 +236,7 @@ for k = 1:sched.nPulses
     if sys.track.enable                                 % 10) tracking (also deletes old tracks)
         tb = tic;
         tracker = track_update(tracker, priPlots, t);
-        blockUs(7) = blockUs(7) + 1e6*toc(tb);
+        blockUs(8) = blockUs(8) + 1e6*toc(tb);
     end
     nProcessed = nProcessed + 1;
 
@@ -233,15 +247,15 @@ for k = 1:sched.nPulses
         % change, e.g. a lower CFAR threshold, shows at once, not diluted in
         % the mean since the start)
         nInt = nProcessed - timingPrev.n;
-        sys = ppi_update(ppi, sys, az, t, sched.scan(k), plots, detLog.M(1:detLog.n, :), ...
-                         track_report(tracker), (blockUs - timingPrev.us) / nInt, nInt);   % may set a new CFAR threshold
+        [sys, showVideo] = ppi_update(ppi, sys, az, t, sched.scan(k), plots, detLog.M(1:detLog.n, :), ...
+                         track_report(tracker), (blockUs - timingPrev.us) / nInt, nInt, ppi.video);   % may set a new CFAR threshold
         timingPrev = struct('us', blockUs, 'n', nProcessed);
-        blockUs(9) = blockUs(9) + 1e6*toc(tb);
+        blockUs(10) = blockUs(10) + 1e6*toc(tb);
     end
     if cfg.console.enable && mod(nProcessed, 500) == 0
         tb = tic;
         fprintf('  pulse %6d (az %6.1f deg): %d plots so far, %.0f s elapsed\n', k, az, numel(plots), toc(tStart));
-        blockUs(8) = blockUs(8) + 1e6*toc(tb);
+        blockUs(9) = blockUs(9) + 1e6*toc(tb);
     end
     priTime(k) = toc(tPri);
 end
@@ -260,7 +274,7 @@ if sys.track.enable && ~isempty(lastActive)
 end
 if ~isempty(ppi) && ishandle(ppi.fig)               % (the user may have closed the window)
     ppi_update(ppi, sys, sched.az_deg(end), sched.time_s(end), sched.scan(end), plots, detLog.M(1:detLog.n, :), ...
-               track_report(tracker), blockUs / max(nProcessed, 1));
+               track_report(tracker), blockUs / max(nProcessed, 1), [], ppi.video);
     print(ppi.fig, fullfile(cfg.io.outFolder, 'ppi.png'), '-dpng');
 end
 
@@ -285,8 +299,8 @@ if cfg.console.enable
         print_tracks(tracker);
     end
     fprintf(['Mean processing time per PRI [us]: DBF %.0f, matched filter %.0f, MTI %.0f, Doppler %.0f, ' ...
-             'CFAR %s + pruning %.0f, extractor %.0f, tracking %.0f, console %.0f, display %.0f\n'], ...
-            results.timing_us(1:4), sys.cfar.label, results.timing_us(5:9));
+             'CFAR %s + pruning %.0f, peak interpolation %.0f, extractor %.0f, tracking %.0f, console %.0f, ' ...
+             'display %.0f\n'], results.timing_us(1:4), sys.cfar.label, results.timing_us(5:10));
     fprintf('%d PRIs simulated and processed in %.1f s (%.1f ms per PRI)\n', nProcessed, ...
         results.runTime_s, 1e3*results.runTime_s/max(nProcessed, 1));
 end

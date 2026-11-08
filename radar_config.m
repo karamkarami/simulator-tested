@@ -30,6 +30,7 @@ cfg.files.ddc4MHz = fullfile(root, 'inputs', 'ddc_filters_4MHz.mat'); % the same
 cfg.files.dbf     = fullfile(root, 'inputs', 'dbf_matrix.mat');      % elevation beamforming matrix
 cfg.files.stagger = fullfile(root, 'inputs', 'stagger_prf.mat');     % staggered PRIs + MTI weights
 cfg.files.phaseCode = fullfile(root, 'inputs', 'phase_code.mat');    % phase codes + mismatch filters of both sub-pulses
+cfg.files.mtiFir  = fullfile(root, 'inputs', 'mti_fir.mat');        % coefficients of the FIR clutter filter (cfg.mti.type = 'fir')
 
 %% Radar site and antenna
 cfg.fc            = 170e6; % center frequency [Hz] (VHF; wavelength 1.76 m)
@@ -142,6 +143,20 @@ cfg.proc.nfft         = [];    % Doppler FFT length ([] = next power of 2: of th
                                % with a fixed PRF (114 -> 128), of the samples per row when staggered (28 -> 32))
 cfg.proc.updateEvery  = 1;     % run MTI/Doppler/CFAR every N new pulses (1 = every pulse)
 
+%% Clutter filter along slow time (MTI), in front of the Doppler FFT
+% 'canceller' the three-pulse canceller [1 -2 1] with a fixed PRF, the
+%             time-varying weights of cfg.files.stagger with a staggered PRF
+% 'fir'       an FIR filter of your own: the variable 'coeffs' of cfg.files.mtiFir,
+%             real, one row of L taps (any L >= 1, used for every pulse) or one row per
+%             stagger position (staggered PRF: row k for the outputs whose oldest pulse
+%             has stagger position k). Output m = sum_l coeffs(l) * x(m + l - 1), x
+%             oldest first (the newest pulse meets the last tap). The default file
+%             (make_input_files.m) holds a 5-tap high-pass with a deeper and wider notch
+%             than the canceller (against moving clutter) and a narrower passband. The
+%             CPI loses L - 1 pulses to the filter; the noise gain of every Doppler bin
+%             and the CFAR looks follow from the coefficients.
+cfg.mti.type = 'canceller';    % 'canceller' or 'fir'
+
 %% Detection: CFAR on every range-Doppler map
 % type (detector; the noise statistic of the training cells of the window):
 %         'ca'      cell averaging: the mean of the training cells (best in
@@ -220,6 +235,14 @@ cfg.prune.sidelobeMargin_dB = 20;  % a peak this much weaker than a peak on the 
 %          strong one (range sidelobes, Doppler mainlobe) or near clutter residue is too low,
 %          and with few training cells it scatters more (32 cells: +-0.8 dB)
 cfg.report.snrNoise = 'median';
+% Interpolation of the detected peaks (block "Peak interp." of the timing panel), after the pruning:
+% dopplerInterp   the radial velocity from a parabola through the powers [dB] of the Doppler bins
+%                 d-1, d, d+1 of the peak (circular), instead of the centre of bin d
+% elevationInterp the elevation from a parabola through the powers [dB] of the beams b-1, b, b+1
+%                 of the peak, when it has both neighbours (not the lowest or highest beam) and
+%                 the parabola has a maximum; otherwise (and when false) the centre of beam b
+cfg.report.dopplerInterp   = false;
+cfg.report.elevationInterp = true;
 
 %% Plot extraction (azimuth peak picking over successive CPIs)
 cfg.extract.minExtent_deg = 2; % minimum azimuth extent of the detections of a plot [deg]
@@ -459,7 +482,10 @@ cfg.display.updateEvery       = 50;       % PPI refresh period [pulses]
 cfg.display.maxRange_m        = [];       % [] = cfg.rx.maxRange_m
 cfg.display.showTruth         = true;     % draw the true target positions
 cfg.display.showMode          = 'plots';  % PPI shows 'plots' (after the plot extractor), 'detections'
-                                          % (CFAR detections before it: arcs) or 'both' (also in the panel)
+                                          % (CFAR detections before it: arcs), 'both' or 'video' (the
+                                          % DDC output of the elements averaged non-coherently, receive
+                                          % intervals of both sub-pulses joined, colour = power; also in
+                                          % the panel)
 cfg.display.maxDetections     = 100000;   % CFAR detections kept for the PPI (the newest)
 cfg.display.showTracks        = true;     % draw the tracks (hollow triangles; also a checkbox in the panel)
 cfg.display.trackLeader_s     = 30;       % length of the velocity leader of a track [s of flight]

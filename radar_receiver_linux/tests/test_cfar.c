@@ -18,7 +18,12 @@
  * estimate kept for the SNR of every detection (cfg.report.snrNoise =
  * 'cfar') equals the direct statistic / cfarNoiseScale. Then the exact noise
  * floor median (check_median) against a sorted copy, and the pruning of
- * thousands of detections (check_pruning) against the direct pairwise rules.
+ * thousands of detections (check_pruning) against the direct pairwise rules,
+ * and the peak interpolation (check_interpolation): a peak that is Gaussian
+ * in Doppler and across the beams (a parabola in dB) gives its exact
+ * fractional Doppler bin and beam, the bin wraps at the edge of the Doppler
+ * axis, the lowest beam keeps its centre, and nothing changes with the
+ * options off.
  */
 #include "../src/processor.c"
 
@@ -263,6 +268,68 @@ static void check_pruning(RadarConfig cfg, const char *name, int nStrong, double
     processor_destroy(p);
 }
 
+/* Report of a Gaussian peak at the fractional Doppler bin d0 and beam b0. */
+static Detection interp_one(Processor *p, PulseState *s, double d0, double b0, int r)
+{
+    const RadarConfig *cfg = p->cfg;
+    const int nfft = cfg->nfft, nB = cfg->nBeams;
+    for (int d = 0; d < nfft; d++)
+        for (int b = 0; b < nB; b++) {
+            double dd = fabs(d - d0);
+            if (nfft - dd < dd) dd = nfft - dd;                 /* (circular Doppler) */
+            s->P[(size_t)d * s->nCells + (size_t)b * s->nR + r] = (float)(1e4 * exp(-0.3 * dd * dd - 0.4 * (b - b0) * (b - b0)));
+        }
+    Detection det;
+    memset(&det, 0, sizeof det);
+    det.beam = (int)lround(b0);
+    det.rIdx = r;
+    det.dIdx = ((int)lround(d0) + nfft) % nfft;
+    det.vr_mps = -cfg->dopFreq_Hz[det.dIdx] * cfg->pulse[PULSE_LONG].lambda_m / 2;
+    det.el_deg = cfg->dbfEnabled ? cfg->tilt_deg + asin(cfg->beamU[det.beam]) * 180 / PI : NAN;
+    s->nReports = 0;
+    add_report(s, &det);
+    peak_interpolation(p, PULSE_LONG, s);
+    return s->reports[0];
+}
+
+static void check_interpolation(RadarConfig cfg)
+{
+    const double lambda = cfg.pulse[PULSE_LONG].lambda_m, df = cfg.dopFreq_Hz[1] - cfg.dopFreq_Hz[0];
+    const int nfft = cfg.nfft, nB = cfg.nBeams, r = 10;
+    int bad = 0;
+    for (int on = 0; on < 2; on++) {
+        cfg.dopplerInterp = on;
+        cfg.elevationInterp = on;
+        Processor *p = processor_create(&cfg, 0);
+        PulseState *s = &p->ps[PULSE_LONG];
+        const double d0 = nfft / 4 + 0.3, b0 = nB > 2 ? nB / 2 - 0.35 : 0;
+        Detection d = interp_one(p, s, d0, b0, r);
+        const int k = (int)lround(d0);
+        const double vrTrue = -(cfg.dopFreq_Hz[k] + (d0 - k) * df) * lambda / 2;
+        const double vrBin = -cfg.dopFreq_Hz[k] * lambda / 2;
+        double elTrue = NAN, elBeam = NAN;
+        if (cfg.dbfEnabled) {
+            const int i0 = (int)floor(b0);
+            const double u = cfg.beamU[i0] + (b0 - i0) * (cfg.beamU[i0 + 1] - cfg.beamU[i0]);
+            elTrue = cfg.tilt_deg + asin(u) * 180 / PI;
+            elBeam = cfg.tilt_deg + asin(cfg.beamU[(int)lround(b0)]) * 180 / PI;
+        }
+        bad += fabs(d.vr_mps - (on ? vrTrue : vrBin)) > 1e-3;
+        if (cfg.dbfEnabled && nB > 2) bad += fabs(d.el_deg - (on ? elTrue : elBeam)) > 1e-3;
+        /* the first Doppler bin: its neighbour is the last bin */
+        d = interp_one(p, s, -0.2, b0, r);
+        bad += on && fabs(d.vr_mps - (-(cfg.dopFreq_Hz[0] - 0.2 * df) * lambda / 2)) > 1e-3;
+        /* the lowest beam has no neighbour below: its centre stays */
+        if (cfg.dbfEnabled && nB > 2) {
+            d = interp_one(p, s, d0, 0.2, r);
+            bad += fabs(d.el_deg - (cfg.tilt_deg + asin(cfg.beamU[0]) * 180 / PI)) > 1e-9;
+        }
+        processor_destroy(p);
+    }
+    failures += bad > 0;
+    printf("peak interpolation (Doppler, %s): %s\n", nB > 2 ? "elevation" : "no DBF", bad ? "FAIL" : "ok");
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -288,6 +355,7 @@ int main(int argc, char **argv)
     check_median();
     check_pruning(cfg, "strong target, low threshold", 0, 2.5);
     check_pruning(cfg, "3000 strong cells, very low threshold", 3000, 1.2);
+    check_interpolation(cfg);
     radar_config_free(&cfg);
     if (failures) printf("%d FAILURE(S)\n", failures);
     else printf("all CFAR and pruning tests passed\n");

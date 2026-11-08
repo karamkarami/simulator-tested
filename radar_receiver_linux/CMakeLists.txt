@@ -62,6 +62,7 @@ add_library(radar_core STATIC
     src/serial_out.c
     src/platform.c
     src/input_thread.c
+    src/video.c
 )
 target_include_directories(radar_core PUBLIC src)
 
@@ -138,8 +139,9 @@ if(RADAR_QT_FOUND)
     set_target_properties(radar_receiver PROPERTIES LINKER_LANGUAGE CXX)
 endif()
 
-# Reading the DDC files of the simulator (ddc_<n>.mat). zlib (optional) is
-# needed only for compressed MAT-files (save -v7); -v6 files need nothing.
+# Reading the DDC files of the simulator (ddc_<n>.mat) and its input files
+# (inputs/*.mat). Compressed MAT-files (save -v7) are inflated with zlib when
+# it is found, else with the built-in inflate of mat_file.c (a little slower).
 add_library(radar_ddc_files STATIC tools/mat_file.c tools/ddc_files.c)
 target_include_directories(radar_ddc_files PUBLIC tools)
 find_package(ZLIB QUIET)
@@ -148,7 +150,7 @@ if(ZLIB_FOUND)
     target_link_libraries(radar_ddc_files PRIVATE ZLIB::ZLIB)
     message(STATUS "DDC files: -v6 and compressed -v7 MAT-files (zlib)")
 else()
-    message(STATUS "zlib not found: the DDC files must be saved with -v6 (cfg.io.matFormat)")
+    message(STATUS "zlib not found: compressed -v7 MAT-files are read with the built-in inflate")
 endif()
 if(NOT WIN32)
     target_link_libraries(radar_ddc_files PUBLIC m)
@@ -158,6 +160,17 @@ endif()
 # with the real PRI timing
 add_executable(radar_stream_send tools/stream_send.c)
 target_link_libraries(radar_stream_send PRIVATE radar_core radar_ddc_files)
+
+# The receiver configuration from radar_config.m without MATLAB (the same file as
+# export_receiver_config.m): a run configuration "radar_export_config" in CLion.
+# Without arguments it reads ../radar_config.m and writes config/radar_config.bin
+# of this project; see --help (--config-m, --out, --set "cfg.x = ...;").
+add_executable(radar_export_config tools/export_config.c tools/mfile.c)
+target_link_libraries(radar_export_config PRIVATE radar_ddc_files)
+target_compile_definitions(radar_export_config PRIVATE RADAR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+if(NOT WIN32)
+    target_link_libraries(radar_export_config PRIVATE m)
+endif()
 
 # Processing time per block on synthetic PRIs (no network, display or console):
 # radar_bench --config FILE [--threads N] [--thresholds DB,DB,...]
@@ -235,6 +248,20 @@ if(RADAR_BUILD_TESTS)
         target_link_libraries(test_ddc_files PRIVATE ZLIB::ZLIB)
     endif()
     add_test(NAME ddc_files COMMAND test_ddc_files)
+
+    # radar_export_config: the MATLAB subset of its interpreter, and the export of
+    # ../radar_config.m, processed by the core test
+    add_executable(test_mfile tests/test_mfile.c tools/mfile.c)
+    target_include_directories(test_mfile PRIVATE tools)
+    if(NOT WIN32)
+        target_link_libraries(test_mfile PRIVATE m)
+    endif()
+    add_test(NAME mfile COMMAND test_mfile)
+    add_test(NAME export_config COMMAND radar_export_config --quiet
+             --out ${CMAKE_CURRENT_BINARY_DIR}/radar_config_exported.bin)
+    add_test(NAME core_exported COMMAND test_core ${CMAKE_CURRENT_BINARY_DIR}/radar_config_exported.bin)
+    set_tests_properties(export_config PROPERTIES FIXTURES_SETUP exported_config)
+    set_tests_properties(core_exported PROPERTIES FIXTURES_REQUIRED exported_config)
 
     add_executable(test_udp_input tests/test_udp_input.c)
     target_link_libraries(test_udp_input PRIVATE radar_core)

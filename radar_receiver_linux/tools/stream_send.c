@@ -8,7 +8,7 @@
  *
  * SOURCE is either
  *   - a folder of DDC files ddc_<n>.mat (run_radar_sim with cfg.io.saveDdc = true,
- *     saved with -v6, or -v7 when built with zlib): every PRI is split into
+ *     saved with -v6 or -v7; -v7 with zlib or the built-in inflate): every PRI is split into
  *     the datagrams of the live stream with --payload bytes of samples each, or
  *   - a stream recorded with radar_receiver --record FILE: the recorded
  *     datagrams are sent as they are.

@@ -10,7 +10,8 @@
  *     --ppi                  show the PPI (Qt build only)
  *     --ppi-snapshot FILE    save the PPI as PNG at the end and close it
  *     --ppi-show MODE        PPI shows 'plots' (default, after the plot extractor),
- *                            'detections' (CFAR detections before it) or 'both'
+ *                            'detections' (CFAR detections before it), 'both' or
+ *                            'video' (DDC output averaged over the elements)
  *     --serial DEVICE        send the CFAR detections to a serial port (e.g. /dev/ttyUSB0, COM3)
  *     --baud N               serial baud rate (default 921600)
  *     --serial-content X     'detections' (default) or 'plots'
@@ -80,7 +81,7 @@ static void on_signal(int sig)
 static void usage(void)
 {
     puts("usage: radar_receiver [--config FILE] [--port N] [--record FILE] [--replay FILE]\n"
-         "                      [--ppi] [--ppi-snapshot FILE] [--ppi-show plots|detections|both]\n"
+         "                      [--ppi] [--ppi-snapshot FILE] [--ppi-show plots|detections|both|video]\n"
          "                      [--serial DEVICE] [--baud N]\n"
          "                      [--serial-content detections|plots] [--threads N] [--mf auto|direct|fft]\n"
          "                      [--update-every N]\n"
@@ -149,8 +150,9 @@ static int parse_options(int argc, char **argv, Options *o)
         fprintf(stderr, "--rt-priority must be 1 ... 98 (0 = normal scheduling)\n");
         return -1;
     }
-    if (strcmp(o->ppiShow, "plots") && strcmp(o->ppiShow, "detections") && strcmp(o->ppiShow, "both")) {
-        fprintf(stderr, "--ppi-show must be 'plots', 'detections' or 'both'\n");
+    if (strcmp(o->ppiShow, "plots") && strcmp(o->ppiShow, "detections") && strcmp(o->ppiShow, "both") &&
+        strcmp(o->ppiShow, "video")) {
+        fprintf(stderr, "--ppi-show must be 'plots', 'detections', 'both' or 'video'\n");
         return -1;
     }
     if (strcmp(o->serialContent, "detections") && strcmp(o->serialContent, "plots")) {
@@ -305,8 +307,9 @@ static void print_timing(const App *app, const Processor *proc, const UdpInput *
             "incomplete PRIs %llu\n", (unsigned long long)t.pris, (unsigned long long)t.updates, wall_s,
             (unsigned long long)u.datagrams, (unsigned long long)u.foreign, (unsigned long long)u.prisIncomplete);
     fprintf(stderr, "Processing time per PRI: %.3f ms (DBF %.3f, MF %.3f, MTI %.3f, Doppler %.3f, "
-            "CFAR+pruning %.3f, extraction %.3f, tracking %.3f)\n", t.total_ms / n, t.dbf_ms / n, t.mf_ms / n,
-            t.mti_ms / n, t.doppler_ms / n, t.cfar_ms / n, t.extract_ms / n, t.track_ms / n);
+            "CFAR+pruning %.3f, peak interpolation %.3f, extraction %.3f, tracking %.3f)\n", t.total_ms / n,
+            t.dbf_ms / n, t.mf_ms / n, t.mti_ms / n, t.doppler_ms / n, t.cfar_ms / n, t.interp_ms / n,
+            t.extract_ms / n, t.track_ms / n);
     fprintf(stderr, "Output per PRI: console %.3f ms, display (PPI calls) %.3f ms\n", t.console_ms / n, t.display_ms / n);
     if (t.skipped || queueDrops)
         fprintf(stderr, "Overload: %llu CPI updates skipped, %llu PRIs dropped because the queue was full\n",
@@ -373,14 +376,17 @@ static int worker(void *arg)
 #ifdef RADAR_WITH_QT
     char detName[48], trackName[64];
     snprintf(detName, sizeof detName, "CFAR %s %s", cfar_type_name(app->cfg.cfarType), cfar_method_name(app->cfg.cfarMethod));
-    if (app->cfg.trackEnable) {
+    if (app->cfg.trackEnable) {       /* short: the timing panel has 15 characters for a label */
         char tn[40];
         tracker_name(&app->cfg, tn, sizeof tn);
-        snprintf(trackName, sizeof trackName, "Tracking %s", tn);
+        snprintf(trackName, sizeof trackName, "Track %s", tn);
     } else {
-        snprintf(trackName, sizeof trackName, "Tracking (off)");
+        snprintf(trackName, sizeof trackName, "Track (off)");
     }
     double lastTiming = 0.0;
+    VideoLayout video;                       /* raw video of the PPI (made when first shown) */
+    memset(&video, 0, sizeof video);
+    float *videoRow = NULL;
 #endif
     const double default_dB = 10.0 * log10(app->cfg.alpha);
     if (!isnan(app->opt.cfarThreshold_dB))
@@ -453,6 +459,18 @@ static int worker(void *arg)
             report_cfar(app, proc, default_dB, 1);
         }
 #endif
+#ifdef RADAR_WITH_QT
+        if (app->opt.ppi && ppi_video_wanted() && pri->nCh == app->cfg.nCh && pri->nSamples == app->cfg.nDdc) {
+            const double tVideo = now_seconds();             /* the video of the PPI (display time) */
+            if (!videoRow && video_layout_init(&video, &app->cfg, app->cfg.maxRange_m) == 0)
+                videoRow = malloc(sizeof(float) * (size_t)video.nBins);
+            if (videoRow) {
+                video_row(&video, pri, videoRow);
+                ppi_post_video(videoRow, video.nBins, video.dR_m, pri->az_deg, pri->time_s);
+            }
+            app->display_ms += ms_since(tVideo);
+        }
+#endif
         if (live && !app->opt.noSkip)
             processor_set_slow_time(proc, input_thread_backlog(input) <= skipAbove);
         processor_process(proc, pri, &cb);
@@ -477,6 +495,10 @@ static int worker(void *arg)
         app_timing(app, proc, &tm);
         ppi_post_timing(&tm, detName, trackName);
     }
+#endif
+#ifdef RADAR_WITH_QT
+    free(videoRow);
+    video_layout_free(&video);
 #endif
     fprintf(stderr, "Plots: %llu, CFAR detections after pruning: %llu\n",
             (unsigned long long)app->nPlots, (unsigned long long)app->nDetections);
@@ -544,6 +566,9 @@ int main(int argc, char **argv)
     fprintf(stderr, "CFAR %s %s (window: range %d+%d, Doppler %d+%d guard+training cells per side), SNR noise: %s, ",
             cfar_type_name(app.cfg.cfarType), cfar_method_name(app.cfg.cfarMethod), app.cfg.guardRange, app.cfg.trainRange, app.cfg.guardDoppler,
             app.cfg.trainDoppler, app.cfg.snrNoise == SNR_NOISE_CFAR ? "CFAR window" : "median of the map");
+    fprintf(stderr, "Clutter filter: %s (%d taps); peak interpolation: Doppler %s, elevation %s\n",
+            app.cfg.mtiType == MTI_FIR ? "FIR" : "canceller", app.cfg.nMtiTaps, app.cfg.dopplerInterp ? "on" : "off",
+            app.cfg.elevationInterp && app.cfg.dbfEnabled ? "on" : "off");
     if (app.cfg.trackEnable && app.cfg.trackMethod == TRACK_METHOD_PMBM)
         fprintf(stderr, "tracking: PMBM %d-D, IMM-UKF of %d models, %d global hypotheses\n", app.cfg.trackDim,
                 app.cfg.pmbmNModels, app.cfg.pmbmMaxHyp);
@@ -571,7 +596,8 @@ int main(int argc, char **argv)
     if (app.opt.ppi) {
 #ifdef RADAR_WITH_QT
         ppi_set_display_mode(!strcmp(app.opt.ppiShow, "detections") ? PPI_SHOW_DETECTIONS
-                             : !strcmp(app.opt.ppiShow, "both") ? PPI_SHOW_BOTH : PPI_SHOW_PLOTS);
+                             : !strcmp(app.opt.ppiShow, "both") ? PPI_SHOW_BOTH
+                             : !strcmp(app.opt.ppiShow, "video") ? PPI_SHOW_VIDEO : PPI_SHOW_PLOTS);
         app.exitCode = ppi_run(argc, argv, app.cfg.maxRange_m, worker, &app, &g_stop, app.opt.snapshotPath);
 #else
         fprintf(stderr, "this build has no Qt: --ppi is not available\n");

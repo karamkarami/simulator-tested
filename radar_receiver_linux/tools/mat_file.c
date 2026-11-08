@@ -7,8 +7,10 @@
  * element (at most 4 bytes) packs the type and count into the first 4 tag
  * bytes and its data into the other 4. A variable is a miMATRIX element
  * with the sub-elements array flags, dimensions, name and data (numeric:
- * real part; struct: field name length, field names, one miMATRIX per
- * field). save -v7 wraps every variable in a zlib-compressed element.
+ * real part, and the imaginary part when the complex flag is set; struct:
+ * field name length, field names, one miMATRIX per field). save -v7 wraps
+ * every variable in a zlib-compressed element (inflated with zlib, or with
+ * the built-in inflate below when the build has no zlib).
  */
 #if defined(_WIN32) && !defined(_CRT_SECURE_NO_WARNINGS)
 #  define _CRT_SECURE_NO_WARNINGS
@@ -116,6 +118,7 @@ static void convert(uint32_t type, const unsigned char *d, double *out, size_t n
 static void free_var(MatVar *v)
 {
     free(v->re);
+    free(v->im);
     for (int i = 0; i < v->nFields; i++)
         free_var(&v->fields[i]);
     free(v->fields);
@@ -143,6 +146,7 @@ static int parse_matrix(const unsigned char *d, size_t n, MatVar *v, int depth, 
     pos += name.total;
 
     v->mxClass = (int)(get_le32(flags.data) & 0xFFu);
+    const int isComplex = (get_le32(flags.data) & 0x0800u) != 0;
     v->rows = get_le32(dims.data);
     v->cols = 1;
     for (uint32_t k = 1; k < dims.nbytes / 4; k++)
@@ -165,6 +169,19 @@ static int parse_matrix(const unsigned char *d, size_t n, MatVar *v, int depth, 
                 return -1;
             }
             convert(e.type, e.data, v->re, v->numel);
+            if (isComplex) {                          /* the imaginary part follows */
+                Element ei;
+                pos += e.total;
+                if (!read_element(d + pos, n - pos, &ei)) goto bad;
+                const size_t szi = type_size(ei.type);
+                if (szi == 0 || ei.nbytes / szi < v->numel) goto bad;
+                v->im = malloc(v->numel * sizeof *v->im);
+                if (!v->im) {
+                    set_err(err, errLen, "out of memory");
+                    return -1;
+                }
+                convert(ei.type, ei.data, v->im, v->numel);
+            }
         }
     } else if (v->mxClass == MAT_CLASS_STRUCT) {
         Element fnLen, fnNames;
@@ -199,6 +216,180 @@ static int parse_matrix(const unsigned char *d, size_t n, MatVar *v, int depth, 
 bad:
     set_err(err, errLen, "corrupted variable '%s'", v->name);
     return -1;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Built-in inflate (RFC 1951 inside a zlib stream, RFC 1950): stored, fixed  */
+/* and dynamic Huffman blocks. Used for compressed MAT-files without zlib.   */
+/* ------------------------------------------------------------------------ */
+
+typedef struct {
+    const unsigned char *src;
+    size_t n, pos;
+    uint32_t bits;
+    int nBits;
+    unsigned char *out;
+    size_t len, cap;
+    int err;
+} Inflate;
+
+typedef struct {
+    uint16_t count[16];      /* codes of every length */
+    uint16_t symbol[320];    /* symbols ordered by code */
+} Huffman;
+
+static int inf_bits(Inflate *s, int need)
+{
+    while (s->nBits < need) {
+        if (s->pos >= s->n) { s->err = 1; return 0; }
+        s->bits |= (uint32_t)s->src[s->pos++] << s->nBits;
+        s->nBits += 8;
+    }
+    const int v = (int)(s->bits & ((1u << need) - 1u));
+    s->bits >>= need;
+    s->nBits -= need;
+    return v;
+}
+
+static int inf_put(Inflate *s, unsigned char c)
+{
+    if (s->len == s->cap) {
+        size_t cap = s->cap ? 2 * s->cap : 65536;
+        unsigned char *p = realloc(s->out, cap);
+        if (!p) { s->err = 1; return 0; }
+        s->out = p;
+        s->cap = cap;
+    }
+    s->out[s->len++] = c;
+    return 1;
+}
+
+static void inf_build(Huffman *h, const uint8_t *lengths, int n)
+{
+    uint16_t offs[16];
+    memset(h->count, 0, sizeof h->count);
+    for (int i = 0; i < n; i++) h->count[lengths[i]]++;
+    h->count[0] = 0;
+    offs[1] = 0;
+    for (int i = 1; i < 15; i++) offs[i + 1] = (uint16_t)(offs[i] + h->count[i]);
+    for (int i = 0; i < n; i++)
+        if (lengths[i]) h->symbol[offs[lengths[i]]++] = (uint16_t)i;
+}
+
+static int inf_decode(Inflate *s, const Huffman *h)
+{
+    int code = 0, first = 0, index = 0;
+    for (int len = 1; len < 16; len++) {
+        code |= inf_bits(s, 1);
+        if (s->err) return -1;
+        const int count = h->count[len];
+        if (code - count < first) return h->symbol[index + (code - first)];
+        index += count;
+        first += count;
+        first <<= 1;
+        code <<= 1;
+    }
+    s->err = 1;
+    return -1;
+}
+
+static void inf_codes(Inflate *s, const Huffman *lit, const Huffman *dist)
+{
+    static const uint16_t lBase[29] = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59,
+                                        67, 83, 99, 115, 131, 163, 195, 227, 258 };
+    static const uint8_t lExtra[29] = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4,
+                                        5, 5, 5, 5, 0 };
+    static const uint16_t dBase[30] = { 1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513,
+                                        769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
+    static const uint8_t dExtra[30] = { 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10,
+                                        11, 11, 12, 12, 13, 13 };
+    for (;;) {
+        int sym = inf_decode(s, lit);
+        if (s->err) return;
+        if (sym < 256) { if (!inf_put(s, (unsigned char)sym)) return; continue; }
+        if (sym == 256) return;
+        sym -= 257;
+        if (sym >= 29) { s->err = 1; return; }
+        const int len = lBase[sym] + inf_bits(s, lExtra[sym]);
+        const int ds = inf_decode(s, dist);
+        if (s->err || ds < 0 || ds >= 30) { s->err = 1; return; }
+        const size_t d = (size_t)dBase[ds] + (size_t)inf_bits(s, dExtra[ds]);
+        if (s->err || d > s->len) { s->err = 1; return; }
+        for (int i = 0; i < len; i++)
+            if (!inf_put(s, s->out[s->len - d])) return;
+    }
+}
+
+unsigned char *mat_inflate_builtin(const unsigned char *src, size_t srcLen, size_t *outLen)
+{
+    Inflate s;
+    memset(&s, 0, sizeof s);
+    if (srcLen < 2 || (src[0] & 0x0F) != 8 || ((src[0] << 8) | src[1]) % 31 != 0 || (src[1] & 0x20))
+        return NULL;                                  /* zlib header: deflate, no preset dictionary */
+    s.src = src;
+    s.n = srcLen;
+    s.pos = 2;
+    int last;
+    do {
+        last = inf_bits(&s, 1);
+        const int type = inf_bits(&s, 2);
+        if (s.err) break;
+        if (type == 0) {                              /* stored */
+            s.bits = 0;
+            s.nBits = 0;
+            if (s.pos + 4 > s.n) { s.err = 1; break; }
+            const size_t len = (size_t)s.src[s.pos] | (size_t)s.src[s.pos + 1] << 8;
+            s.pos += 4;
+            if (s.pos + len > s.n) { s.err = 1; break; }
+            for (size_t i = 0; i < len && !s.err; i++) inf_put(&s, s.src[s.pos + i]);
+            s.pos += len;
+        } else if (type == 1) {                       /* fixed Huffman codes */
+            uint8_t l[320];
+            Huffman lit, dist;
+            for (int i = 0; i < 144; i++) l[i] = 8;
+            for (int i = 144; i < 256; i++) l[i] = 9;
+            for (int i = 256; i < 280; i++) l[i] = 7;
+            for (int i = 280; i < 288; i++) l[i] = 8;
+            inf_build(&lit, l, 288);
+            for (int i = 0; i < 30; i++) l[i] = 5;
+            inf_build(&dist, l, 30);
+            inf_codes(&s, &lit, &dist);
+        } else if (type == 2) {                       /* dynamic Huffman codes */
+            static const uint8_t order[19] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
+            const int nLen = inf_bits(&s, 5) + 257, nDist = inf_bits(&s, 5) + 1, nCode = inf_bits(&s, 4) + 4;
+            uint8_t l[320];
+            Huffman lencode, lit, dist;
+            memset(l, 0, sizeof l);
+            for (int i = 0; i < nCode; i++) l[order[i]] = (uint8_t)inf_bits(&s, 3);
+            if (s.err || nLen > 286 || nDist > 30) { s.err = 1; break; }
+            inf_build(&lencode, l, 19);
+            int i = 0;
+            while (i < nLen + nDist && !s.err) {
+                int sym = inf_decode(&s, &lencode), rep = 0;
+                uint8_t v = 0;
+                if (sym < 0) break;
+                if (sym < 16) { l[i++] = (uint8_t)sym; continue; }
+                if (sym == 16) { if (i == 0) { s.err = 1; break; } v = l[i - 1]; rep = 3 + inf_bits(&s, 2); }
+                else if (sym == 17) rep = 3 + inf_bits(&s, 3);
+                else rep = 11 + inf_bits(&s, 7);
+                if (i + rep > nLen + nDist) { s.err = 1; break; }
+                while (rep--) l[i++] = v;
+            }
+            if (s.err) break;
+            inf_build(&lit, l, nLen);
+            inf_build(&dist, l + nLen, nDist);
+            inf_codes(&s, &lit, &dist);
+        } else {
+            s.err = 1;
+        }
+    } while (!last && !s.err);
+    if (s.err) {
+        free(s.out);
+        return NULL;
+    }
+    *outLen = s.len;
+    if (!s.out) s.out = malloc(1);
+    return s.out;
 }
 
 #ifdef RADAR_HAVE_ZLIB
@@ -301,10 +492,13 @@ int mat_parse(const unsigned char *data, size_t size, MatFile *mf, char *err, si
                 return -1;
             }
         } else if (e.type == miCOMPRESSED) {
-#ifdef RADAR_HAVE_ZLIB
             size_t len = 0;
             Element inner;
+#ifdef RADAR_HAVE_ZLIB
             unsigned char *raw = inflate_element(e.data, e.nbytes, &len);
+#else
+            unsigned char *raw = mat_inflate_builtin(e.data, e.nbytes, &len);
+#endif
             int r = -1;
             if (!raw)
                 set_err(err, errLen, "corrupted compressed variable");
@@ -317,12 +511,6 @@ int mat_parse(const unsigned char *data, size_t size, MatFile *mf, char *err, si
                 mat_free(mf);
                 return -1;
             }
-#else
-            set_err(err, errLen, "compressed MAT-file (-v7): built without zlib, save with -v6 "
-                    "(cfg.io.matFormat = '-v6')");
-            mat_free(mf);
-            return -1;
-#endif
         }
         pos += e.total;
     }

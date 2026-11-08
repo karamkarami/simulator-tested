@@ -206,10 +206,29 @@ static void write_ddc_file(const char *path, uint32_t pulse, double time_s, int 
             continue;
         }
 #else
-        if (compressed) {                              /* the reader must refuse it: content does not matter */
+        if (compressed) {                              /* a zlib stream of stored blocks (no compressor) */
+            const size_t n = vars[v].n, nBlk = (n + 65534) / 65535;
+            const uint32_t zlen = (uint32_t)(2 + n + 5 * (nBlk ? nBlk : 1) + 4);
+            uint32_t a = 1, b = 0;
             put32(&file, miCOMPRESSED);
-            put32(&file, (uint32_t)vars[v].n);
-            put(&file, vars[v].p, vars[v].n);
+            put32(&file, zlen);
+            const unsigned char zh[2] = { 0x78, 0x01 };
+            put(&file, zh, 2);
+            size_t off = 0;
+            do {
+                const size_t len = n - off < 65535 ? n - off : 65535;
+                const unsigned char bh[5] = { (unsigned char)(off + len >= n), (unsigned char)(len & 0xFF),
+                                              (unsigned char)(len >> 8), (unsigned char)(~len & 0xFF),
+                                              (unsigned char)((~len >> 8) & 0xFF) };
+                put(&file, bh, 5);
+                put(&file, vars[v].p + off, len);
+                off += len;
+            } while (off < n);
+            for (size_t i = 0; i < n; i++) { a = (a + vars[v].p[i]) % 65521; b = (b + a) % 65521; }
+            const uint32_t adler = b << 16 | a;
+            const unsigned char ad[4] = { (unsigned char)(adler >> 24), (unsigned char)(adler >> 16),
+                                          (unsigned char)(adler >> 8), (unsigned char)adler };
+            put(&file, ad, 4);
             free(vars[v].p);
             continue;
         }
@@ -277,13 +296,30 @@ static void test_files(void)
 
     CHECK(ddc_load(paths[0], &p, err, sizeof err) == 0);
     check_pri(&p, 1, 1.000);
-    if (mat_has_zlib()) {
-        CHECK(ddc_load(paths[1], &p, err, sizeof err) == 0);
-        check_pri(&p, 2, 1.001);
-    } else {
-        CHECK(ddc_load(paths[1], &p, err, sizeof err) != 0 && strstr(err, "-v6") != NULL);
-        printf("(built without zlib: compressed file rejected as expected)\n");
+    CHECK(ddc_load(paths[1], &p, err, sizeof err) == 0);       /* compressed: zlib or the built-in inflate */
+    check_pri(&p, 2, 1.001);
+#ifdef RADAR_HAVE_ZLIB
+    {   /* the built-in inflate (used without zlib) against zlib: dynamic and fixed Huffman blocks */
+        const size_t n = 200000;
+        unsigned char *src = malloc(n);
+        uint32_t x = 12345;
+        for (size_t i = 0; i < n; i++) {
+            x = x * 1103515245u + 12345u;
+            src[i] = (unsigned char)(i % 1000 < 600 ? (x >> 24) % 7 : (x >> 16));   /* repeats and noise */
+        }
+        for (int level = 1; level <= 9; level += 8) {
+            uLongf zlen = compressBound((uLong)n);
+            unsigned char *z = malloc(zlen);
+            compress2(z, &zlen, src, (uLong)n, level);
+            size_t outLen = 0;
+            unsigned char *out = mat_inflate_builtin(z, zlen, &outLen);
+            CHECK(out && outLen == n && memcmp(out, src, n) == 0);
+            free(out);
+            free(z);
+        }
+        free(src);
     }
+#endif
 
     /* Datagrams of PRI 1 -> record file -> udp_input: the same PRI */
     CHECK(ddc_load(paths[0], &p, err, sizeof err) == 0);

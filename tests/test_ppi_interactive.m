@@ -7,7 +7,8 @@ function ok = test_ppi_interactive()
 %   filters, clear, pinned data tips, labels, reset and PNG export; the
 %   display of the CFAR detections before the plot extractor (arcs, data
 %   tips, filters, key d) and the CFAR threshold field (request, hand-over
-%   to the processing through ppi_update, invalid input, default).
+%   to the processing through ppi_update, invalid input, default), and the
+%   video mode (ppi_video_add.m, image of the sector the antenna passed).
 
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
@@ -165,7 +166,7 @@ ok = check(abs(cfar_pfa(alpha0, sys.cfar, sys.dop.nLooks) - cfg.cfar.twoD.pfa) <
 tk = struct('id', {7, 8}, 'confirmed', {true, false}, 't_s', 11.9, 'pos_m', {[30e3*sind(95) 30e3*cosd(95) 2600], ...
             [5e3 5e3 0]}, 'vel_mps', {[-100 50 0], [0 0 0]}, 'alt_m', {2606, NaN}, 'hits', {5, 1}, ...
             'misses', 0, 'dim', 3);
-us = [120 340 56 980 760 15 4 30 500];               % blocks, console output, display
+us = [120 340 56 980 760 7 15 4 30 500];             % blocks, console output, display
 ppi_update(ppi, sys, 105, 12.5, 2, p, dets, tk, us);
 S = getappdata(fig, 'ppi');
 ok = check(numel(get(S.h.track, 'XData')) == 1 && numel(get(S.h.trackTent, 'XData')) == 1, ...
@@ -176,10 +177,11 @@ txt = ppi_callbacks('hover', fig, xy(3));
 ok = check(~isempty(strfind(txt, 'Track 7 (confirmed, 3-D EKF)')) && ~isempty(strfind(txt, 'Speed       111.8 m/s')) ...
            && ~isempty(strfind(txt, 'Height      2606 m')), 'hover over a track (wins over its plot)') && ok;
 str = get(S.h.timing, 'String');
-ok = check(numel(str) == 12 && ~isempty(strfind(str{5}, '980.0')) && ~isempty(strfind(str{6}, 'CFAR 2-D')) ...
-           && ~isempty(strfind(str{9}, 'Console output')) && ~isempty(strfind(str{10}, 'Display (PPI)')) ...
-           && ~isempty(strfind(str{10}, '500.0')) && ~isempty(strfind(str{11}, '2805.0')) ...
-           && ~isempty(strfind(str{12}, 'whole run')), ...
+ok = check(numel(str) == 13 && ~isempty(strfind(str{5}, '980.0')) && ~isempty(strfind(str{6}, 'CFAR CA 2D')) ...
+           && ~isempty(strfind(str{7}, 'Peak interp.')) && ~isempty(strfind(str{9}, 'Track 3D CV')) ...
+           && ~isempty(strfind(str{10}, 'Console output')) && ~isempty(strfind(str{11}, 'Display (PPI)')) ...
+           && ~isempty(strfind(str{11}, '500.0')) && ~isempty(strfind(str{12}, '2812.0')) ...
+           && ~isempty(strfind(str{13}, 'whole run')) && max(cellfun(@numel, str(2:12))) <= 24, ...
            'block, console and display times in the panel (Total includes the display)') && ok;
 ppi_update(ppi, sys, 105, 12.5, 2, p, dets, tk, us, 50);           % means over the last 50 PRIs
 str = get(S.h.timing, 'String');
@@ -198,6 +200,41 @@ ok = check(isempty(get(S.h.long, 'XData')), 'resumed display shows the new data'
 ppi_update(ppi, sys, 120, 13.0, 2, p);
 ppi_callbacks('clear', fig);
 ok = check(isempty(get(S.h.short, 'XData')) && isempty(get(S.h.long, 'XData')), 'clear removes the plots') && ok;
+
+%% Video: DDC output averaged over the elements, both receive intervals joined
+ppi_callbacks('cleartips', fig);
+V = ppi.video;
+rng(3);
+tgtR = 30e3;  dR = V.dR_m;
+kTgt = find(sys.wave.long.rxIdx >= 1, 1) + round((tgtR - sys.wave.long.range_m(1)) / dR);   % rx sample of 30 km
+for az = 30:0.036:70
+    I = round(20*randn(sys.nDdc, sys.nCh));  Q = round(20*randn(sys.nDdc, sys.nCh));
+    if az > 45 && az < 55                                 % echo 20 dB above the noise at 30 km
+        k = sys.wave.long.rxIdx(kTgt) + (0:3);
+        I(k, :) = I(k, :) + 200;
+    end
+    V = ppi_video_add(V, I, Q, az, 14 + az/36);
+end
+ppi_callbacks('option', fig, 'showMode', 'video');
+[~, showVideo] = ppi_update(ppi, sys, 70, 16.0, 2, p, dets, tk, [], [], V);
+S = getappdata(fig, 'ppi');
+ok = check(showVideo && strcmp(get(S.h.video, 'Visible'), 'on') && isempty(get(S.h.long, 'XData')) ...
+           && get(S.h.ui.showMode, 'Value') == 4, 'video mode: the video image instead of the plots') && ok;
+A = get(S.h.video, 'AlphaData');  C = get(S.h.video, 'CData');
+pix = @(r, az) round(([r*cosd(az) r*sind(az)] / (V.rMax_km*1e3) + 1) / 2 * (V.nPix - 1)) + 1;   % [row col]
+pt = pix(tgtR + 2*dR, 50);  pn = pix(20e3, 40);  pe = pix(20e3, 150);
+bright = @(q) max(max(sum(C(q(1)+(-1:1), q(2)+(-1:1), :), 3)));   % (a pixel is 267 m)
+ok = check(A(pt(1), pt(2)) == 1 && A(pn(1), pn(2)) == 1 && A(pe(1), pe(2)) == 0, ...
+           'video drawn where the antenna passed (30 - 70 deg) only') && ok;
+ok = check(bright(pt) > bright(pn) + 0.5 && abs(V.noise_dB - 10*log10(2*400)) < 1, ...
+           'the echo is brighter than the noise; noise floor of the video') && ok;
+ppi_callbacks('hover', fig, [0 0]);                        % (no data tip in the screenshot)
+ppi_callbacks('save', fig, fullfile(tempdir, 'ppi_video_test.png'));
+ppi_callbacks('key', fig, struct('Key', 'd', 'Character', 'd', 'Modifier', {{}}));
+S = getappdata(fig, 'ppi');
+ok = check(strcmp(S.opt.showMode, 'plots') && strcmp(get(S.h.video, 'Visible'), 'off'), ...
+           'key d: from the video back to the plots') && ok;
+
 file = [tempname() '.png'];
 ppi_callbacks('save', fig, file);
 ok = check(exist(file, 'file') == 2, 'PPI saved as PNG') && ok;

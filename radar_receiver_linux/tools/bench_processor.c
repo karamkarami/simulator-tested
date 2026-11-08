@@ -157,8 +157,8 @@ int main(int argc, char **argv)
            cfar_method_name(cfg.cfarMethod),
            cfg.updateEvery, nPris, clutter_dB > 0 ? "on" : "off");
     printf("mean time per PRI [us] (CFAR+pr: the CFAR with the pruning and the reports, as in the PPI)\n"
-           "%9s %9s | %6s %6s %6s %7s %7s %7s %7s | %7s | %8s %7s\n", "thr[dB]", "Pfa", "DBF",
-           "MF", "MTI", "Doppler", "CFAR+pr", "extract", "track", "total", "det/upd", "plots");
+           "%9s %9s | %6s %6s %6s %7s %7s %6s %7s %7s | %7s | %8s %7s\n", "thr[dB]", "Pfa", "DBF",
+           "MF", "MTI", "Doppler", "CFAR+pr", "interp", "extract", "track", "total", "det/upd", "plots");
     Counts cnt;
     memset(&cnt, 0, sizeof cnt);
     ProcessorCallbacks cb = { on_detections, on_plot, NULL, &cnt, NULL };
@@ -216,10 +216,10 @@ int main(int argc, char **argv)
         processor_timing(proc, &t1);
         const double n = (double)(t1.pris - t0.pris), us = 1e3 / (n > 0 ? n : 1);
         const double upd = (double)(cnt.updates - c0.updates);
-        printf("%9.2f %9.1e | %6.1f %6.1f %6.1f %7.1f %7.1f %7.1f %7.1f | %7.1f | %8.0f %7llu\n", thr[t],
+        printf("%9.2f %9.1e | %6.1f %6.1f %6.1f %7.1f %7.1f %6.1f %7.1f %7.1f | %7.1f | %8.0f %7llu\n", thr[t],
                cfar_pfa(&cfg, pow(10.0, thr[t] / 10.0)), (t1.dbf_ms - t0.dbf_ms) * us,
                (t1.mf_ms - t0.mf_ms) * us, (t1.mti_ms - t0.mti_ms) * us, (t1.doppler_ms - t0.doppler_ms) * us,
-               (t1.cfar_ms - t0.cfar_ms) * us, (t1.extract_ms - t0.extract_ms) * us, (t1.track_ms - t0.track_ms) * us,
+               (t1.cfar_ms - t0.cfar_ms) * us, (t1.interp_ms - t0.interp_ms) * us, (t1.extract_ms - t0.extract_ms) * us, (t1.track_ms - t0.track_ms) * us,
                (t1.total_ms - t0.total_ms) * us, upd > 0 ? (double)(cnt.dets - c0.dets) / upd : 0.0,
                (unsigned long long)(cnt.plots - c0.plots));
         fflush(stdout);

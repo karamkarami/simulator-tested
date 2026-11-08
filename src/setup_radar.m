@@ -15,8 +15,12 @@ sys.fLO    = cfg.fc - sys.fIF;                                % receiver local o
 
 sys.cfar = cfar_window(cfg);                                  % window of the selected CFAR method
 sys.report.snrNoise = 'median';                               % noise floor of the SNR of the reports
-if isfield(cfg, 'report') && isfield(cfg.report, 'snrNoise')
-    sys.report.snrNoise = lower(cfg.report.snrNoise);
+sys.report.dopplerInterp = false;                             % peak interpolation (peak_interpolation.m)
+sys.report.elevationInterp = true;
+if isfield(cfg, 'report')
+    if isfield(cfg.report, 'snrNoise'), sys.report.snrNoise = lower(cfg.report.snrNoise); end
+    if isfield(cfg.report, 'dopplerInterp'), sys.report.dopplerInterp = logical(cfg.report.dopplerInterp); end
+    if isfield(cfg.report, 'elevationInterp'), sys.report.elevationInterp = logical(cfg.report.elevationInterp); end
 end
 if ~any(strcmp(sys.report.snrNoise, {'median', 'cfar'}))
     error('cfg.report.snrNoise must be ''median'' or ''cfar''.');
@@ -75,6 +79,35 @@ switch lower(cfg.prf.mode)
 end
 sys.staggered = strcmpi(cfg.prf.mode, 'staggered');
 sys.nStagger  = numel(sys.pri);
+% Clutter filter: the canceller above, or an FIR filter from cfg.files.mtiFir
+sys.mti.type = 'canceller';
+if isfield(cfg, 'mti') && isfield(cfg.mti, 'type'), sys.mti.type = lower(cfg.mti.type); end
+switch sys.mti.type
+    case 'canceller'
+    case 'fir'
+        if ~isfield(cfg.files, 'mtiFir')
+            error('cfg.mti.type = ''fir'' needs the coefficient file cfg.files.mtiFir.');
+        end
+        fir = load_input(cfg, 'mtiFir', []);
+        if ~isfield(fir, 'coeffs') || isempty(fir.coeffs) || ~isnumeric(fir.coeffs)
+            error('%s must hold the FIR coefficients in the variable ''coeffs''.', cfg.files.mtiFir);
+        end
+        h = double(fir.coeffs);
+        if ~isreal(h) || any(~isfinite(h(:)))
+            error('The FIR coefficients of %s must be real and finite.', cfg.files.mtiFir);
+        end
+        if isvector(h), h = h(:).'; end                       % a column is one filter too
+        if size(h, 1) ~= 1 && size(h, 1) ~= sys.nStagger
+            error('%s: ''coeffs'' has %d rows: 1 (one filter) or %d (one per stagger position).', ...
+                  cfg.files.mtiFir, size(h, 1), sys.nStagger);
+        end
+        if ~any(h(:))
+            error('The FIR coefficients of %s are all zero.', cfg.files.mtiFir);
+        end
+        sys.mtiCoeffs = h;
+    otherwise
+        error('cfg.mti.type must be ''canceller'' or ''fir''.');
+end
 if size(sys.mtiCoeffs, 1) == 1
     sys.mtiCoeffs = repmat(sys.mtiCoeffs, sys.nStagger, 1);
 end

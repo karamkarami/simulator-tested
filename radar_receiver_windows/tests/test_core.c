@@ -344,9 +344,10 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
     ProcessorTiming tm;
     processor_timing(proc, &tm);
     CHECK(tm.rejected == 0 && tm.pris == (uint64_t)nPulses, "%llu PRIs rejected", (unsigned long long)tm.rejected);
-    printf("per PRI [ms]: DBF %.2f, MF %.2f, MTI %.2f, Doppler %.2f, CFAR %.2f, extraction %.2f, total %.2f\n",
-           tm.dbf_ms / tm.pris, tm.mf_ms / tm.pris, tm.mti_ms / tm.pris, tm.doppler_ms / tm.pris,
-           tm.cfar_ms / tm.pris, tm.extract_ms / tm.pris, tm.total_ms / tm.pris);
+    printf("per PRI [ms]: DBF %.2f, MF %.2f, MTI %.2f, Doppler %.2f, CFAR %.2f, peak interpolation %.3f, "
+           "extraction %.2f, total %.2f\n", tm.dbf_ms / tm.pris, tm.mf_ms / tm.pris, tm.mti_ms / tm.pris,
+           tm.doppler_ms / tm.pris, tm.cfar_ms / tm.pris, tm.interp_ms / tm.pris, tm.extract_ms / tm.pris,
+           tm.total_ms / tm.pris);
 
     printf("end to end: %d PRIs in %.1f ms (%.2f ms per PRI), %d/%d CPI updates, %d/%d detections, %d plots\n",
            nPulses, tProc * 1e3, tProc * 1e3 / nPulses, sink.updates[0], sink.updates[1],
@@ -443,6 +444,49 @@ static void test_cfar_pfa(const char *configPath)
     radar_config_free(&cfg);
 }
 
+/* Raw video of the PPI (video.c): the mean of I^2 + Q^2 over the channels, the
+ * short-pulse samples up to the first long-pulse range cell, then the
+ * long-pulse samples, in range bins of c / (2 fsOut). */
+static void test_video(const char *configPath)
+{
+    RadarConfig cfg;
+    char err[256];
+    if (radar_config_load(configPath, &cfg, err, sizeof err) != 0) return;
+    VideoLayout v;
+    CHECK(video_layout_init(&v, &cfg, cfg.maxRange_m) == 0, "video layout");
+    const PulseConfig *ps = &cfg.pulse[PULSE_SHORT], *pl = &cfg.pulse[PULSE_LONG];
+    PriData pri;
+    memset(&pri, 0, sizeof pri);
+    pri.nCh = cfg.nCh;
+    pri.nSamples = cfg.nDdc;
+    pri.iq = calloc((size_t)2 * cfg.nCh * cfg.nDdc, sizeof(int16_t));
+    float *row = calloc((size_t)v.nBins, sizeof(float));
+    const int kS = 5, kL = 10;
+    int kBeyond = -1;                                   /* a short-pulse sample beyond the handover */
+    for (int k = ps->rxCount - 1; k >= 0; k--)
+        if (ps->range_m[0] + k * v.dR_m >= pl->range_m[0]) kBeyond = k;
+    for (int ch = 0; ch < cfg.nCh; ch++) {
+        int16_t *x = pri.iq + 2 * (size_t)ch * cfg.nDdc;
+        x[2 * (ps->rxFirst + kS)] = (int16_t)(ch % 2 ? 2 : 4);              /* mean 10 */
+        x[2 * (pl->rxFirst + kL)] = 4;  x[2 * (pl->rxFirst + kL) + 1] = 3;  /* 25 */
+        if (kBeyond >= 0) x[2 * (ps->rxFirst + kBeyond)] = 100;
+    }
+    video_row(&v, &pri, row);
+    const int bS = (int)floor((ps->range_m[0] + kS * v.dR_m) / v.dR_m), bL = (int)floor((pl->range_m[0] + kL * v.dR_m) / v.dR_m);
+    double rest = 0;
+    for (int b = 0; b < v.nBins; b++) if (b != bS && b != bL) rest += row[b];
+    const double expS = cfg.nCh == 1 ? 16.0 : 10.0;
+    CHECK(fabs(row[bS] - expS) < 1e-4 && fabs(row[bL] - 25.0) < 1e-4 && rest == 0.0,
+          "video: short %.3f (expected %.1f), long %.3f (25), elsewhere %.3f (0: no short-pulse sample beyond "
+          "the handover)", row[bS], expS, row[bL], rest);
+    printf("video: %d samples (short up to %.2f km, long from %.2f km) in %d bins of %.1f m\n", v.nSamples,
+           pl->range_m[0] / 1e3, pl->range_m[0] / 1e3, v.nBins, v.dR_m);
+    free(row);
+    free(pri.iq);
+    video_layout_free(&v);
+    radar_config_free(&cfg);
+}
+
 int main(int argc, char **argv)
 {
     test_fft();
@@ -472,6 +516,7 @@ int main(int argc, char **argv)
                    a.snr_dB, c.snr_dB);
         }
         test_cfar_pfa(argv[1]);
+        test_video(argv[1]);
     } else {
         printf("no configuration file given: end-to-end test skipped\n");
     }

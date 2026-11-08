@@ -1,13 +1,17 @@
-function sys = ppi_update(ppi, sys, az_deg, t_s, scan, plots, dets, tracks, timing_us, timingPris)
+function [sys, showVideo] = ppi_update(ppi, sys, az_deg, t_s, scan, plots, dets, tracks, timing_us, timingPris, video)
 %PPI_UPDATE  Refresh the PPI: antenna, true targets, plots, detections, tracks, block times.
-%   sys = PPI_UPDATE(ppi, sys, az_deg, t_s, scan, plots, dets, tracks, timing_us, timingPris)
+%   [sys, showVideo] = PPI_UPDATE(ppi, sys, az_deg, t_s, scan, plots, dets, tracks, timing_us,
+%                                 timingPris, video)
 %   stores the data in the figure, so the interactive options of
 %   ppi_callbacks.m (filters, zoom, data tips) can redraw it at any time.
 %   dets are the CFAR detections before the plot extractor (rows of
 %   detection_log_init.m), tracks the current tracks (track_report.m) and
 %   timing_us the mean time per PRI of DBF, matched filter, MTI, Doppler,
-%   detection, plot extractor, tracking, console output and display [us]
-%   over the last timingPris PRIs ([] = the whole run) (all optional).
+%   detection, peak interpolation, plot extractor, tracking, console output
+%   and display [us]
+%   over the last timingPris PRIs ([] = the whole run), video the video map
+%   (ppi_video_add.m; [] = the one stored) (all optional). showVideo is true
+%   when the PPI shows the video (the caller then fills the map every PRI).
 %   While the display is paused (space key or the Pause button) the data is
 %   still stored but not drawn.
 %   When the user applied a new CFAR threshold in the panel, the returned sys
@@ -16,6 +20,8 @@ if nargin < 7, dets = zeros(0, 10); end
 if nargin < 8, tracks = []; end
 if nargin < 9, timing_us = []; end
 if nargin < 10, timingPris = []; end
+if nargin < 11, video = []; end
+showVideo = false;
 if ~ishandle(ppi.fig), return; end                       % the window was closed
 dB = ppi_callbacks('takeCfar', ppi.fig);
 if ~isempty(dB)
@@ -27,8 +33,10 @@ if ~isempty(dB)
 end
 S = getappdata(ppi.fig, 'ppi');
 S.sys = sys;
+if isempty(video), video = S.data.video; end
 S.data = struct('az_deg', az_deg, 't_s', t_s, 'scan', scan, 'plots', plots, 'dets', dets, ...
-                'tracks', tracks, 'timing_us', timing_us, 'timingPris', timingPris);
+                'tracks', tracks, 'timing_us', timing_us, 'timingPris', timingPris, 'video', video);
+showVideo = strcmp(S.opt.showMode, 'video');
 setappdata(ppi.fig, 'ppi', S);
 if ~isempty(dB)
     ppi_callbacks('cfarApplied', ppi.fig, dB);

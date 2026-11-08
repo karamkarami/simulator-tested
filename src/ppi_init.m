@@ -16,7 +16,10 @@ function ppi = ppi_init(sys)
 %   The panel on the right selects what is shown: the plots (after the plot
 %   extractor), the CFAR detections before the extractor (each detection is
 %   an arc over the azimuth step of its CPI update, so a target appears as an
-%   arc about one beamwidth long) or both; shows or hides the short/long-pulse
+%   arc about one beamwidth long), both, or the raw video (the DDC output of
+%   the elements averaged non-coherently, the receive intervals of both
+%   sub-pulses joined, colour = power above the noise; ppi_video_init.m);
+%   shows or hides the short/long-pulse
 %   data, the true targets, range rings, plot labels and the antenna; filters
 %   by SNR and age; shows or hides the tracks (hollow triangles: confirmed
 %   magenta, tentative gray, with a velocity leader); shows the mean
@@ -37,6 +40,10 @@ fig = figure('Name', 'PPI', 'Color', 'k', 'Visible', vis, 'InvertHardcopy', 'off
 ax  = axes('Parent', fig, 'Color', 'k', 'XColor', [0.6 0.6 0.6], 'YColor', [0.6 0.6 0.6], ...
            'Units', 'normalized', 'Position', [0.07 0.12 0.66 0.8]);
 hold(ax, 'on');
+% Raw video ('Video' display mode), under everything else; colour scale in the upper right corner
+h.video = image('Parent', ax, 'XData', rMax*[-1 1], 'YData', rMax*[-1 1], 'CData', zeros(2, 2, 3), ...
+                'Visible', 'off', 'HitTest', 'off');
+set(ax, 'YDir', 'normal');
 axis(ax, 'equal');
 axis(ax, rMax*[-1.05 1.05 -1.05 1.05]);
 xlabel(ax, 'East [km]');
@@ -92,6 +99,16 @@ try
 catch
 end
 h.title = title(ax, '', 'Color', 'w');
+video = ppi_video_init(sys, rMax*1e3);
+h.videoBar = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.57 0.872 0.15 0.014], ...
+                  'XColor', [0.7 0.7 0.7], 'YColor', 'k', 'Color', 'k', 'YTick', [], 'FontSize', 7, ...
+                  'Visible', 'off', 'HitTest', 'off');
+h.videoBarImg = image('Parent', h.videoBar, 'XData', [-3 video.span_dB], 'YData', [0 1], ...
+                      'CData', reshape(video.cmap, 1, [], 3), 'Visible', 'off', 'HitTest', 'off');
+set(h.videoBar, 'XLim', [-3 video.span_dB], 'YLim', [-0.5 1.5], 'XTick', 0:10:video.span_dB);
+h.videoBarLabel = text(0.5, 2.4, 'video [dB above noise]', 'Parent', h.videoBar, 'Units', 'normalized', ...
+                       'Color', [0.7 0.7 0.7], 'FontSize', 7, 'HorizontalAlignment', 'center', 'Visible', 'off');
+set(fig, 'CurrentAxes', ax);                               % (axes(ax) would raise it above the scale)
 
 %% Data tip (hover) and selection marker
 h.tip = text(0, 0, '', 'Parent', ax, 'Color', 'w', 'BackgroundColor', [0.12 0.12 0.12], ...
@@ -110,9 +127,10 @@ uicontrol(fig, 'Style', 'text', 'String', 'Display', 'Units', 'normalized', 'Pos
           'BackgroundColor', 'k', 'ForegroundColor', 'w', 'FontWeight', 'bold', 'HorizontalAlignment', 'left');
 y = y - rowH;
 label('Show', [x0 y 0.05 rowH]);
-modes = {'plots', 'detections', 'both'};
+modes = {'plots', 'detections', 'both', 'video'};
 h.ui.showMode = uicontrol(fig, 'Style', 'popupmenu', 'Units', 'normalized', 'Position', [x0+0.05 y w-0.05 rowH], ...
-    'String', {'Plots (after extractor)', 'Detections (before extractor)', 'Plots and detections'}, ...
+    'String', {'Plots (after extractor)', 'Detections (before extractor)', 'Plots and detections', ...
+               'Video (DDC, elements averaged)'}, ...
     'Value', find(strcmp(cfg.display.showMode, modes)), ...
     'BackgroundColor', bg, 'ForegroundColor', fg, ...
     'Callback', @(src, evt) ppi_callbacks('option', fig, 'showMode', modes{get(src, 'Value')}));
@@ -176,7 +194,7 @@ helpH = 0.085;
 mono = 'FixedWidth';                                       % MATLAB's monospaced font
 if exist('OCTAVE_VERSION', 'builtin'), mono = 'Monospace'; end
 h.timing = uicontrol(fig, 'Style', 'text', 'String', '', 'Units', 'normalized', ...
-    'Position', [x0 0.015+helpH w 0.19], 'BackgroundColor', [0.08 0.08 0.08], ...
+    'Position', [x0 0.015+helpH w 0.2], 'BackgroundColor', [0.08 0.08 0.08], ...
     'ForegroundColor', [0.85 0.85 0.85], 'HorizontalAlignment', 'left', 'FontName', mono, 'FontSize', 8);
 uicontrol(fig, 'Style', 'text', 'Units', 'normalized', 'Position', [x0 0.01 w helpH], ...
     'BackgroundColor', 'k', 'ForegroundColor', [0.6 0.6 0.6], 'HorizontalAlignment', 'left', ...
@@ -195,7 +213,7 @@ S.home = rMax*[-1.05 1.05 -1.05 1.05];
 S.opt = opt;
 S.sys = sys;
 S.data = struct('az_deg', 0, 't_s', 0, 'scan', 1, 'plots', [], 'dets', zeros(0, 10), ...
-                'tracks', [], 'timing_us', [], 'timingPris', []);
+                'tracks', [], 'timing_us', [], 'timingPris', [], 'video', video);
 S.vis = struct('x', [], 'y', [], 'idx', []);               % visible plots (for picking)
 S.visDet = struct('x', [], 'y', [], 'idx', []);            % visible detections
 S.visTrk = struct('x', [], 'y', [], 'idx', []);            % visible tracks
@@ -213,6 +231,7 @@ ppi_callbacks('cfarApplied', fig, cfar_dB);
 ppi.fig = fig;
 ppi.ax = ax;
 ppi.rMax = rMax;
+ppi.video = video;                                         % filled by ppi_video_add.m (run_radar_sim.m)
 end
 
 function g = gobjects_compat(n)

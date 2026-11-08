@@ -13,7 +13,7 @@
  *                          SNR, time, sub-pulse, hits, beam/cell/bin, pulse number
  *   click on a plot        pin its data tip on the display (click again: remove)
  *   right click            options: what is shown (plots / CFAR detections /
- *                          both), short/long-pulse data, range rings, plot
+ *                          both / raw video), short/long-pulse data, range rings, plot
  *                          labels, antenna trail, which plots are shown (until
  *                          the antenna passes again / 2 scans / all), minimum
  *                          SNR, clear the display, remove data tips, reset
@@ -24,7 +24,7 @@
  * The status line shows the range, azimuth and east/north of the cursor.
  *
  * Panel on the right of the window (PpiWindow): display mode (plots after the
- * plot extractor, CFAR detections before it, or both), a button that saves a
+ * plot extractor, CFAR detections before it, both, or the raw video), a button that saves a
  * screenshot of the PPI, and the CFAR threshold [dB] of the running
  * processing: Apply sends the value to the worker (ppi_take_cfar_request),
  * which reports the threshold it uses back (ppi_post_cfar_threshold); Default
@@ -39,6 +39,14 @@
  * azimuth again in a later scan, like on a real PPI. For this the antenna
  * rotation is accumulated ("sweep", degrees turned since the first update), so
  * the scan boundary (the start azimuth of the antenna) does not matter.
+ *
+ * Raw video (display mode Video, ppi_post_video): the DDC output of every PRI
+ * averaged over the elements, both receive intervals joined (video.c). The
+ * widget keeps the newest data of every 0.25 deg azimuth bin (the mean of the
+ * PRIs while the antenna is in the bin) and draws it as an image: colour =
+ * power from 3 dB below the noise floor (running median) to 50 dB above it.
+ * A pixel shows the largest range bin under it. The video stays until the
+ * antenna passes again (or Clear).
  *
  * The file does not use Q_OBJECT, so it builds with or without moc, with
  * Qt 5 (>= 5.12) and Qt 6.
@@ -58,7 +66,9 @@
 #include <QFileDialog>
 #include <QDateTime>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QLabel>
+#include <QLinearGradient>
 #include <QPainterPath>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -123,6 +133,9 @@ const QColor kColorPin(80, 230, 80);
 const QColor kColorTrack(255, 90, 255);   /* confirmed track: magenta triangle      */
 const QColor kColorTentative(140, 140, 140);
 constexpr double kTrackPx     = 11.0;     /* half size of the track triangle [px]   */
+constexpr int    kVideoAz     = 1440;     /* video: azimuth bins (0.25 deg)         */
+constexpr double kVideoSpan_dB = 50.0;    /* video colours: noise - 3 dB ... + this */
+constexpr size_t kMaxPendingVideo = 4000; /* video rows waiting for the GUI thread  */
 constexpr double kLeader_s    = 30.0;     /* velocity leader of a track [s]         */
 
 double wrap360(double a)
@@ -169,11 +182,33 @@ struct CfarState {
     double   request_dB = 0.0;
 };
 
+struct VideoRow {                 /* the video of one PRI (ppi_post_video) */
+    double             az_deg = 0.0, time_s = 0.0, dR_m = 0.0;
+    std::vector<float> v;
+};
+
+/* Colours of the video (index 1 ... 255; 0 = no data), as ppi_video_colormap.m. */
+QRgb video_colour(int i)
+{
+    static const double x[7] = { 0, 0.15, 0.35, 0.55, 0.75, 0.9, 1 };
+    static const double c[7][3] = { { 0, 0, 0 }, { 0, 0, 0.55 }, { 0, 0.6, 1 }, { 0, 1, 0.3 },
+                                     { 1, 1, 0 }, { 1, 0.25, 0 }, { 1, 1, 1 } };
+    const double t = (i - 1) / 254.0;
+    int k = 0;
+    while (k < 5 && t > x[k + 1]) k++;
+    const double f = (t - x[k]) / (x[k + 1] - x[k]);
+    auto ch = [&](int j) { return (int)std::lround(255.0 * (c[k][j] + f * (c[k + 1][j] - c[k][j]))); };
+    return qRgb(ch(0), ch(1), ch(2));
+}
+
+std::atomic<int> g_videoWanted(0);   /* the PPI shows the video: the worker computes it */
+
 struct Shared {
     std::mutex            mutex;
     AntennaState          antenna;
     std::vector<PlotMark> newPlots;   /* plots not yet taken by the GUI thread */
     std::vector<PlotMark> newDets;    /* CFAR detections not yet taken         */
+    std::vector<VideoRow> newVideo;   /* video rows not yet taken              */
     bool                  clear = false;   /* a new run started: clear the display */
     uint64_t              nextId = 1;
     CfarState             cfar;
@@ -202,6 +237,7 @@ void reset_shared()
     s.antenna = AntennaState();
     s.newPlots.clear();
     s.newDets.clear();
+    s.newVideo.clear();
     s.clear = true;
     s.cfar = CfarState();
     s.trackUpdates.clear();
@@ -293,6 +329,22 @@ QString plot_text(const Detection &d, bool isDet = false)
     return rows.join(QStringLiteral("<br>"));
 }
 
+/* A row of the timing panel: the label shortened to 15 characters ("1-D" ->
+ * "1D", then "range" -> "rng", "Doppler" -> "Dop", then cut), the value
+ * right-aligned in 9 (24 characters in all). */
+QString timing_label(QString name)
+{
+    name.replace(QStringLiteral("-D"), QStringLiteral("D"));
+    if (name.length() > 15)
+        name.replace(QStringLiteral(" range"), QStringLiteral(" rng")).replace(QStringLiteral(" Doppler"), QStringLiteral(" Dop"));
+    return name.length() > 15 ? name.left(14) + QChar('.') : name;
+}
+
+QString timing_row(const QString &name, double us)
+{
+    return QStringLiteral("%1%2").arg(timing_label(name), -15).arg(us, 9, 'f', 1);
+}
+
 /* Event positions (the accessors differ between Qt 5 and Qt 6). */
 QPointF event_pos(const QMouseEvent *e)
 {
@@ -317,7 +369,8 @@ QPointF event_pos(const QWheelEvent *e)
 /* ------------------------------------------------------------------------ */
 
 enum class History { UntilSwept, TwoScans, All };
-enum class DisplayMode { Plots, Detections, Both };   /* after / before the plot extractor */
+/* after / before the plot extractor, both, raw video (the order of the panel's box) */
+enum class DisplayMode { Plots, Detections, Both, Video };
 
 class PpiWidget : public QWidget {
 public:
@@ -368,7 +421,30 @@ public:
     size_t detectionCount() const { return dets_.size(); }
     size_t visibleCount() const;        /* plots shown */
     size_t visibleDetectionCount() const;
-    void   setDisplayMode(DisplayMode m) { mode_ = m; update(); }
+    void   setDisplayMode(DisplayMode m)
+    {
+        mode_ = m;
+        g_videoWanted.store(m == DisplayMode::Video);
+        videoImageDirty_ = true;
+        update();
+    }
+    /* video: azimuth bins with data, noise floor [dB], colour index of a ground point (0 = none) */
+    int    videoBinsFilled() const
+    {
+        int n = 0;
+        for (int a = 0; a < kVideoAz && videoBins_ > 0; a++)
+            n += *std::max_element(videoIdx_.begin() + (size_t)a * videoBins_,
+                                   videoIdx_.begin() + (size_t)(a + 1) * videoBins_) > 0;
+        return n;
+    }
+    double videoNoise_dB() const { return videoNoise_dB_; }
+    int    videoIndexAt(double east_m, double north_m) const
+    {
+        if (videoBins_ < 1) return 0;
+        const int b = (int)std::floor(std::hypot(east_m, north_m) / videoDR_);
+        const int a = std::min(kVideoAz - 1, (int)std::floor(wrap360(std::atan2(east_m, north_m) / kDeg) / (360.0 / kVideoAz)));
+        return b >= 0 && b < videoBins_ ? videoIdx_[(size_t)a * videoBins_ + b] : 0;
+    }
     DisplayMode displayMode() const { return mode_; }
     QString cursorText() const { return cursorText_; }
     void   setShowShort(bool on) { showShort_ = on; update(); }
@@ -377,7 +453,7 @@ public:
     void   setHistory(History h) { history_ = h; refresh(); }
     void   setPaused(bool on) { paused_ = on; update(); }
     bool   paused() const { return paused_; }
-    void   clearPlots() { plots_.clear(); dets_.clear(); tracks_.clear(); pinned_.clear(); update(); }
+    void   clearPlots() { plots_.clear(); dets_.clear(); tracks_.clear(); pinned_.clear(); clearVideo(); update(); }
     bool   saveSnapshot(const QString &path);
     QString saveSnapshotDialog();       /* asks for a file name; returns it ('' if cancelled) */
 
@@ -400,6 +476,10 @@ private:
     void   drawAntenna(QPainter &p) const;
     void   drawPlots(QPainter &p) const;
     void   drawDetections(QPainter &p) const;
+    void   drawVideo(QPainter &p);
+    void   addVideoRow(const VideoRow &row);
+    void   quantiseVideoRow(int az);
+    void   clearVideo();
     void   drawTracks(QPainter &p) const;
     void   drawPins(QPainter &p) const;
     void   drawStatus(QPainter &p) const;
@@ -459,6 +539,23 @@ private:
     double                minSnr_dB_ = -1e9;
     History               history_ = History::UntilSwept;
     DisplayMode           mode_ = DisplayMode::Plots;
+    /* raw video */
+    std::vector<VideoRow> incomingVideo_;
+    int                   videoBins_ = 0;
+    double                videoDR_ = 0.0;
+    std::vector<float>    videoMap_;      /* mean power [kVideoAz][videoBins_] (0 = no data) */
+    std::vector<uint8_t>  videoIdx_;      /* its colour index (0 = no data)            */
+    std::vector<float>    videoSum_;      /* PRIs of the current azimuth bin            */
+    std::vector<float>    videoTmp_;
+    int                   videoN_ = 0, videoAzBin_ = -1;
+    double                videoNoise_dB_ = NAN, videoLo_dB_ = NAN;   /* colour scale from videoLo_dB_ */
+    QImage                videoImage_;
+    bool                  videoImageDirty_ = true;
+    std::vector<int32_t>  lutCell_;       /* per pixel: az * bins + first range bin, -1 outside */
+    int                   lutK_ = 1;      /* range bins per pixel                       */
+    QSize                 lutSize_;
+    double                lutZoom_ = 0.0, lutE_ = 0.0, lutN_ = 0.0;
+    int                   lutBins_ = 0;
 };
 
 void PpiWidget::refresh()
@@ -474,11 +571,15 @@ void PpiWidget::refresh()
         incomingDets_.swap(s.newDets);
         incomingTracks_.swap(s.trackUpdates);
         s.trackUpdates.clear();
+        incomingVideo_.swap(s.newVideo);
+        s.newVideo.clear();
         antenna_ = s.antenna;
         clear = s.clear;
         s.clear = false;
     }
-    if (clear) { plots_.clear(); dets_.clear(); tracks_.clear(); pinned_.clear(); }
+    if (clear) { plots_.clear(); dets_.clear(); tracks_.clear(); pinned_.clear(); clearVideo(); }
+    for (const VideoRow &row : incomingVideo_) addVideoRow(row);
+    incomingVideo_.clear();
     for (const auto &u : incomingTracks_) {             /* newest state of every track */
         if (u.second.deleted) tracks_.erase(u.first);
         else tracks_[u.first] = u.second;
@@ -515,6 +616,7 @@ bool PpiWidget::expired(const PlotMark &m) const
 
 bool PpiWidget::shown(const PlotMark &m) const
 {
+    if (mode_ == DisplayMode::Video) return false;      /* the video instead of plots and detections */
     const bool modeOk = m.isDet ? mode_ != DisplayMode::Plots : mode_ != DisplayMode::Detections;
     return modeOk && (m.pulse == PULSE_LONG ? showLong_ : showShort_) && !(m.det.snr_dB < minSnr_dB_);
 }
@@ -692,7 +794,8 @@ void PpiWidget::keyPressEvent(QKeyEvent *event)
     case Qt::Key_C:     pinned_.clear(); update(); break;
     case Qt::Key_T:     setShowTracks(!showTracks_); break;
     case Qt::Key_D:     setDisplayMode(mode_ == DisplayMode::Plots ? DisplayMode::Detections
-                                       : mode_ == DisplayMode::Detections ? DisplayMode::Both : DisplayMode::Plots);
+                                       : mode_ == DisplayMode::Detections ? DisplayMode::Both
+                                       : mode_ == DisplayMode::Both ? DisplayMode::Video : DisplayMode::Plots);
                         break;
     case Qt::Key_Space: setPaused(!paused_); break;
     case Qt::Key_S: {
@@ -717,7 +820,8 @@ void PpiWidget::contextMenuEvent(QContextMenuEvent *event)
     const std::pair<const char *, DisplayMode> modeItems[] = {
         { "Plots (after the plot extractor)", DisplayMode::Plots },
         { "CFAR detections (before the extractor)", DisplayMode::Detections },
-        { "Plots and detections", DisplayMode::Both } };
+        { "Plots and detections", DisplayMode::Both },
+        { "Video (DDC output, elements averaged)", DisplayMode::Video } };
     for (const auto &item : modeItems) {
         QAction *a = modeMenu->addAction(QString::fromLatin1(item.first));
         a->setCheckable(true);
@@ -1050,6 +1154,139 @@ void PpiWidget::drawDetections(QPainter &p) const
     }
 }
 
+/* ---- raw video ---------------------------------------------------------- */
+
+void PpiWidget::clearVideo()
+{
+    std::fill(videoMap_.begin(), videoMap_.end(), 0.0f);
+    std::fill(videoIdx_.begin(), videoIdx_.end(), (uint8_t)0);
+    videoN_ = 0;
+    videoAzBin_ = -1;
+    videoImageDirty_ = true;
+}
+
+/* Colour indices of azimuth bin az from its mean power (scale from videoLo_dB_). */
+void PpiWidget::quantiseVideoRow(int az)
+{
+    const float *m = &videoMap_[(size_t)az * videoBins_];
+    uint8_t *q = &videoIdx_[(size_t)az * videoBins_];
+    const double k = 254.0 / (kVideoSpan_dB + 3.0);
+    for (int b = 0; b < videoBins_; b++) {
+        if (!(m[b] > 0.0f)) { q[b] = 0; continue; }
+        const double i = 1.0 + std::round((10.0 * std::log10((double)m[b]) - videoLo_dB_) * k);
+        q[b] = (uint8_t)std::max(1.0, std::min(255.0, i));
+    }
+}
+
+/* The video of one PRI into the bin of its azimuth (mean of the PRIs while the
+ * antenna is in the bin; bins skipped by a jump below 10 deg get the same data). */
+void PpiWidget::addVideoRow(const VideoRow &row)
+{
+    const int nB = (int)row.v.size();
+    if (nB < 1 || !(row.dR_m > 0.0)) return;
+    if (nB != videoBins_ || row.dR_m != videoDR_) {       /* first row, or a new layout */
+        videoBins_ = nB;
+        videoDR_ = row.dR_m;
+        videoMap_.assign((size_t)kVideoAz * nB, 0.0f);
+        videoIdx_.assign((size_t)kVideoAz * nB, 0);
+        videoSum_.assign(nB, 0.0f);
+        videoN_ = 0;
+        videoAzBin_ = -1;
+        videoNoise_dB_ = videoLo_dB_ = NAN;
+        lutBins_ = 0;                                     /* rebuild the pixel lookup */
+    }
+    /* noise floor: running median of the video in dB */
+    videoTmp_.clear();
+    for (float x : row.v) if (x > 0.0f) videoTmp_.push_back(x);
+    if (!videoTmp_.empty()) {
+        auto mid = videoTmp_.begin() + videoTmp_.size() / 2;
+        std::nth_element(videoTmp_.begin(), mid, videoTmp_.end());
+        const double m = 10.0 * std::log10((double)*mid);
+        videoNoise_dB_ = std::isfinite(videoNoise_dB_) ? 0.98 * videoNoise_dB_ + 0.02 * m : m;
+    }
+    bool requantise = false;
+    if (std::isfinite(videoNoise_dB_) && !(std::fabs(videoNoise_dB_ - 3.0 - videoLo_dB_) < 0.5)) {
+        videoLo_dB_ = videoNoise_dB_ - 3.0;               /* the scale moved: all bins again */
+        requantise = true;
+    }
+    const int b = std::min(kVideoAz - 1, (int)std::floor(wrap360(row.az_deg) / (360.0 / kVideoAz)));
+    if (b == videoAzBin_) {
+        for (int i = 0; i < nB; i++) videoSum_[i] += row.v[i];
+        videoN_++;
+    } else {
+        if (videoAzBin_ >= 0) {
+            const int gap = (b - videoAzBin_ + kVideoAz) % kVideoAz - 1;
+            for (int g = 1; g <= gap && gap * (360.0 / kVideoAz) < 10.0; g++) {
+                const int a = (videoAzBin_ + g) % kVideoAz;
+                std::copy(row.v.begin(), row.v.end(), videoMap_.begin() + (size_t)a * nB);
+                if (!requantise) quantiseVideoRow(a);
+            }
+        }
+        videoAzBin_ = b;
+        std::copy(row.v.begin(), row.v.end(), videoSum_.begin());
+        videoN_ = 1;
+    }
+    float *m = &videoMap_[(size_t)b * nB];
+    for (int i = 0; i < nB; i++) m[i] = videoSum_[i] / (float)videoN_;
+    if (requantise)
+        for (int a = 0; a < kVideoAz; a++) quantiseVideoRow(a);
+    else
+        quantiseVideoRow(b);
+    videoImageDirty_ = true;
+}
+
+/* The video as an image of the widget: per pixel the largest colour index of
+ * the range bins under it (a lookup table per pixel, rebuilt when the view
+ * changes; the image is rebuilt when new video arrived). */
+void PpiWidget::drawVideo(QPainter &p)
+{
+    if (mode_ != DisplayMode::Video || videoBins_ < 1) return;
+    const QSize sz = size();
+    if (sz.isEmpty()) return;
+    if (lutSize_ != sz || lutZoom_ != zoom_ || lutE_ != viewE_ || lutN_ != viewN_ || lutBins_ != videoBins_) {
+        lutSize_ = sz;  lutZoom_ = zoom_;  lutE_ = viewE_;  lutN_ = viewN_;  lutBins_ = videoBins_;
+        const double pixel_m = 1.0 / scale();
+        lutK_ = std::max(1, (int)std::ceil(pixel_m / videoDR_));
+        lutCell_.assign((size_t)sz.width() * sz.height(), -1);
+        const double rMax = std::min(maxRange_m_, videoBins_ * videoDR_);
+        for (int y = (int)viewRect_.top(); y < sz.height(); y++) {
+            for (int x = 0; x < sz.width(); x++) {
+                const QPointF g = toGround(QPointF(x + 0.5, y + 0.5));
+                const double r = std::hypot(g.x(), g.y());
+                if (r >= rMax) continue;
+                const int b0 = std::max(0, std::min(videoBins_ - lutK_, (int)std::floor(r / videoDR_ - 0.5 * (lutK_ - 1))));
+                const int a = std::min(kVideoAz - 1, (int)std::floor(wrap360(std::atan2(g.x(), g.y()) / kDeg) / (360.0 / kVideoAz)));
+                lutCell_[(size_t)y * sz.width() + x] = a * videoBins_ + std::max(0, b0);
+            }
+        }
+        videoImageDirty_ = true;
+    }
+    if (videoImageDirty_ || videoImage_.size() != sz) {
+        static QRgb colours[256];
+        static bool init = false;
+        if (!init) {
+            colours[0] = qRgba(0, 0, 0, 0);
+            for (int i = 1; i < 256; i++) colours[i] = video_colour(i);
+            init = true;
+        }
+        videoImage_ = QImage(sz, QImage::Format_ARGB32_Premultiplied);
+        const int K = std::min(lutK_, videoBins_);
+        const uint8_t *q = videoIdx_.data();
+        for (int y = 0; y < sz.height(); y++) {
+            QRgb *line = reinterpret_cast<QRgb *>(videoImage_.scanLine(y));
+            const int32_t *cell = &lutCell_[(size_t)y * sz.width()];
+            for (int x = 0; x < sz.width(); x++) {
+                uint8_t v = 0;
+                if (cell[x] >= 0)
+                    for (int k = 0; k < K; k++) v = std::max(v, q[cell[x] + k]);
+                line[x] = colours[v];
+            }
+        }
+        videoImageDirty_ = false;
+    }
+    p.drawImage(QPointF(0.0, 0.0), videoImage_);
+}
+
 /* Pinned data tips: a box with the values next to the plot or detection. */
 void PpiWidget::drawPins(QPainter &p) const
 {
@@ -1092,9 +1329,12 @@ void PpiWidget::drawStatus(QPainter &p) const
                     .arg(antenna_.scan)
                     .arg(antenna_.time_s, 0, 'f', 2)
                     .arg(deg_text(antenna_.az_deg, 1));
-        if (mode_ != DisplayMode::Detections)
+        if (mode_ == DisplayMode::Video)
+            line1 += std::isfinite(videoNoise_dB_) ? QStringLiteral("    Video (noise %1 dB)").arg(videoNoise_dB_, 0, 'f', 1)
+                                                   : QStringLiteral("    Video (no data yet)");
+        else if (mode_ != DisplayMode::Detections)
             line1 += QStringLiteral("    Plots %1 / %2").arg((qulonglong)visibleCount()).arg((qulonglong)plots_.size());
-        if (mode_ != DisplayMode::Plots)
+        if (mode_ != DisplayMode::Plots && mode_ != DisplayMode::Video)
             line1 += QStringLiteral("    Detections %1").arg((qulonglong)visibleDetectionCount());
         if (showTracks_ && !tracks_.empty())
             line1 += QStringLiteral("    Tracks %1").arg((qulonglong)confirmedCount());
@@ -1128,13 +1368,17 @@ void PpiWidget::drawStatus(QPainter &p) const
 /* Small legend in the bottom-left corner, with the mouse help. */
 void PpiWidget::drawLegend(QPainter &p) const
 {
-    enum Kind { PlotS, PlotL, DetS, DetL, TrackK, Antenna, Help };
+    enum Kind { PlotS, PlotL, DetS, DetL, VideoK, TrackK, Antenna, Help };
     std::vector<std::pair<Kind, QString>> rows;
-    if (mode_ != DisplayMode::Detections) {
+    if (mode_ == DisplayMode::Video) {
+        rows.emplace_back(Help, QStringLiteral("Video [dB above noise], elements averaged"));
+        rows.emplace_back(VideoK, QString());
+        rows.emplace_back(Help, QString());              /* (room for the scale labels) */
+    } else if (mode_ != DisplayMode::Detections) {
         rows.emplace_back(PlotS, QStringLiteral("Plot, short pulse"));
         rows.emplace_back(PlotL, QStringLiteral("Plot, long pulse"));
     }
-    if (mode_ != DisplayMode::Plots) {
+    if (mode_ != DisplayMode::Plots && mode_ != DisplayMode::Video) {
         rows.emplace_back(DetS, QStringLiteral("CFAR detection, short pulse"));
         rows.emplace_back(DetL, QStringLiteral("CFAR detection, long pulse"));
     }
@@ -1146,6 +1390,7 @@ void PpiWidget::drawLegend(QPainter &p) const
     const QFontMetrics fm(font);
     int textWidth = 0;
     for (const auto &r : rows) textWidth = std::max(textWidth, fm.horizontalAdvance(r.second));
+    if (mode_ == DisplayMode::Video) textWidth = std::max(textWidth, 230);
     const double rowH = 18.0, pad = 8.0, n = (double)rows.size();
     const QRectF box(8.0, height() - 8.0 - n * rowH - 2.0 * pad, 2.0 * pad + 26.0 + textWidth, n * rowH + 2.0 * pad);
     p.setPen(QPen(kColorGrid, 1.0));
@@ -1175,6 +1420,21 @@ void PpiWidget::drawLegend(QPainter &p) const
         } else if (kind == Antenna) {
             p.setPen(QPen(kColorAntenna, 2.0));
             p.drawLine(mark - QPointF(8.0, 0.0), mark + QPointF(8.0, 0.0));
+        } else if (kind == VideoK) {                       /* colour scale of the video */
+            const double w = 26.0 + textWidth - 48.0, x0 = box.left() + pad + 8.0;
+            QLinearGradient g(x0, 0.0, x0 + w, 0.0);
+            for (int k = 1; k <= 255; k += 6) g.setColorAt((k - 1) / 254.0, QColor(video_colour(k)));
+            g.setColorAt(1.0, QColor(video_colour(255)));
+            p.setPen(Qt::NoPen);
+            p.setBrush(g);
+            p.drawRect(QRectF(x0, y - 7.0, w, 7.0));
+            p.setPen(QColor(Qt::white));
+            for (int dB = 0; dB <= (int)kVideoSpan_dB; dB += 10) {
+                const double x = x0 + w * (dB + 3.0) / (kVideoSpan_dB + 3.0);
+                const QString t = QString::number(dB);
+                p.drawText(QPointF(x - fm.horizontalAdvance(t) / 2.0, y + fm.ascent() + 1.0), t);
+            }
+            continue;
         }
         p.setPen(kind == Help ? kColorLabel : QColor(Qt::white));
         p.drawText(QPointF(box.left() + pad + (kind == Help ? 0.0 : 26.0), y + fm.ascent() / 2.0 - 1.0), rows[i].second);
@@ -1198,6 +1458,7 @@ void PpiWidget::paintEvent(QPaintEvent *event)
     p.setRenderHint(QPainter::Antialiasing, true);
     p.save();
     p.setClipRect(viewRect_);
+    drawVideo(p);
     drawAntenna(p);
     drawDetections(p);
     drawPlots(p);
@@ -1244,6 +1505,7 @@ public:
         mode_->addItem(QStringLiteral("Plots (after extractor)"));
         mode_->addItem(QStringLiteral("Detections (before extractor)"));
         mode_->addItem(QStringLiteral("Plots and detections"));
+        mode_->addItem(QStringLiteral("Video (DDC, elements avg.)"));
         v->addWidget(mode_);
         QObject::connect(mode_, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
                          [this](int i) { ppi_->setDisplayMode((DisplayMode)i); ppi_->setFocus(); });
@@ -1294,7 +1556,7 @@ public:
         mono.setPixelSize(11);
         timing_->setFont(mono);
         timing_->setStyleSheet(QStringLiteral("background: #101010; padding: 4px;"));
-        timing_->setMinimumHeight(QFontMetrics(mono).lineSpacing() * 14 + 12);  /* 14 rows, stable layout */
+        timing_->setMinimumHeight(QFontMetrics(mono).lineSpacing() * 15 + 12);  /* 15 rows, stable layout */
         timing_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
         v->addWidget(timing_);
         QLabel *help = new QLabel(QStringLiteral("Wheel: zoom   Drag: pan\nDouble click: reset\nHover: data tip   "
@@ -1390,24 +1652,25 @@ public:
         const double k = 1e3 / (double)nPri;                   /* ms in the interval -> us per PRI */
         /* processing thread: the blocks, the console output and the data handed
          * to the PPI (all within the PRI: Total); the drawing runs in the GUI
-         * thread, in parallel with the processing, so it is not part of Total */
+         * thread, in parallel with the processing, so it is not part of Total.
+         * Labels of at most 15 characters, so the value column stays visible. */
         const std::pair<QString, double> rows[] = {
             { QStringLiteral("DBF"), t.dbf_ms - o.dbf_ms }, { QStringLiteral("Matched filter"), t.mf_ms - o.mf_ms },
             { QStringLiteral("MTI (clutter)"), t.mti_ms - o.mti_ms },
             { QStringLiteral("Doppler FFT+NCI"), t.doppler_ms - o.doppler_ms },
-            { detName_, t.cfar_ms - o.cfar_ms }, { QStringLiteral("Plot extractor"), t.extract_ms - o.extract_ms },
+            { detName_, t.cfar_ms - o.cfar_ms }, { QStringLiteral("Peak interp."), t.interp_ms - o.interp_ms },
+            { QStringLiteral("Plot extractor"), t.extract_ms - o.extract_ms },
             { QString::fromStdString(trk), t.track_ms - o.track_ms },
             { QStringLiteral("Console output"), t.console_ms - o.console_ms },
             { QStringLiteral("Display (post)"), t.display_ms - o.display_ms } };
         QStringList lines;
         double sum = 0.0;
         for (const auto &r : rows) {
-            lines << QStringLiteral("%1%2").arg(r.first, -17).arg(r.second * k, 9, 'f', 1);
+            lines << timing_row(r.first, r.second * k);
             sum += r.second * k;
         }
-        lines << QStringLiteral("%1%2").arg(QStringLiteral("Total"), -17).arg(sum, 9, 'f', 1);
-        lines << QStringLiteral("%1%2").arg(QStringLiteral("PPI drawing (GUI)"), -17)
-                                         .arg((ppi_->guiMs() - guiPrev_) * k, 9, 'f', 1);
+        lines << timing_row(QStringLiteral("Total"), sum);
+        lines << timing_row(QStringLiteral("PPI draw (GUI)"), (ppi_->guiMs() - guiPrev_) * k);
         lines << QStringLiteral(" (GUI thread, in parallel:");
         lines << QStringLiteral("  not part of Total)");
         lines << QStringLiteral("last %1 of %2 PRIs").arg((qulonglong)nPri).arg((qulonglong)t.pris);
@@ -1515,6 +1778,24 @@ extern "C" void ppi_post_detections(const Detection *dets, int n, double arcWidt
     }
 }
 
+extern "C" int ppi_video_wanted(void)
+{
+    return g_videoWanted.load();
+}
+
+extern "C" void ppi_post_video(const float *row, int nBins, double dR_m, double az_deg, double time_s)
+{
+    if (!row || nBins <= 0 || !(dR_m > 0.0) || !std::isfinite(az_deg)) return;
+    VideoRow r;
+    r.az_deg = az_deg;
+    r.time_s = time_s;
+    r.dR_m = dR_m;
+    r.v.assign(row, row + nBins);
+    Shared &s = shared();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (s.newVideo.size() < kMaxPendingVideo) s.newVideo.push_back(std::move(r));
+}
+
 extern "C" void ppi_post_track(const Track *track)
 {
     if (!track) return;
@@ -1559,7 +1840,7 @@ static std::atomic<int> g_startMode(PPI_SHOW_PLOTS);
 
 extern "C" void ppi_set_display_mode(int mode)
 {
-    if (mode >= PPI_SHOW_PLOTS && mode <= PPI_SHOW_BOTH) g_startMode.store(mode);
+    if (mode >= PPI_SHOW_PLOTS && mode <= PPI_SHOW_VIDEO) g_startMode.store(mode);
 }
 
 extern "C" int ppi_run(int argc, char **argv, double maxRange_m, int (*worker)(void *), void *arg,
@@ -1583,6 +1864,7 @@ extern "C" int ppi_run(int argc, char **argv, double maxRange_m, int (*worker)(v
     window.setWindowTitle(QStringLiteral("Radar PPI"));
     window.resize(1030, 800);
     window.modeBox()->setCurrentIndex(g_startMode.load());   /* DisplayMode has the same order */
+    widget.setDisplayMode((DisplayMode)g_startMode.load());    /* (also when the index did not change) */
     window.show();
 
     std::atomic<bool> workerDone(false);

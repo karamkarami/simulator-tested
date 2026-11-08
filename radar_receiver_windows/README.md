@@ -63,8 +63,9 @@ sub-pulses with mismatch filters) for the `core_phasecode` test.
 
 Requirements: a C11 compiler (GCC, Clang, or MSVC 2019 16.8 or newer), CMake 3.21 or newer,
 OpenMP (optional, for multi-threading), Qt 5.12+ or Qt 6 Widgets
-(optional, for the PPI) and zlib (optional: `radar_stream_send` then also
-reads compressed `-v7` DDC files; `-v6` files need nothing).
+(optional, for the PPI) and zlib (optional: compressed `-v7` MAT-files, the
+DDC files of `radar_stream_send` and the input files of `radar_export_config`,
+are then inflated by zlib; without it a built-in inflate reads them).
 
 **CLion:** *File > Open* the `radar_receiver_windows` folder; CLion loads
 `CMakeLists.txt`. Choose the **Release** profile (*Settings > Build,
@@ -142,6 +143,69 @@ range): the same result, in a time bounded by the map size.
 `tests/test_c_receiver.m` does all of this automatically and compares the
 plots of both programs.
 
+## Configuration without MATLAB (`radar_export_config`)
+
+`radar_export_config` (`tools/export_config.c`) writes the receiver
+configuration from `radar_config.m` itself, without MATLAB: the same file,
+the same records and values as `export_receiver_config.m` (within rounding,
+1e-14; the test `export_config` and the comparison below). In CLion it is a
+run configuration of its own, **radar_export_config** (CLion makes one for
+every program of `CMakeLists.txt`): choose it and press *Run*. Without
+arguments it reads `../radar_config.m` of this project and writes
+`config/radar_config.bin` of this project, whatever the working directory,
+then start `radar_receiver` as usual. Options (*Program arguments* of the run
+configuration, or the command line):
+
+| Option | Meaning |
+|---|---|
+| `--config-m FILE` | the MATLAB configuration (default `../radar_config.m` of the project) |
+| `--out FILE` | the receiver configuration (default `config/radar_config.bin` of the project) |
+| `--set STATEMENT` | a MATLAB assignment run after the file, as a change of `cfg` before `export_receiver_config(cfg)` in MATLAB; repeatable, e.g. `--set "cfg.prf.mode = 'staggered';" --set "cfg.cfar.method = 'range';"` |
+| `--quiet` | print only errors |
+
+```sh
+radar_receiver_windows/build/radar_export_config.exe --set "cfg.mti.type = 'fir';" --set "cfg.report.dopplerInterp = true;"
+```
+
+How it works: `tools/mfile.c` evaluates `radar_config.m` as MATLAB would, for
+what a configuration file uses: the function line, assignments to `cfg`
+fields and variables (`root = fileparts(mfilename('fullpath'))`), comments
+and `...` lines, numbers, strings, matrices (`[0 40; 1000 40]`, `[1 -2 1]`),
+cell arrays, `struct(...)`, `fullfile`, `Inf`, arithmetic, comparisons and
+common functions (`sqrt`, `round`, `sind`, `min`, `max`, `linspace`, ...).
+A function it does not know (`target_scenario(cfg)`: the simulated targets,
+which the receiver does not need) is left unevaluated; it is an error only
+if the export needs that value. `if`/`for` blocks and indexed assignments
+(`x(2) = 1`) are refused with the line. Then `tools/export_config.c` does
+what `setup_radar.m` does for the export: it reads the input files of
+`cfg.files` (antenna pattern, DDC filters of the selected output rate, DBF
+matrix, stagger PRIs and MTI weights, phase codes and mismatch filters, the
+FIR clutter filter of `cfg.mti.type = 'fir'`), and derives the 3 dB
+azimuth beamwidth, the record timing and DDC sample times, the receive
+intervals, the pulse compression filters (Taylor-windowed LFM, phase code
+with the matched or the mismatch filter and its peak shift from the pulse
+after the DDC filters), range axes and the handover, the CFAR-tested cells,
+the CPI, the Doppler window, the noise gain and the looks of every Doppler
+bin (impulses through the MTI, the window and the DFT; the eigenvalues of
+the row covariance), the median/mean of the noise, the CFAR factor from the
+Pfa (incomplete beta function, root finding), the tracker gates (inverse
+incomplete gamma function) and the plot extraction settings.
+
+A default input file whose `madeFor` does not match the configuration (for
+example after changing `cfg.ant.nElements`, `cfg.fc` or `cfg.adc.fs_Hz`) is
+rebuilt by MATLAB; `radar_export_config` computes the same default data in
+memory (antenna pattern, DDC filters, DBF matrix; a note says so) and leaves
+the file as it is. Only the phase codes and mismatch filters are not
+recomputed: it then asks to run `make_input_files(cfg, 'phaseCode')` in
+MATLAB once, or to give a file without `madeFor`. Missing input files are
+an error as well (the repository has all default files). Checked against
+MATLAB's export (Octave 8.4) for the default radar, staggered PRF, phase
+codes with mismatch filters, one element, 4 MHz DDC output, the three CFAR
+methods with and without a fixed threshold, the FIR clutter filter (fixed and
+staggered), the CA tracker in 2-D with the speed gate, a given CPI length and
+FFT length, and rebuilt default files (32 elements, other carrier frequency,
+other ADC rate): every record within 3e-14 (relative).
+
 ## Options
 
 | Option | Meaning |
@@ -152,7 +216,7 @@ plots of both programs.
 | `--replay FILE` | read the datagrams from a recorded FILE instead of the network (as fast as possible) |
 | `--ppi` | show the interactive PPI (Qt build, see below) |
 | `--ppi-snapshot FILE` | save the PPI as a PNG at the end and close it |
-| `--ppi-show MODE` | what the PPI shows at the start: `plots` (default, after the plot extractor), `detections` (CFAR detections before it) or `both` |
+| `--ppi-show MODE` | what the PPI shows at the start: `plots` (default, after the plot extractor), `detections` (CFAR detections before it), `both` or `video` (the raw video: DDC output averaged over the elements) |
 | `--cfar-threshold DB` | CFAR threshold factor 10 log10(alpha) in dB of the configured detector and window (default: the configuration, i.e. the method's Pfa); can also be changed in the PPI |
 | `--serial DEVICE` | send the CFAR output to a serial port (`/dev/ttyUSB0`, `COM3`, ...) |
 | `--baud N` | serial baud rate (default 921600) |
@@ -212,7 +276,19 @@ bin (0-based) and pulse number.
 The SNR is power / noise - 1 with the noise floor of the beam (the median
 of its map, scaled to the mean) or, with `cfg.report.snrNoise = 'cfar'`,
 the CFAR noise estimate of the cell; the start of the console output says
-which (`SNR noise: ...`).
+which (`SNR noise: ...`). **Peak interpolation** (a block of its own after
+the CFAR and the pruning, `peak_interpolation()` in `processor.c`, as
+`peak_interpolation.m`): with `cfg.report.dopplerInterp` the radial velocity
+comes from a parabola through the powers [dB] of the Doppler bins d-1, d,
+d+1 of the peak (circular), with `cfg.report.elevationInterp` (default on,
+as before) the elevation from a parabola through the beams b-1, b, b+1 when
+the peak beam has both neighbours. The detections, the plots, the serial
+output and the tracker get the refined values; `dIdx` and `beam` stay the
+cells of the peak. Both options are optional in the configuration file
+(older files: Doppler off, elevation on); the start of the console output
+says which are on, and which clutter filter (`cfg.mti.type`: the canceller
+or an FIR filter from `inputs/mti_fir.mat`, given to the receiver as
+`mtiCoeffs`).
 
 **Serial frames** (little-endian; CRC-16/CCITT-FALSE, polynomial 0x1021,
 init 0xFFFF, over the bytes after the sync word up to the CRC):
@@ -240,8 +316,23 @@ The panel on the right of the window has:
   the plot extractor, each drawn as an arc over the azimuth step between CPI
   updates (rotation rate x PRI x `--update-every`) at its ground range
   (darker cyan / yellow), so a target appears as an arc about one beamwidth
-  long; or both. Key `D` switches too. The newest 60 000 detections are kept;
-  they disappear like the plots.
+  long; or both; or *Video (DDC, elements avg.)*: the raw video instead of
+  plots and detections. Key `D` switches too (plots, detections, both,
+  video). The newest 60 000 detections are kept; they disappear like the
+  plots. Video (`video.c`, as `ppi_video_add.m`): while the PPI shows it, the
+  worker averages the DDC output of every PRI non-coherently over the
+  elements (mean of I^2 + Q^2, before DBF and pulse compression), joins the
+  receive intervals of the short pulse (up to the first long-pulse range
+  cell) and of the long pulse, puts the result into range bins of
+  c / (2 fsOut) (75 m at 2 MHz) and hands it to the PPI (about 25 us per PRI
+  with 48 elements, counted as display time; nothing is computed in the other
+  modes). The PPI keeps the newest video of every 0.25 deg azimuth bin (the
+  mean of the PRIs in it) until the antenna passes again and draws it as an
+  image: the colour is the power from 3 dB below the noise floor (black; a
+  running median of the video) over blue, cyan, green, yellow and red to
+  50 dB above it (white); the legend shows the scale. A pixel shows the
+  largest range bin under it, so an echo stays visible when zoomed out.
+  *Clear display* clears the video too.
 * **Save screenshot (PNG) ...**: saves the PPI as it is now (without the
   panel); the default file name has the date and time.
 * **Tracks (T)**: shows or hides the tracks of the tracker (EKF or PMBM): a hollow
@@ -264,12 +355,15 @@ The panel on the right of the window has:
   shows at once instead of creeping into a mean since the start, of every
   block of the processing thread:
   DBF, matched filter, MTI (clutter filter), Doppler (FFT and non-coherent
-  integration), CFAR of the configured detector and window (e.g. `CFAR OS 2-D`) with the pruning, plot
-  extractor, tracking (e.g. `Tracking PMBM 3-D IMM CV/CA/CT`), the console output (printing the plots, track
+  integration), CFAR of the configured detector and window (e.g. `CFAR OS 2-D`,
+  in the panel `CFAR OS 2D`) with the pruning, peak interpolation (*Peak
+  interp.*), plot extractor, tracking (e.g. *Track 3D PMBM*), the console output (printing the plots, track
   confirmations and messages; 0 with `--quiet`) and the display calls
   (handing the antenna, plots, detections, tracks and times to the PPI),
   and their total: the time the processing thread spends per PRI, display
-  calls included. Then *PPI drawing (GUI)*: the time the GUI thread spends
+  calls included. Every label has at most 15 characters (longer names are
+  shortened, `1-D` -> `1D`), so the values stay inside the panel. Then
+  *PPI draw (GUI)*: the time the GUI thread spends
   taking the data and drawing the PPI, per PRI; it runs on another thread
   (core) at the same time as the processing, so it does not lengthen the
   PRI processing and is not in the total. The worker posts its
@@ -550,14 +644,16 @@ Timing:
 | Test | What it checks |
 |---|---|
 | `tracker` (`tests/test_tracker.c`) | (the tracker of the configuration, `cfg.track.method`) two crossing targets over 6 scans, 3-D and 2-D (plots with radial velocity): two confirmed tracks that stay on their targets; GNN with two targets 200 m apart: each track stays on its own target; speed gate: a 3 m/s track is deleted at its second update with `trackMinSpeed` = 5 m/s, a 100 m/s one kept; with plots, a configuration and the track log from `../tests/test_tracker.m` (CV and CA, 2-D and 3-D, with and without the radial velocity, staggered PRF with folded plot velocities), every C track update equals MATLAB's (same plot, state within 1e-6); with the calls of `../tests/test_tracker_pmbm.m` (16 PMBM cases: maneuvers, constant acceleration, 30 false plots per scan, close and crossing targets, the challenge scenario) every update of the C PMBM tracker equals MATLAB's |
-| `core` (`tests/test_core.c`) | batched FFT against a direct DFT; plot extractor, also on random dense detection streams (hundreds of open groups) against the linear search of `plot_extractor.m`: the same plots in the same order; a moving target through the whole chain with the exported configuration (its velocity a quarter of the Doppler axis from zero, for any carrier frequency; one plot at the right range, velocity and beam); direct and fast-convolution matched filters give the same plot; the same target with the CFAR threshold raised to 45 dB at run time gives no detection; `cfar_pfa()` against the closed forms of CA, GO, SO and OS (one look) and the Pfa 1e-8 of the configured threshold |
+| `core` (`tests/test_core.c`) | batched FFT against a direct DFT; plot extractor, also on random dense detection streams (hundreds of open groups) against the linear search of `plot_extractor.m`: the same plots in the same order; a moving target through the whole chain with the exported configuration (its velocity a quarter of the Doppler axis from zero, for any carrier frequency; one plot at the right range, velocity and beam); direct and fast-convolution matched filters give the same plot; the same target with the CFAR threshold raised to 45 dB at run time gives no detection; `cfar_pfa()` against the closed forms of CA, GO, SO and OS (one look) and the Pfa 1e-8 of the configured threshold; the raw video of the PPI (`video.c`): mean power over the channels, the short-pulse samples up to the handover, then the long-pulse samples, in the right range bins |
 | `core_phasecode` | the same core test with `config/radar_config_phasecode.bin` (both sub-pulses P4 phase codes with mismatch filters): the echo is the real code, the plot lies on the target cell |
 | `core_1ch` | the same core test with `config/radar_config_1ch.bin` (the default radar with one receive element, no DBF): four-step FFT and direct matched filter give the same plot |
-| `cfar` (`tests/test_cfar.c`) | the CFAR detectors of `cfar.c` (CA, GO, SO, OS) against the statistic computed directly from the training cells combined with the direct local peak test: every decision and noise estimate, for every detector with the 2-D, 1-D range and 1-D Doppler windows and tested range intervals in the middle, at both range edges (also when the whole interval lies within the cells of the shifted windows) and over all cells, with the beams of the configuration and with one beam split into range chunks over 4 threads; the noise floor median equals that of a sorted copy (400 maps: odd and even sizes, ties, zeros, a structured half; with and without a bracket from the previous median); the pruning of tens of thousands of CFAR detections (a strong target with sidelobes, 3000 strong cells) gives exactly the cells of the direct pairwise rules |
+| `cfar` (`tests/test_cfar.c`) | the CFAR detectors of `cfar.c` (CA, GO, SO, OS) against the statistic computed directly from the training cells combined with the direct local peak test: every decision and noise estimate, for every detector with the 2-D, 1-D range and 1-D Doppler windows and tested range intervals in the middle, at both range edges (also when the whole interval lies within the cells of the shifted windows) and over all cells, with the beams of the configuration and with one beam split into range chunks over 4 threads; the noise floor median equals that of a sorted copy (400 maps: odd and even sizes, ties, zeros, a structured half; with and without a bracket from the previous median); the pruning of tens of thousands of CFAR detections (a strong target with sidelobes, 3000 strong cells) gives exactly the cells of the direct pairwise rules; the peak interpolation: a Gaussian peak gives its exact fractional Doppler bin and beam, the Doppler bin wraps at the edge of the axis, the lowest beam keeps its centre, nothing changes with the options off |
 | `cfar_1ch` | the same CFAR test with `config/radar_config_1ch.bin` |
 | `udp_input` | reassembly with shuffled, duplicate, missing and foreign datagrams; timeouts; record and replay; fuzzing |
-| `ddc_files` (`tests/test_ddc_files.c`) | MAT-file reader with files written as MATLAB writes them (data in smaller storage types, small elements, skipped char field, compressed `-v7` with zlib); folder listing; the datagrams of a DDC file are accepted by `udp_input.c` and give back the same PRI; corrupted, truncated, `-v7.3` and big-endian files are refused |
+| `ddc_files` (`tests/test_ddc_files.c`) | MAT-file reader with files written as MATLAB writes them (data in smaller storage types, small elements, skipped char field, compressed `-v7`: with zlib, or stored blocks for the built-in inflate without zlib; with zlib the built-in inflate is checked against zlib's dynamic and fixed Huffman blocks); folder listing; the datagrams of a DDC file are accepted by `udp_input.c` and give back the same PRI; corrupted, truncated, `-v7.3` and big-endian files are refused |
+| `mfile` (`tests/test_mfile.c`) | the MATLAB subset of `radar_export_config`: function line, comments, block comments, continuation lines, matrices with spaces and unary minus, multi-line cells, `struct`, `fullfile`/`fileparts`/`mfilename`, precedence (`-2^2`), indexing, functions, `--set` statements, unevaluated MATLAB functions, subfunctions; errors with the line |
+| `export_config`, `core_exported` | `radar_export_config` writes the configuration of `../radar_config.m`, and the core test runs the whole chain with it |
 | `serial` | frame encoding and CRC; real output to a pseudo-terminal (Linux): exact bytes, 200-detection split, non-blocking drops, close |
 | `ppi` | the Qt PPI runs off-screen with antenna updates, plots, detections and a CFAR threshold report and saves a snapshot |
-| `ppi_interactive` | mouse, wheel and key events: data tips, cursor readout, zoom around the cursor, pan, pin/unpin, reset, filters, persistence options, pause, clear; detections (display modes, arcs drawn, data tips, key D); window panel: display mode box, CFAR threshold Apply/Default and its report, screenshot, mean block times; tracks (triangle drawn around the plot, data tip, PMBM data tip with existence and model probabilities, checkbox and key T, deletion) |
+| `ppi_interactive` | mouse, wheel and key events: data tips, cursor readout, zoom around the cursor, pan, pin/unpin, reset, filters, persistence options, pause, clear; detections (display modes, arcs drawn, data tips, key D); window panel: display mode box, CFAR threshold Apply/Default and its report, screenshot, mean block times (labels of at most 15 characters, the peak interpolation row); raw video (box and key D, rows of 160 azimuth bins, noise floor, echo drawn, nothing where the antenna did not pass, plots hidden, Clear); tracks (triangle drawn around the plot, data tip, PMBM data tip with existence and model probabilities, checkbox and key T, deletion) |
 | `../tests/test_c_receiver.m` (Octave/MATLAB) | the six-target scenario streamed over UDP to this receiver: the C plots must match the MATLAB plots; the recording is replayed to check that the result is repeatable and to measure the time |

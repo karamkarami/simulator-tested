@@ -36,6 +36,7 @@ enum { PMBM_CV = 0, PMBM_CA = 1, PMBM_CT = 2 };               /* IMM models of t
 enum { WAVE_LFM = 0, WAVE_PHASE_CODE = 1 };
 enum { COMPRESSION_MATCHED = 0, COMPRESSION_MISMATCH = 1 };
 enum { SNR_NOISE_MEDIAN = 0, SNR_NOISE_CFAR = 1 };   /* noise floor of the SNR of the reports */
+enum { MTI_CANCELLER = 0, MTI_FIR = 1 };             /* clutter filter (cfg.mti.type; information) */
 const char *cfar_method_name(int method);   /* "2-D", "1-D range", "1-D Doppler" */
 const char *cfar_type_name(int type);       /* "CA", "GO", "SO", "OS" */
 
@@ -88,7 +89,9 @@ typedef struct {
     int     nStagger;      /* PRIs of the stagger (1 = fixed PRF)                     */
     int     staggered;
     int     nMtiTaps;
-    double *mtiCoeffs;     /* row-major [nStagger x nMtiTaps]                         */
+    double *mtiCoeffs;     /* row-major [nStagger x nMtiTaps]: the canceller or the FIR
+                              filter of cfg.files.mtiFir (cfg.mti.type)               */
+    int     mtiType;       /* MTI_CANCELLER or MTI_FIR (optional in the file: canceller) */
     int     nRows;         /* rows of the Doppler processing (de-interleaved for staggered PRF) */
     int     rowLen;        /* samples per row                                         */
     int     nfft;          /* Doppler FFT length (power of 2)                         */
@@ -114,6 +117,9 @@ typedef struct {
                               SNR_NOISE_MEDIAN: the median of the beam's map / medianToMean, or
                               SNR_NOISE_CFAR: the CFAR estimate of the cell (no median computed);
                               cfg.report.snrNoise, optional in the file (median)            */
+    int     dopplerInterp;   /* peak interpolation (cfg.report.dopplerInterp / elevationInterp;  */
+    int     elevationInterp; /* optional in the file: 0 / 1): parabola through the powers [dB] of
+                                the neighbouring Doppler bins / beams of every reported peak  */
     int     minHits, maxMiss, updateEvery;
     int     consolePlots;  /* print every plot and confirmed track (cfg.console.plots; --quiet, --print-plots) */
     double  minExtent_deg;  /* azimuth extent of a plot (minHits = this / azimuth step per update) */
@@ -281,6 +287,7 @@ typedef struct {
 
 typedef struct {
     double dbf_ms, mf_ms, mti_ms, doppler_ms, cfar_ms, extract_ms, track_ms, total_ms;
+    double interp_ms;    /* peak interpolation of the reports (Doppler, elevation) */
     /* time of the application in its output callbacks (main.c adds it; the
      * processor leaves it 0): console output (printf of plots, tracks and
      * messages) and the data handed to the PPI display */
@@ -312,6 +319,27 @@ double cfar_pfa(const RadarConfig *cfg, double alpha);
 void processor_timing(const Processor *p, ProcessorTiming *t);
 int  processor_threads(const Processor *p);    /* processing threads (OpenMP team size) */
 void processor_destroy(Processor *p);
+
+/* ------------------------------------------------------------------------ */
+/* Raw video of the PPI (video.c)                                            */
+/* ------------------------------------------------------------------------ */
+
+/* The DDC output of a PRI averaged non-coherently over the elements (mean of
+ * I^2 + Q^2), the receive intervals of the short pulse (up to the first range
+ * cell of the long pulse) and of the long pulse joined, in range bins of
+ * c / (2 fsOut) from 0 to maxRange_m (as ppi_video_add.m). */
+typedef struct {
+    int     nBins;        /* range bins: bin b is b*dR_m ... (b+1)*dR_m           */
+    double  dR_m;         /* range per DDC sample                                  */
+    int     nSamples;     /* DDC samples of the joined video                       */
+    int    *sample;       /* [nSamples] DDC sample index (0-based)                 */
+    int    *bin;          /* [nSamples] its range bin                              */
+    float  *binInv;       /* [nBins] 1 / (samples x channels) of the bin, 0 = none */
+    float  *acc;          /* work buffer [nSamples]                                */
+} VideoLayout;
+int  video_layout_init(VideoLayout *v, const RadarConfig *cfg, double maxRange_m);   /* 0 on success */
+void video_row(const VideoLayout *v, const PriData *pri, float *row);              /* row[nBins] */
+void video_layout_free(VideoLayout *v);
 
 /* ------------------------------------------------------------------------ */
 /* Serial output of the CFAR detections (serial_out.c)                       */
@@ -362,14 +390,21 @@ void ppi_post_detections(const Detection *dets, int n, double arcWidth_deg);
 void ppi_post_cfar_threshold(double threshold_dB, double pfa, double default_dB);
 int  ppi_take_cfar_request(double *threshold_dB);
 /* Display mode at the start of ppi_run (call before it): plots after the plot
- * extractor (default), CFAR detections before it, or both. */
-enum { PPI_SHOW_PLOTS = 0, PPI_SHOW_DETECTIONS = 1, PPI_SHOW_BOTH = 2 };
+ * extractor (default), CFAR detections before it, both, or the raw video. */
+enum { PPI_SHOW_PLOTS = 0, PPI_SHOW_DETECTIONS = 1, PPI_SHOW_BOTH = 2, PPI_SHOW_VIDEO = 3 };
 void ppi_set_display_mode(int mode);
+/* Raw video (display mode PPI_SHOW_VIDEO): ppi_video_wanted() is 1 while the
+ * PPI shows the video (the worker then computes it, video.c); ppi_post_video()
+ * hands the video of one PRI (row[nBins], range bins of dR_m from 0) to the
+ * PPI, which keeps the newest data of every azimuth bin (0.25 deg). */
+int  ppi_video_wanted(void);
+void ppi_post_video(const float *row, int nBins, double dR_m, double az_deg, double time_s);
 /* Track updates and deletions (drawn as hollow triangles, Tracks checkbox). */
 void ppi_post_track(const Track *track);
 /* Accumulated processing times: the panel shows the mean per PRI of every
  * block [us]. detectionName / trackingName label the CFAR and tracking rows
- * (e.g. "CFAR 2-D", "Tracking 3-D CV"; NULL keeps the previous). */
+ * (e.g. "CFAR 2-D", "Track 3D CV"; NULL keeps the previous; the panel shortens
+ * a label to 15 characters, "1-D" -> "1D"). */
 void ppi_post_timing(const ProcessorTiming *timing, const char *detectionName, const char *trackingName);
 
 /* ------------------------------------------------------------------------ */

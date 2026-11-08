@@ -287,6 +287,14 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             const Record *r = find_optional(&rs, "snrNoise");
             cfg->snrNoise = (r && r->rows * r->cols >= 1 && lround(r->data[0]) == 1) ? SNR_NOISE_CFAR : SNR_NOISE_MEDIAN;
         }
+        {                                              /* optional: as before these options */
+            const Record *r = find_optional(&rs, "dopplerInterp");
+            cfg->dopplerInterp = (r && r->rows * r->cols >= 1) ? lround(r->data[0]) != 0 : 0;
+            r = find_optional(&rs, "elevationInterp");
+            cfg->elevationInterp = (r && r->rows * r->cols >= 1) ? lround(r->data[0]) != 0 : 1;
+            r = find_optional(&rs, "mtiType");
+            cfg->mtiType = (r && r->rows * r->cols >= 1 && lround(r->data[0]) == 1) ? MTI_FIR : MTI_CANCELLER;
+        }
         cfg->minHits      = get_int(&rs, "minHits");
         cfg->maxMiss      = get_int(&rs, "maxMiss");
         cfg->updateEvery  = get_int(&rs, "updateEvery");

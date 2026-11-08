@@ -14,8 +14,10 @@ function make_input_files(cfg, which)
 %     phase_code.mat      : phase codes of the short and the long sub-pulse
 %                           (P4, width_s/chip_s chips) and their mismatch
 %                           filters (one coefficient per chip)
+%     mti_fir.mat         : FIR clutter filter along slow time (coeffs), used with
+%                           cfg.mti.type = 'fir'
 %   MAKE_INPUT_FILES(cfg, which) writes only one of them: which = 'antenna',
-%   'ddc', 'ddc4MHz', 'dbf', 'stagger' or 'phaseCode'.
+%   'ddc', 'ddc4MHz', 'dbf', 'stagger', 'phaseCode' or 'mtiFir'.
 %
 %   Every default file stores in 'madeFor' the configuration values it was
 %   built for. setup_radar.m rebuilds a default file when they no longer match
@@ -150,6 +152,21 @@ if doAll || strcmpi(which, 'phaseCode')
     end
     out.madeFor = madeFor;
     save(cfg.files.phaseCode, '-struct', 'out', '-v7');
+end
+
+%% 6) FIR clutter filter along slow time (cfg.mti.type = 'fir')
+% coeffs [1 x L] (or one row per stagger position): output m = sum_l coeffs(l) * x(m+l-1),
+% oldest pulse first. Default: 5 taps with a double zero at zero Doppler (as the
+% three-pulse canceller) and a zero pair at +-3% of the PRF: a deeper and wider notch
+% (at 2% of the PRF -88 dB instead of -44 dB, at 5% -63 dB instead of -28 dB, relative
+% to white noise) against moving clutter (sea, vegetation), for a narrower passband
+% (-6.5 dB instead of -1.8 dB at a quarter of the PRF). Any real FIR filter of your own
+% can replace it.
+if (doAll || strcmpi(which, 'mtiFir')) && isfield(cfg.files, 'mtiFir')
+    theta = 2*pi*0.03;
+    coeffs = conv([1 -2 1], [1 -2*cos(theta) 1]);
+    coeffs = coeffs / norm(coeffs) * sqrt(6);       % the noise gain of [1 -2 1]
+    save(cfg.files.mtiFir, 'coeffs', '-v7');
 end
 
 fprintf('Default input file(s) "%s" written to %s\n', which, folder);

@@ -11,7 +11,7 @@ function out = ppi_callbacks(action, fig, varargin)
 %                                 (out = its text, '' if nothing is close)
 %     'pin', [x y]                pin (or remove) the data tip of the nearest object
 %     'key', evt                  + - arrows r c d space
-%     'option', name, value       showMode ('plots', 'detections' or 'both'),
+%     'option', name, value       showMode ('plots', 'detections', 'both' or 'video'),
 %                                 showShort, showLong, showTruth, showRings,
 %                                 showLabels, showAntenna, showTracks,
 %                                 minSnr_dB, history
@@ -80,7 +80,7 @@ switch action
     case 'option'
         S.opt.(varargin{1}) = varargin{2};
         if strcmp(varargin{1}, 'showMode')
-            set(S.h.ui.showMode, 'Value', find(strcmp(varargin{2}, {'plots', 'detections', 'both'})));
+            set(S.h.ui.showMode, 'Value', find(strcmp(varargin{2}, {'plots', 'detections', 'both', 'video'})));
         end
         S = redraw(S);
     case 'cfar'
@@ -167,8 +167,10 @@ else
 end
 
 % Plots that pass the filters (shown unless only the detections are selected)
-showPlots = ~strcmp(o.showMode, 'detections');
-showDets  = ~strcmp(o.showMode, 'plots');
+showVideo = strcmp(o.showMode, 'video');                   % raw video instead of plots and detections
+showPlots = ~strcmp(o.showMode, 'detections') && ~showVideo;
+showDets  = ~strcmp(o.showMode, 'plots') && ~showVideo;
+S = draw_video(S, showVideo);
 plots = d.plots;
 nAll = numel(plots);
 x = zeros(1, nAll);  y = x;  show = false(1, nAll);  isShort = show;
@@ -240,11 +242,26 @@ end
 counts = '';
 if showPlots, counts = sprintf('plots %d / %d   ', sum(show), nAll); end
 if showDets, counts = [counts sprintf('detections %d   ', sum(showD))]; end
+if showVideo, counts = sprintf('video (noise %.1f dB)   ', d.video.noise_dB); end
 if o.showTracks && ~isempty(d.tracks)
     counts = [counts sprintf('tracks %d   ', sum([d.tracks.confirmed]))];
 end
 set(h.title, 'String', sprintf('Scan %d   t = %.2f s   az = %5.1f deg   %szoom x%.1f', ...
     d.scan, d.t_s, d.az_deg, counts, zoom_factor(S)));
+end
+
+function S = draw_video(S, on)
+% Raw video: the map as an image (transparent where there is no data), and its colour scale.
+h = S.h;
+vis = {'off', 'on'};
+set([h.video h.videoBar h.videoBarImg h.videoBarLabel], 'Visible', vis{1 + on});
+if ~on || ~isfield(S.data, 'video') || isempty(S.data.video), return; end
+tMin = S.opt.clearTime_s;
+if S.opt.history > 0
+    tMin = max(tMin, S.data.t_s - S.opt.history * 360 / S.sys.ant.rate_dps);
+end
+[rgb, alpha] = ppi_video_image(S.data.video, tMin);
+set(h.video, 'CData', rgb, 'AlphaData', alpha, 'AlphaDataMapping', 'none');
 end
 
 function set_datatip_rows(hLine, plots)
@@ -396,19 +413,20 @@ end
 
 function show_timing(S)
 % Mean time per PRI of every block, of the console output and of the display in the panel.
+% The labels are at most 15 characters, so the value column stays inside the panel.
 us = S.data.timing_us;
 if isempty(us), return; end
-names = {'DBF', 'Matched filter', 'MTI (clutter)', 'Doppler FFT+NCI', ['CFAR ' S.sys.cfar.label], ...
-         'Plot extractor', tracker_label(S.sys.track), ...
+names = {'DBF', 'Matched filter', 'MTI (clutter)', 'Doppler FFT+NCI', compact_label(['CFAR ' S.sys.cfar.label]), ...
+         'Peak interp.', 'Plot extractor', tracker_label(S.sys.track), ...
          'Console output', 'Display (PPI)'};
-if ~S.sys.track.enable, names{7} = 'Tracking (off)'; end
+if numel(us) == 9, names(6) = []; end                       % (block times without the peak interpolation)
 n = min(numel(us), numel(names));
 rows = cell(1, n + 3);
 rows{1} = 'Mean time per PRI [us]';
 for i = 1:n
-    rows{i+1} = sprintf('%-17s%9.1f', names{i}, us(i));
+    rows{i+1} = sprintf('%-15s%9.1f', names{i}(1:min(end, 15)), us(i));
 end
-rows{n+2} = sprintf('%-17s%9.1f', 'Total', sum(us(1:n)));       % incl. console and display
+rows{n+2} = sprintf('%-15s%9.1f', 'Total', sum(us(1:n)));       % incl. console and display
 if isfield(S.data, 'timingPris') && ~isempty(S.data.timingPris)
     rows{n+3} = sprintf('over the last %d PRIs', S.data.timingPris);
 else
@@ -469,8 +487,8 @@ switch evt.Key
     case {'r', 'home'}, S = set_limits(S, S.home(1:2), S.home(3:4));
     case 'c',           S = clear_pins(S);
     case 'd'                                                % next display mode
-        modes = {'plots', 'detections', 'both'};
-        S.opt.showMode = modes{mod(find(strcmp(S.opt.showMode, modes)), 3) + 1};
+        modes = {'plots', 'detections', 'both', 'video'};
+        S.opt.showMode = modes{mod(find(strcmp(S.opt.showMode, modes)), 4) + 1};
         set(S.h.ui.showMode, 'Value', find(strcmp(S.opt.showMode, modes)));
         S = redraw(S);
     case 'space'
@@ -534,10 +552,20 @@ px = px(1:2);
 end
 
 function s = tracker_label(p)
-% Name of the tracking block in the timing panel.
-if isfield(p, 'method') && strcmp(p.method, 'pmbm')
-    s = sprintf('Tracking %d-D PMBM', p.dim);
+% Name of the tracking block in the timing panel (at most 15 characters).
+if ~p.enable
+    s = 'Track (off)';
+elseif isfield(p, 'method') && strcmp(p.method, 'pmbm')
+    s = sprintf('Track %dD PMBM', p.dim);
 else
-    s = sprintf('Tracking %d-D %s', p.dim, upper(p.model));
+    s = sprintf('Track %dD %s', p.dim, upper(p.model));
 end
+end
+
+function s = compact_label(s)
+% A label of the timing panel in at most 15 characters: '1-D' -> '1D', then
+% 'range' -> 'rng', 'Doppler' -> 'Dop', then cut.
+s = strrep(s, '-D', 'D');
+if numel(s) > 15, s = strrep(strrep(s, ' range', ' rng'), ' Doppler', ' Dop'); end
+s = s(1:min(end, 15));
 end

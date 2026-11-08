@@ -2,12 +2,15 @@
  * mat_file.h - minimal reader of MATLAB MAT-files (level 5: save -v6 and,
  * when built with zlib, the compressed save -v7).
  *
- * Reads the numeric variables (as double) and 1x1 structs of numeric fields,
- * which is what the DDC files of the simulator (ddc_<n>.mat: I, Q, hdr)
- * hold. Numeric data may be stored in a smaller type than its class (MATLAB
- * does this, e.g. int16 data in uint8 when the values fit); it is converted.
- * Complex parts, cells, chars, sparse and object arrays are skipped.
- * MAT-files -v7.3 (HDF5) and big-endian files are not supported.
+ * Reads the numeric variables (as double, with the imaginary part of complex
+ * ones) and 1x1 structs of numeric fields, which is what the DDC files of the
+ * simulator (ddc_<n>.mat: I, Q, hdr) and its input files (folder inputs) hold.
+ * Numeric data may be stored in a smaller type than its class (MATLAB does
+ * this, e.g. int16 data in uint8 when the values fit); it is converted.
+ * Cells, chars, sparse and object arrays are skipped. Compressed variables
+ * (save -v7) are inflated with zlib when the library was built with it, else
+ * with a small built-in inflate. MAT-files -v7.3 (HDF5) and big-endian files
+ * are not supported.
  */
 #ifndef MAT_FILE_H
 #define MAT_FILE_H
@@ -26,6 +29,7 @@ typedef struct MatVar {
     size_t         rows, cols;   /* first dimension, product of the others        */
     size_t         numel;
     double        *re;           /* numeric: the values in column-major order     */
+    double        *im;           /* imaginary part (complex variables), else NULL */
     int            nFields;      /* struct: the fields of its first element       */
     struct MatVar *fields;
 } MatVar;
@@ -45,7 +49,12 @@ void mat_free(MatFile *mf);
 const MatVar *mat_get(const MatFile *mf, const char *name);
 const MatVar *mat_field(const MatVar *s, const char *name);
 
-/* 1 if the library was built with zlib (compressed -v7 files). */
+/* 1 if the library was built with zlib (compressed -v7 files; without it the
+ * built-in inflate reads them, a little slower). */
 int mat_has_zlib(void);
+
+/* Built-in inflate of a zlib stream (RFC 1950/1951). Returns a malloc'ed
+ * buffer with the data (*outLen bytes) or NULL. */
+unsigned char *mat_inflate_builtin(const unsigned char *src, size_t srcLen, size_t *outLen);
 
 #endif
