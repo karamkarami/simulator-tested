@@ -1409,6 +1409,7 @@ static void export_config(void)
     rec_scalar("maxMiss", num("extract.maxMiss"));
     rec_scalar("updateEvery", updateEvery);
     rec_scalar("consolePlots", num("console.plots") != 0);
+    rec_scalar("rdRate_Hz", num_or("display.rdRate_Hz", 10));   /* range-Doppler maps per second */
     rec_scalar("minExtent_deg", minExtent);
     rec_scalar("meanPri_s", meanPri);
     rec_scalar("trackEnable", trackEnable);

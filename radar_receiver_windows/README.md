@@ -225,6 +225,7 @@ record within 3e-14 (relative).
 | `--ppi-show MODE` | what the PPI shows at the start: `plots` (default, after the plot extractor), `detections` (CFAR detections before it), `both`, `video` (the raw video: DDC output averaged over the elements), `dbf` (DBF output of the selected beam) or `mf` (pulse compression output of the selected beam) |
 | `--ppi-beam N` | the beam after the DBF of `dbf`, `mf` and the range-Doppler tab at the start (default 1; also in the panel) |
 | `--ppi-tab TAB` | tab at the start: `ppi` (default) or `rd` (range-Doppler map of the selected beam next to a small PPI) |
+| `--ppi-rd-rate HZ` | range-Doppler maps per second handed to that tab (default `cfg.display.rdRate_Hz` in the configuration, 10) |
 | `--cfar-threshold DB` | CFAR threshold factor 10 log10(alpha) in dB of the configured detector and window (default: the configuration, i.e. the method's Pfa); can also be changed in the PPI |
 | `--serial DEVICE` | send the CFAR output to a serial port (`/dev/ttyUSB0`, `COM3`, ...) |
 | `--baud N` | serial baud rate (default 921600) |
@@ -332,7 +333,8 @@ one under the cursor or else the bin of the strongest detection (or cell),
 with the detections circled, to see a peak and the spectrum around it;
 hovering shows range, velocity and dB of the cell. The PPI moves into this
 tab, small next to the map, so both are seen live. The worker copies a map
-to the display at most 10 times a second, and only while this tab is shown
+to the display at most `cfg.display.rdRate_Hz` times a second (default 10,
+`--ppi-rd-rate`; the display redraws at most 25 times a second), and only while this tab is shown
 (nothing is computed otherwise); a map is made when both sub-pulses had a
 CPI update. The panel serves both tabs; *Save screenshot* (and
 `--ppi-snapshot`) saves the PPI in the first tab and the whole tab (map and

@@ -122,6 +122,8 @@ typedef struct {
                                 the neighbouring Doppler bins / beams of every reported peak  */
     int     minHits, maxMiss, updateEvery;
     int     consolePlots;  /* print every plot and confirmed track (cfg.console.plots; --quiet, --print-plots) */
+    double  rdRate_Hz;     /* range-Doppler maps per second handed to the PPI tab (cfg.display.rdRate_Hz;
+                              optional in the file: 10; --ppi-rd-rate)                          */
     double  minExtent_deg;  /* azimuth extent of a plot (minHits = this / azimuth step per update) */
     double  meanPri_s;      /* mean PRI                                               */
 

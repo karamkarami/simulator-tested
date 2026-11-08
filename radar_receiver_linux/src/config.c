@@ -299,6 +299,10 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         cfg->maxMiss      = get_int(&rs, "maxMiss");
         cfg->updateEvery  = get_int(&rs, "updateEvery");
         cfg->consolePlots = get_int(&rs, "consolePlots");
+        {                                              /* optional: 10 maps per second in older files */
+            const Record *r = find_optional(&rs, "rdRate_Hz");
+            cfg->rdRate_Hz = (r && r->rows * r->cols >= 1 && r->data[0] > 0) ? r->data[0] : 10.0;
+        }
         cfg->minExtent_deg = get_scalar(&rs, "minExtent_deg");
         cfg->meanPri_s    = get_scalar(&rs, "meanPri_s");
         cfg->trackEnable  = get_int(&rs, "trackEnable");

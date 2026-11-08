@@ -99,6 +99,10 @@ if showPpi
     ppi.video = ppi_video_reset(ppi.video, want.raw, want.beam);
 end
 rdSlice = {[], []};  rdDets = {zeros(0, 3), zeros(0, 3)};   % range-Doppler map of the selected beam
+rdRate = 10;  rdLast = -inf;                                % maps per second (cfg.display.rdRate_Hz)
+if isfield(cfg.display, 'rdRate_Hz') && ~isempty(cfg.display.rdRate_Hz) && cfg.display.rdRate_Hz > 0
+    rdRate = cfg.display.rdRate_Hz;
+end
 
 for i = 1:2
     p = names{i};
@@ -266,7 +270,8 @@ for k = 1:sched.nPulses
         % the mean since the start)
         nInt = nProcessed - timingPrev.n;
         rdMap = [];
-        if want.rd && (~isempty(rdSlice{1}) || ~isempty(rdSlice{2}))
+        if want.rd && (~isempty(rdSlice{1}) || ~isempty(rdSlice{2})) && t - rdLast >= 1 / rdRate
+            rdLast = t;
             rdMap = ppi_rd_map(ppi.video, sys, rdSlice, [rdDets{1}; rdDets{2}], want.beam, t, az);
         end
         old = want;

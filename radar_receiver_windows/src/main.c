@@ -16,6 +16,7 @@
  *                            compression output of the selected beam)
  *     --ppi-beam N           beam shown by dbf / mf and the range-Doppler tab (1 ... beams, default 1)
  *     --ppi-tab TAB          tab at the start: 'ppi' (default) or 'rd' (range-Doppler map + small PPI)
+ *     --ppi-rd-rate HZ       range-Doppler maps per second of the tab (default cfg.display.rdRate_Hz)
  *     --serial DEVICE        send the CFAR detections to a serial port (e.g. /dev/ttyUSB0, COM3)
  *     --baud N               serial baud rate (default 921600)
  *     --serial-content X     'detections' (default) or 'plots'
@@ -56,6 +57,7 @@ typedef struct {
     const char *serialDevice, *serialContent, *plotsCsv, *detectionsCsv, *tracksCsv, *mf, *ppiShow, *ppiTab;
     int ppiBeam;                  /* 1-based */
     int port, baud, threads, updateEvery, ppi, quiet, queue, noSkip;
+    double rdRate;                   /* --ppi-rd-rate (0 = from the configuration) */
     int rtPriority, mlock;        /* real time (Linux) */
     const char *cpus, *inputCpus;
     double idleTimeout_s;
@@ -86,7 +88,8 @@ static void on_signal(int sig)
 static void usage(void)
 {
     puts("usage: radar_receiver [--config FILE] [--port N] [--record FILE] [--replay FILE]\n"
-         "                      [--ppi] [--ppi-snapshot FILE] [--ppi-show plots|detections|both|video]\n"
+         "                      [--ppi] [--ppi-snapshot FILE] [--ppi-show plots|detections|both|video|dbf|mf]\n"
+         "                      [--ppi-beam N] [--ppi-tab ppi|rd] [--ppi-rd-rate HZ]\n"
          "                      [--serial DEVICE] [--baud N]\n"
          "                      [--serial-content detections|plots] [--threads N] [--mf auto|direct|fft]\n"
          "                      [--update-every N]\n"
@@ -124,6 +127,7 @@ static int parse_options(int argc, char **argv, Options *o)
         else if (!strcmp(a, "--ppi-show"))       TAKE(o->ppiShow = v);
         else if (!strcmp(a, "--ppi-beam"))       TAKE(o->ppiBeam = atoi(v));
         else if (!strcmp(a, "--ppi-tab"))        TAKE(o->ppiTab = v);
+        else if (!strcmp(a, "--ppi-rd-rate"))    TAKE(o->rdRate = atof(v));
         else if (!strcmp(a, "--serial"))         TAKE(o->serialDevice = v);
         else if (!strcmp(a, "--baud"))           TAKE(o->baud = atoi(v));
         else if (!strcmp(a, "--serial-content")) TAKE(o->serialContent = v);
@@ -521,7 +525,7 @@ static int worker(void *arg)
             const int kind = ppi_profile_wanted(&beam);
             processor_set_profile(proc, kind, beam);
             const int rd = ppi_rdmap_wanted(&beam);
-            processor_set_rdmap(proc, rd, beam, 0.1);         /* at most 10 maps per second */
+            processor_set_rdmap(proc, rd, beam, 1.0 / app->cfg.rdRate_Hz);   /* cfg.display.rdRate_Hz */
         }
 #endif
         if (live && !app->opt.noSkip)
@@ -594,6 +598,7 @@ int main(int argc, char **argv)
     }
     app.cfg.mfMethod = !strcmp(app.opt.mf, "direct") ? MF_DIRECT : !strcmp(app.opt.mf, "fft") ? MF_FFT : MF_AUTO;
     if (app.opt.quiet < 0) app.opt.quiet = !app.cfg.consolePlots;
+    if (app.opt.rdRate > 0) app.cfg.rdRate_Hz = app.opt.rdRate;
     if (app.opt.updateEvery > 0 && app.opt.updateEvery != app.cfg.updateEvery) {
         /* the plot extractor needs the same azimuth extent with the new update interval */
         app.cfg.updateEvery = app.opt.updateEvery;

@@ -491,6 +491,9 @@ cfg.display.beam              = 1;        % beam after the DBF shown by 'dbf', '
                                           % tab (also in the panel: Beam)
 cfg.display.tab               = 'ppi';    % tab at the start: 'ppi', or 'rd' (range-Doppler map of the
                                           % selected beam next to a small PPI; computed only in this tab)
+cfg.display.rdRate_Hz         = 10;       % range-Doppler tab: maps handed to the display per second (C
+                                          % receiver, radar_config.bin; MATLAB: at most once per PPI
+                                          % refresh). The display redraws at most 25 times a second
 cfg.display.maxDetections     = 100000;   % CFAR detections kept for the PPI (the newest)
 cfg.display.showTracks        = true;     % draw the tracks (hollow triangles; also a checkbox in the panel)
 cfg.display.trackLeader_s     = 30;       % length of the velocity leader of a track [s of flight]

@@ -780,7 +780,9 @@ cell), so a peak and the shape of the spectrum around it (Doppler mainlobe,
 sidelobes, clutter residue near zero) are seen directly; hovering over the
 map shows the range, velocity and power of the cell. The PPI is drawn small
 next to the map, so both can be watched live. The map is taken from the
-processing only while this tab is shown (at the display updates); the panel
+processing only while this tab is shown (at the display updates, at most
+`cfg.display.rdRate_Hz` times a second, default 10; also the rate of the C
+receiver's tab, exported to `radar_config.bin`); the panel
 on the right serves both tabs.
 
 The panel on the right has:
