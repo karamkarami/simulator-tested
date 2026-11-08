@@ -184,9 +184,13 @@ with the matched or the mismatch filter and its peak shift from the pulse
 after the DDC filters), range axes and the handover, the CFAR-tested cells,
 the CPI, the Doppler window, the noise gain and the looks of every Doppler
 bin (impulses through the MTI, the window and the DFT; the eigenvalues of
-the row covariance), the median/mean of the noise, the CFAR factor from the
-Pfa (incomplete beta function, root finding), the tracker gates (inverse
-incomplete gamma function) and the plot extraction settings.
+the row covariance), the median/mean of the noise, the CFAR detector of
+`cfg.cfar.type` (CA, GO, SO, OS: cells per half window, rank, the factor
+from the Pfa by the incomplete beta function or the quadrature of
+`cfar_pfa.m`, root finding, the noise scale of the statistic), the tracker
+settings (EKF gates by the inverse incomplete gamma function; PMBM with
+IMM-UKF: densities, pruning, models, process noise, sigma-point weights,
+latency) and the plot extraction settings.
 
 A default input file whose `madeFor` does not match the configuration (for
 example after changing `cfg.ant.nElements`, `cfg.fc` or `cfg.adc.fs_Hz`) is
@@ -198,10 +202,12 @@ MATLAB once, or to give a file without `madeFor`. Missing input files are
 an error as well (the repository has all default files). Checked against
 MATLAB's export (Octave 8.4) for the default radar, staggered PRF, phase
 codes with mismatch filters, one element, 4 MHz DDC output, the three CFAR
-methods with and without a fixed threshold, the FIR clutter filter (fixed and
-staggered), the CA tracker in 2-D with the speed gate, a given CPI length and
-FFT length, and rebuilt default files (32 elements, other carrier frequency,
-other ADC rate): every record within 3e-14 (relative).
+windows with and without a fixed threshold, the CA, GO, SO and OS detectors
+(also another OS rank), the FIR clutter filter (fixed and staggered), the EKF
+with the CA model in 2-D and the speed gate, the PMBM tracker (3-D, 2-D with
+two IMM models, one element), a given CPI length and FFT length, and rebuilt
+default files (32 elements, other carrier frequency, other ADC rate): every
+record within 3e-14 (relative).
 
 ## Options
 

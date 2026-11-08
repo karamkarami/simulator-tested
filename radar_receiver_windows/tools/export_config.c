@@ -19,8 +19,8 @@
  * codes with the matched or the mismatch filter and its peak shift), range
  * axes and the handover, CFAR-tested cells, CPI, MTI weights (canceller or
  * FIR), Doppler window, noise gain and looks of every bin, median/mean of the
- * noise, CFAR factor from the Pfa, extraction and EKF tracker settings, peak
- * interpolation. The results agree with MATLAB to rounding (the CFAR factor
+ * noise, the CFAR detector (CA, GO, SO, OS) and its factor from the Pfa,
+ * extraction settings, EKF or PMBM tracker settings, peak interpolation. The results agree with MATLAB to rounding (the CFAR factor
  * and the looks come from root finding: ~1e-12).
  *
  * Unlike MATLAB, missing input files or default files made for other
