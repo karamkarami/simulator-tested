@@ -785,7 +785,9 @@ The panel on the right has:
   the newest video of every azimuth bin (0.5 deg in MATLAB, 0.25 deg in the C
   PPI) until the antenna passes again, so the display is a surface over range
   and azimuth whose third dimension, the power, is the colour: from 3 dB
-  below the noise floor (black; a running median of the video) over blue,
+  below the noise floor (black; a running 10th percentile of the video, as
+  most of the raw video is clutter: the long pulse smears near clutter over
+  22.5 km) over blue,
   cyan, green, yellow and red to 50 dB above it (white), with a colour scale
   in the corner. A pixel shows the largest range bin under it, so a small
   echo does not disappear when zoomed out. The video costs about 0.3 ms per

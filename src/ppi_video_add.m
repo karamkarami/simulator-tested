@@ -25,6 +25,7 @@ else
 end
 V.map(b, :) = single(V.sum / V.n);
 V.time(b) = t_s;
-m = median(10*log10(row(V.binCount > 0) + eps));              % noise floor: running median
+v = sort(row(V.binCount > 0));                                % noise floor: running 10th percentile (the
+m = 10*log10(v(max(1, ceil(0.1*numel(v)))) + eps);             % raw video is mostly clutter: long-pulse smear)
 if isnan(V.noise_dB), V.noise_dB = m; else, V.noise_dB = 0.98*V.noise_dB + 0.02*m; end
 end

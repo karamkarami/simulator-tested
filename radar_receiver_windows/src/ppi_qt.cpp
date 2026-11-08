@@ -44,7 +44,8 @@
  * averaged over the elements, both receive intervals joined (video.c). The
  * widget keeps the newest data of every 0.25 deg azimuth bin (the mean of the
  * PRIs while the antenna is in the bin) and draws it as an image: colour =
- * power from 3 dB below the noise floor (running median) to 50 dB above it.
+ * power from 3 dB below the noise floor (running 10th percentile of the
+ * video) to 50 dB above it.
  * A pixel shows the largest range bin under it. The video stays until the
  * antenna passes again (or Clear).
  *
@@ -1195,11 +1196,12 @@ void PpiWidget::addVideoRow(const VideoRow &row)
         videoNoise_dB_ = videoLo_dB_ = NAN;
         lutBins_ = 0;                                     /* rebuild the pixel lookup */
     }
-    /* noise floor: running median of the video in dB */
+    /* noise floor: running 10th percentile of the video in dB (the raw video is
+     * mostly clutter: the long pulse smears near clutter over its length) */
     videoTmp_.clear();
     for (float x : row.v) if (x > 0.0f) videoTmp_.push_back(x);
     if (!videoTmp_.empty()) {
-        auto mid = videoTmp_.begin() + videoTmp_.size() / 2;
+        auto mid = videoTmp_.begin() + (videoTmp_.size() - 1) / 10;
         std::nth_element(videoTmp_.begin(), mid, videoTmp_.end());
         const double m = 10.0 * std::log10((double)*mid);
         videoNoise_dB_ = std::isfinite(videoNoise_dB_) ? 0.98 * videoNoise_dB_ + 0.02 * m : m;

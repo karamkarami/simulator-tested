@@ -32,7 +32,7 @@ V.nAz = round(360 / V.azRes_deg);
 V.map = zeros(V.nAz, V.nR, 'single');                         % mean power [LSB^2] (0 = no data)
 V.time = -Inf(V.nAz, 1);                                      % time of the newest PRI in every bin
 V.sum = zeros(1, V.nR);  V.n = 0;  V.azBin = 0;                % PRIs of the current azimuth bin
-V.noise_dB = NaN;                                             % noise floor (running median of the video)
+V.noise_dB = NaN;                                             % noise floor (running 10th percentile of the video)
 V.span_dB = 50;                                               % colour scale: noise - 3 dB ... + span
 % Image of the PPI: nPix x nPix pixels over [-rMax, rMax] (km in the axes), lookup into the map
 V.nPix = 601;

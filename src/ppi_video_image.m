@@ -3,7 +3,8 @@ function [rgb, alpha] = ppi_video_image(V, tMin_s)
 %   [rgb, alpha] = PPI_VIDEO_IMAGE(V, tMin_s) returns the nPix x nPix x 3
 %   image (row 1 = South) and its transparency (0 outside the video range and
 %   where there is no data newer than tMin_s). Colour: the power in dB from
-%   3 dB below the noise floor (black) to V.span_dB above it (white).
+%   3 dB below the noise floor (black; the running 10th percentile of the
+%   video) to V.span_dB above it (white).
 lo = V.noise_dB - 3;
 if isnan(lo), lo = 0; end
 M = V.map;                                                    % largest bin under every pixel

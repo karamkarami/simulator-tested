@@ -361,8 +361,8 @@ int main(int argc, char **argv)
         }
         ppi_post_antenna(70.0, 22.0, 2);
         win.refresh();
-        check(pw.videoBinsFilled() == 160 && std::fabs(pw.videoNoise_dB() - 10.0 * std::log10(800.0)) < 0.5,
-              "video of 30 ... 70 deg (160 azimuth bins), noise floor of the rows");
+        check(pw.videoBinsFilled() == 160 && std::fabs(pw.videoNoise_dB() - 10.0 * std::log10(672.0)) < 0.3,
+              "video of 30 ... 70 deg (160 azimuth bins), noise floor (10th percentile) of the rows");
         const double r = 30.1e3;
         check(pw.videoIndexAt(r * std::sin(50 * kDeg), r * std::cos(50 * kDeg)) > 80 &&
               pw.videoIndexAt(20e3 * std::sin(40 * kDeg), 20e3 * std::cos(40 * kDeg)) < 20 &&
