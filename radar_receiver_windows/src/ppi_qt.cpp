@@ -1912,8 +1912,12 @@ public:
                                             "color: #d0d0d0; padding: 5px 16px; } QTabBar::tab:selected { "
                                             "background: #383838; color: white; }"));
         QWidget *page1 = new QWidget(), *page2 = new QWidget();
-        page1->setStyleSheet(QStringLiteral("background: black;"));
-        page2->setStyleSheet(QStringLiteral("background: black;"));
+        /* the pages only (by name): an unscoped "background: black" would also reach the
+         * data tips (QToolTip of the PPI), drawn black on black */
+        page1->setObjectName(QStringLiteral("ppiPage"));
+        page2->setObjectName(QStringLiteral("rdPage"));
+        page1->setStyleSheet(QStringLiteral("QWidget#ppiPage { background: black; }"));
+        page2->setStyleSheet(QStringLiteral("QWidget#rdPage { background: black; }"));
         pageLayout1_ = new QVBoxLayout(page1);
         pageLayout1_->setContentsMargins(0, 0, 0, 0);
         pageLayout2_ = new QHBoxLayout(page2);

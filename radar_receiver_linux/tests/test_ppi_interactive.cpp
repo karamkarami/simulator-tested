@@ -266,6 +266,33 @@ int main(int argc, char **argv)
     win.refresh();
     check(win.modeBox()->currentIndex() == 0 && ppi_video_wanted() == 0 && ppi_profile_wanted(nullptr) == PROFILE_NONE,
           "key D from MF out back to the plots");
+    {   /* the data tip in the window (in its tab page) is readable: text unlike its background */
+        const Detection t = make_plot(25e3, 45.0, 2.0, 50.0, 20.0, PULSE_LONG, 777);
+        ppi_post_antenna(45.0, 7.0, 1);
+        ppi_post_plot(&t);
+        ppi_post_antenna(50.0, 7.1, 1);
+        win.refresh();
+        const QPointF gt = ground(t);
+        send_mouse(win.ppi(), QEvent::MouseMove, win.ppi().screenOf(gt.x(), gt.y()) + QPointF(2, 1), Qt::NoButton);
+        QApplication::processEvents();
+        QWidget *tipW = nullptr;
+        for (QWidget *tw : QApplication::allWidgets())
+            if (tw->inherits("QTipLabel")) tipW = tw;
+        int lo = 255, hi = 0;
+        if (tipW) {
+            const QImage im = tipW->grab().toImage();
+            for (int y = 0; y < im.height(); y++)
+                for (int x = 0; x < im.width(); x++) {
+                    const int g = qGray(im.pixel(x, y));
+                    lo = std::min(lo, g);
+                    hi = std::max(hi, g);
+                }
+            tipW->grab().save(QString::fromStdString(folder + "/ppi_window_datatip.png"));
+        }
+        check(tipW && QToolTip::text().contains("Pulse number 777") && hi - lo > 100,
+              "data tip in the window: shown, with its text readable (not black on black)");
+        QToolTip::hideText();
+    }
     /* block times in the panel, CFAR method name */
     ProcessorTiming tm;
     std::memset(&tm, 0, sizeof tm);
