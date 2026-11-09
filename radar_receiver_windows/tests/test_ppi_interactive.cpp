@@ -394,20 +394,25 @@ int main(int argc, char **argv)
         const int nBins = (int)std::ceil(60e3 / dR);
         std::vector<float> row(nBins);
         uint32_t seed = 1;
-        auto noise = [&seed]() { seed = seed * 1664525u + 1013904223u; return 800.0f * (0.8f + 0.4f * (seed >> 8) / 16777216.0f); };
+        auto noise = [&seed]() {                              /* one element: exponential power of mean 800 */
+            seed = seed * 1664525u + 1013904223u;
+            return (float)(-800.0 * std::log(((seed >> 8) + 0.5) / 16777216.0));
+        };
         for (double az = 30.0; az < 70.0; az += 0.036) {
             for (int i = 0; i < nBins; i++) row[i] = i < 55 ? 0.0f : noise();   /* no data inside 4.1 km */
             if (az > 45.0 && az < 55.0)
                 for (int i = 400; i < 404; i++) row[i] = 40000.0f;
-            ppi_post_video(row.data(), nBins, dR, az, 20.0 + az / 36.0);
+            ppi_post_video(row.data(), nBins, 1, dR, az, 20.0 + az / 36.0);
         }
         ppi_post_antenna(70.0, 22.0, 2);
         win.refresh();
-        check(pw.videoBinsFilled() == 160 && std::fabs(pw.videoNoise_dB() - 10.0 * std::log10(672.0)) < 0.3,
-              "video of 30 ... 70 deg (160 azimuth bins), noise floor (10th percentile) of the rows");
+        check(std::fabs(p10_offset_dB(1) - 9.7732) < 1e-3 && std::fabs(p10_offset_dB(48) - 0.8616) < 1e-3,
+              "noise floor offset of the 10th percentile: one sample 9.77 dB, mean of 48 0.86 dB (gammaincinv)");
+        check(pw.videoBinsFilled() == 160 && std::fabs(pw.videoNoise_dB() - 10.0 * std::log10(800.0)) < 0.5,
+              "video of 30 ... 70 deg (160 azimuth bins), noise floor of one element = its mean power");
         const double r = 30.1e3;
         check(pw.videoIndexAt(r * std::sin(50 * kDeg), r * std::cos(50 * kDeg)) > 80 &&
-              pw.videoIndexAt(20e3 * std::sin(40 * kDeg), 20e3 * std::cos(40 * kDeg)) < 20 &&
+              pw.videoIndexAt(20e3 * std::sin(40 * kDeg), 20e3 * std::cos(40 * kDeg)) < 40 &&   /* < 5 dB above noise */
               pw.videoIndexAt(20e3 * std::sin(150 * kDeg), 20e3 * std::cos(150 * kDeg)) == 0,
               "echo bright, noise dark, no video where the antenna did not pass");
         const QImage img = pw.grab().toImage();
@@ -446,7 +451,7 @@ int main(int argc, char **argv)
             row[300] = 50000.0f;                                  /* an echo at 22.5 km */
             ppi_post_profile(PROFILE_DBF, row.data(), nBins, dR, az, 30.0 + az / 36.0);
             ppi_post_profile(PROFILE_MF, row.data(), nBins, dR, az, 30.0 + az / 36.0);   /* other kind: dropped */
-            ppi_post_video(row.data(), nBins, dR, az + 180.0, 30.0 + az / 36.0);           /* video: dropped */
+            ppi_post_video(row.data(), nBins, 1, dR, az + 180.0, 30.0 + az / 36.0);           /* video: dropped */
         }
         win.refresh();
         const double r = (300 + 0.5) * dR;

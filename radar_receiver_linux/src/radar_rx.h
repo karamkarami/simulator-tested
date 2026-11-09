@@ -449,10 +449,13 @@ int  ppi_rdmap_wanted(int *beam);
 void ppi_post_rdmap(const RdMap *map);
 /* Raw video (display mode PPI_SHOW_VIDEO): ppi_video_wanted() is 1 while the
  * PPI shows the video (the worker then computes it, video.c); ppi_post_video()
- * hands the video of one PRI (row[nBins], range bins of dR_m from 0) to the
- * PPI, which keeps the newest data of every azimuth bin (0.25 deg). */
+ * hands the video of one PRI (row[nBins], range bins of dR_m from 0, the mean
+ * power of nAvg complex samples: the receive elements) to the PPI, which keeps
+ * the newest data of every azimuth bin (0.25 deg). nAvg sets the noise floor:
+ * the 10th percentile of a mean of nAvg exponential powers is below its mean
+ * (9.77 dB for one element, 0.86 dB for 48). */
 int  ppi_video_wanted(void);
-void ppi_post_video(const float *row, int nBins, double dR_m, double az_deg, double time_s);
+void ppi_post_video(const float *row, int nBins, int nAvg, double dR_m, double az_deg, double time_s);
 /* Track updates and deletions (drawn as hollow triangles, Tracks checkbox). */
 void ppi_post_track(const Track *track);
 /* Accumulated processing times: the panel shows the mean per PRI of every

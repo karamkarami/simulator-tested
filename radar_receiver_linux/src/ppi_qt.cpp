@@ -188,9 +188,29 @@ struct CfarState {
 struct VideoRow {                 /* the raw data of one PRI (ppi_post_video, ppi_post_profile) */
     int                kind = 0;      /* 0 video, PROFILE_DBF, PROFILE_MF */
     int                beam = 0;      /* DBF / MF: the beam (0-based)     */
+    int                nAvg = 1;      /* complex samples averaged per bin (video: the elements) */
     double             az_deg = 0.0, time_s = 0.0, dR_m = 0.0;
     std::vector<float> v;
 };
+
+/* Mean over its 10th percentile [dB] of the mean of n exponential powers (chi-square with
+ * 2n degrees of freedom / 2n): x with P(n, x) = 0.1 (regularized lower incomplete gamma,
+ * integer n) by bisection, 10 log10(n / x). n = 1: 9.77 dB; 48: 0.86 dB. */
+double p10_offset_dB(int n)
+{
+    if (n < 1) n = 1;
+    auto P = [n](double x) {                          /* 1 - e^-x sum_{k<n} x^k / k! */
+        double s = 0.0;
+        for (int k = 0; k < n; k++) s += std::exp(-x + k * std::log(x) - std::lgamma(k + 1.0));
+        return 1.0 - s;
+    };
+    double lo = 0.0, hi = n;                          /* P(n, n) > 0.1 for every n */
+    for (int it = 0; it < 100; it++) {
+        const double mid = 0.5 * (lo + hi);
+        (P(mid) < 0.1 ? lo : hi) = mid;
+    }
+    return 10.0 * std::log10(n / (0.5 * (lo + hi)));
+}
 
 /* Colours of the video (index 1 ... 255; 0 = no data), as ppi_video_colormap.m. */
 QRgb video_colour(int i)
@@ -1260,9 +1280,10 @@ void PpiWidget::addVideoRow(const VideoRow &row)
     if (!videoTmp_.empty()) {
         auto mid = videoTmp_.begin() + (videoTmp_.size() - 1) / 10;
         std::nth_element(videoTmp_.begin(), mid, videoTmp_.end());
-        /* DBF / MF out: one complex sample per bin (exponential power): its 10th
-         * percentile is 9.77 dB below the mean (the video averages the elements) */
-        const double m = 10.0 * std::log10((double)*mid) + (row.kind == 0 ? 0.0 : 9.77);
+        /* the 10th percentile of a bin is below the noise power: DBF / MF out one complex
+         * sample per bin (exponential power: 9.77 dB), the video the mean over the elements
+         * (one element: also 9.77 dB, 48 elements: 0.86 dB) */
+        const double m = 10.0 * std::log10((double)*mid) + p10_offset_dB(row.kind == 0 ? row.nAvg : 1);
         videoNoise_dB_ = std::isfinite(videoNoise_dB_) ? 0.98 * videoNoise_dB_ + 0.02 * m : m;
     }
     bool requantise = false;
@@ -2188,10 +2209,11 @@ extern "C" int ppi_video_wanted(void)
     return g_videoWanted.load();
 }
 
-extern "C" void ppi_post_video(const float *row, int nBins, double dR_m, double az_deg, double time_s)
+extern "C" void ppi_post_video(const float *row, int nBins, int nAvg, double dR_m, double az_deg, double time_s)
 {
     if (!row || nBins <= 0 || !(dR_m > 0.0) || !std::isfinite(az_deg)) return;
     VideoRow r;
+    r.nAvg = nAvg > 0 ? nAvg : 1;
     r.az_deg = az_deg;
     r.time_s = time_s;
     r.dR_m = dR_m;

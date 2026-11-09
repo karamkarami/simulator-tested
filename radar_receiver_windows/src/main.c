@@ -514,7 +514,7 @@ static int worker(void *arg)
                 videoRow = malloc(sizeof(float) * (size_t)video.nBins);
             if (videoRow) {
                 video_row(&video, pri, videoRow);
-                ppi_post_video(videoRow, video.nBins, video.dR_m, pri->az_deg, pri->time_s);
+                ppi_post_video(videoRow, video.nBins, app->cfg.nCh, video.dR_m, pri->az_deg, pri->time_s);
             }
             app->display_ms += ms_since(tVideo);
         }

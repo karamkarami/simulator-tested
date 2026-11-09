@@ -356,8 +356,9 @@ The panel on the right of the window has:
   modes). The PPI keeps the newest video of every 0.25 deg azimuth bin (the
   mean of the PRIs in it) until the antenna passes again and draws it as an
   image: the colour is the power from 3 dB below the noise floor (black; a
-  running 10th percentile of the video, as most of the raw video is clutter)
-  over blue, cyan, green, yellow and red to
+  running 10th percentile of the video, as most of the raw video is clutter,
+  plus the offset of that percentile for the mean of the nCh element powers:
+  9.77 dB for one element, 0.86 dB for 48) over blue, cyan, green, yellow and red to
   50 dB above it (white); the legend shows the scale. A pixel shows the
   largest range bin under it, so an echo stays visible when zoomed out.
   *Clear display* clears the video too.
