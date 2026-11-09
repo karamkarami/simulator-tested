@@ -341,9 +341,14 @@ tab, small next to the map, so both are seen live. The worker copies a map
 to the display at most `cfg.display.rdRate_Hz` times a second (default 10,
 `--ppi-rd-rate`; the display redraws at most 25 times a second), and only while this tab is shown
 (nothing is computed otherwise); a map is made when both sub-pulses had a
-CPI update. The panel serves both tabs; *Save screenshot* (and
-`--ppi-snapshot`) saves the PPI in the first tab and the whole tab (map and
-PPI) in the second.
+CPI update. The panel serves both tabs; *Save screenshot* (and key `S`,
+the right-click menu and `--ppi-snapshot`) saves the whole window: the tab
+bar, the shown tab (the PPI, or the map, the plot below it and the small
+PPI) and the panel with the settings and the block times.
+
+The window, the taskbar and (Windows) the file `radar_receiver.exe` show the
+program icon (`src/radar_icon.png` in the Qt resources `src/ppi.qrc`;
+`src/radar_icon.ico` in `src/radar_receiver.rc` for the .exe).
 
 The panel on the right of the window has:
 * **Display**: *Plots (after extractor)* as before; *Detections (before
@@ -382,8 +387,8 @@ The panel on the right of the window has:
   exponential power, so the noise floor is the 10th percentile + 9.77 dB.
   Changing the mode or the beam starts an empty map. Key `D` cycles plots,
   detections, both, video, DBF out, MF out.
-* **Save screenshot (PNG) ...**: saves the PPI as it is now (without the
-  panel); the default file name has the date and time.
+* **Save screenshot (PNG) ...**: saves the whole window as it is now (the
+  shown tab and this panel); the default file name has the date and time.
 * **Tracks (T)**: shows or hides the tracks of the tracker (EKF or PMBM): a hollow
   triangle at the last update, so the plot (filled circle) lies inside it;
   magenta with its number and a 30 s velocity leader when confirmed, gray
@@ -797,5 +802,5 @@ Timing:
 | `export_config`, `core_exported` | `radar_export_config` writes the configuration of `../radar_config.m`, and the core test runs the whole chain with it |
 | `serial` | frame encoding and CRC; real output to a pseudo-terminal (Linux): exact bytes, 200-detection split, non-blocking drops, close |
 | `ppi` | the Qt PPI runs off-screen with antenna updates, plots, detections and a CFAR threshold report and saves a snapshot |
-| `ppi_interactive` | mouse, wheel and key events: data tips, cursor readout, zoom around the cursor, pan, pin/unpin, reset, filters, persistence options, pause, clear; detections (display modes, arcs drawn, data tips, key D); window panel: display mode box, CFAR threshold Apply/Default and its report, screenshot, mean block times (labels of at most 15 characters, the peak interpolation row); raw video (box and key D, rows of 160 azimuth bins, noise floor, echo drawn, nothing where the antenna did not pass, plots hidden, Clear); DBF out / MF out (beam selector, profile wanted only in these modes and for the selected beam, rows of another kind or beam not shown, noise floor of one-sample rows, echo bright); range-Doppler tab (map wanted only in the tab, the PPI moved next to it and back, map drawn with the peak bright and the noise dark, spectrum at the strongest detection, hover readout, data tips of a detection, a cell and a spectrum point, zoom of both axes around the cursor and of one (Shift), pan by dragging, pin and unpin by a click, zoom and pins kept by a new map, reset by double click, range profile through the detection's Doppler bin, a map of another beam ignored, screenshot of the tab); pause button (no new map or plot while paused, the newest on resume, follows Space); data tip readable in the window; tracks (triangle drawn around the plot, data tip, PMBM data tip with existence and model probabilities, checkbox and key T, deletion) |
+| `ppi_interactive` | mouse, wheel and key events: data tips, cursor readout, zoom around the cursor, pan, pin/unpin, reset, filters, persistence options, pause, clear; detections (display modes, arcs drawn, data tips, key D); window panel: display mode box, CFAR threshold Apply/Default and its report, screenshot of the whole window, program icon in the resources, mean block times (labels of at most 15 characters, the peak interpolation row); raw video (box and key D, rows of 160 azimuth bins, noise floor, echo drawn, nothing where the antenna did not pass, plots hidden, Clear); DBF out / MF out (beam selector, profile wanted only in these modes and for the selected beam, rows of another kind or beam not shown, noise floor of one-sample rows, echo bright); range-Doppler tab (map wanted only in the tab, the PPI moved next to it and back, map drawn with the peak bright and the noise dark, spectrum at the strongest detection, hover readout, data tips of a detection, a cell and a spectrum point, zoom of both axes around the cursor and of one (Shift), pan by dragging, pin and unpin by a click, zoom and pins kept by a new map, reset by double click, range profile through the detection's Doppler bin, a map of another beam ignored, screenshot of the tab); pause button (no new map or plot while paused, the newest on resume, follows Space); data tip readable in the window; tracks (triangle drawn around the plot, data tip, PMBM data tip with existence and model probabilities, checkbox and key T, deletion) |
 | `../tests/test_c_receiver.m` (Octave/MATLAB) | the six-target scenario streamed over UDP to this receiver: the C plots must match the MATLAB plots; the recording is replayed to check that the result is repeatable and to measure the time |

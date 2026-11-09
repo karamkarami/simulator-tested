@@ -68,6 +68,7 @@
 #include <QFileDialog>
 #include <QDateTime>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QResizeEvent>
 #include <QTabWidget>
 #include <QImage>
@@ -733,15 +734,17 @@ void PpiWidget::clickAt(QPointF screen)
 QString PpiWidget::saveSnapshotDialog()
 {
     const QString name = QStringLiteral("ppi_%1.png").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
-    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("Save a screenshot of the PPI"), name,
+    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("Save a screenshot of the PPI window"), name,
                                                       QStringLiteral("PNG (*.png)"));
     if (path.isEmpty() || !saveSnapshot(path)) return QString();
     return path;
 }
 
+/* The whole window: the shown tab (PPI, or range-Doppler map, plot below it and
+ * the small PPI) and the panel with the settings and the block times. */
 bool PpiWidget::saveSnapshot(const QString &path)
 {
-    const QPixmap pixmap = grab();
+    const QPixmap pixmap = window()->grab();
     if (pixmap.save(path, "PNG")) return true;
     std::fprintf(stderr, "PPI: cannot save the snapshot to %s\n", path.toLocal8Bit().constData());
     return false;
@@ -2484,15 +2487,8 @@ public:
         if (tabs_->currentIndex() != i) tabs_->setCurrentIndex(i);
         ppi_->setFocus();
     }
-    /* screenshot: the PPI in the first tab, the whole page (map and PPI) in the second */
-    bool saveSnapshot(const QString &path)
-    {
-        if (tabs_->currentIndex() == 0) return ppi_->saveSnapshot(path);
-        const QPixmap pm = tabs_->currentWidget()->grab();
-        if (pm.save(path, "PNG")) return true;
-        std::fprintf(stderr, "PPI: cannot save the snapshot to %s\n", path.toLocal8Bit().constData());
-        return false;
-    }
+    /* screenshot: the whole window (tab bar, the shown tab and the panel) */
+    bool saveSnapshot(const QString &path) { return ppi_->saveSnapshot(path); }
     QCheckBox *tracksBox() { return tracks_; }
     QString timingText() const { return timing_->text(); }
     QComboBox *modeBox() { return mode_; }
@@ -2861,6 +2857,20 @@ extern "C" void ppi_set_display_mode(int mode)
     if (mode >= PPI_SHOW_PLOTS && mode <= PPI_SHOW_MF) g_startMode.store(mode);
 }
 
+/* The program icon (src/radar_icon.png in the Qt resources, src/ppi.qrc; the Windows
+ * .exe also carries it as src/radar_icon.ico, src/radar_receiver.rc). */
+static void init_ppi_resources()
+{
+    Q_INIT_RESOURCE(ppi);           /* (a resource in a static library is not registered by itself) */
+}
+
+QIcon ppi_icon()
+{
+    static bool done = false;
+    if (!done) { init_ppi_resources(); done = true; }
+    return QIcon(QStringLiteral(":/radar_icon.png"));
+}
+
 extern "C" int ppi_run(int argc, char **argv, double maxRange_m, int (*worker)(void *), void *arg,
                        volatile sig_atomic_t *stopFlag, const char *snapshotPath)
 {
@@ -2880,6 +2890,8 @@ extern "C" int ppi_run(int argc, char **argv, double maxRange_m, int (*worker)(v
     PpiWindow window(maxRange_m, stopFlag);
     PpiWidget &widget = window.ppi();
     window.setWindowTitle(QStringLiteral("Radar PPI"));
+    QApplication::setWindowIcon(ppi_icon());                   /* window, taskbar, dock */
+    window.setWindowIcon(ppi_icon());
     window.resize(1030, 800);
     window.modeBox()->setCurrentIndex(g_startMode.load());   /* DisplayMode has the same order */
     widget.setDisplayMode((DisplayMode)g_startMode.load());    /* (also when the index did not change) */

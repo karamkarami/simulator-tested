@@ -611,8 +611,8 @@ int main(int argc, char **argv)
         check(rdw.frame().time_s == 42.0, "a map of another beam is not taken");
         if (!folder.empty()) {
             const QString shot = QString::fromStdString(folder + "/ppi_rd_tab.png");
-            check(win.saveSnapshot(shot) && QImage(shot).width() == win.tabs()->currentWidget()->width(),
-                  "screenshot of the second tab: map and small PPI");
+            check(win.saveSnapshot(shot) && QImage(shot).width() == win.width() && QImage(shot).height() == win.height(),
+                  "screenshot of the second tab: the whole window (map, plot below it, small PPI, panel)");
         }
         win.tabs()->setCurrentIndex(0);
         check(ppi_rdmap_wanted(nullptr) == 0 && pw.parentWidget() == win.tabs()->widget(0), "back to the PPI tab");
@@ -620,8 +620,10 @@ int main(int argc, char **argv)
 
     if (!folder.empty()) {
         const QString shot = QString::fromStdString(folder + "/ppi_window_screenshot.png");
-        check(win.ppi().saveSnapshot(shot) && QImage(shot).width() == win.ppi().width(),
-              "screenshot of the PPI (without the panel)");
+        check(win.ppi().saveSnapshot(shot) && QImage(shot).width() == win.width() && QImage(shot).height() == win.height(),
+              "screenshot (button, key S): the whole window with the panel");
+        const QIcon icon = ppi_icon();
+        check(!icon.isNull() && icon.pixmap(64, 64).width() == 64, "the program icon is in the resources");
         QCoreApplication::processEvents();               /* layout after the text changes */
         win.grab().save(QString::fromStdString(folder + "/ppi_window.png"));
     }

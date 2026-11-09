@@ -1,0 +1,2 @@
+// Windows resources of radar_receiver.exe: the program icon (Explorer, taskbar)
+IDI_ICON1 ICON "radar_icon.ico"

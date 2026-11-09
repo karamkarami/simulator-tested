@@ -855,7 +855,9 @@ The panel on the right has:
   the inverse of `cfar_alpha.m`, for every detector), e.g. `CA 2-D: 12.79 dB (Pfa 1.0e-08)`.
 * Reset view, Clear display, Remove data tips, Pause, and **Save screenshot
   (PNG)**, which saves the window as it is now (file dialog, default name
-  `ppi_<date>_<time>.png`).
+  `ppi_<date>_<time>.png`): in MATLAB the whole figure with the shown tab
+  and the panel (`getframe`); Octave renders only the plots, without the
+  panel controls (as does a hidden figure).
 * **Mean time per PRI [us]** (bottom right, above the help): the mean
   time per PRI of every block over the PRIs since the previous display
   update (the last line says over how many; a change such as a lower CFAR

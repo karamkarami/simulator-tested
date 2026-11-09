@@ -31,7 +31,8 @@ function out = ppi_callbacks(action, fig, varargin)
 %                                 plot below it); out = the number of pinned tips
 %     'rdreset', which            the whole map / plot again (double click)
 %     'reset' 'clear' 'cleartips' 'pause'   buttons of the panel
-%     'save' [, fileName]         save a screenshot of the PPI as a PNG file
+%     'save' [, fileName]         save a screenshot of the PPI window (MATLAB: with the
+%                                 panel) as a PNG file
 %                                 (without fileName: file dialog; out = file)
 %     'cfar', dB                  request a new CFAR threshold (Apply button);
 %                                 the processing takes it at its next display update
@@ -217,7 +218,20 @@ switch action
             file = fullfile(folder, name);
         end
         setappdata(fig, 'ppi', S);
-        print(fig, file, '-dpng');
+        % the whole figure: the shown tab and the panel with the settings and the block times
+        % (MATLAB's getframe captures the figure window with its controls; Octave renders
+        % only the axes, without the panel, and a hidden figure cannot be captured: print)
+        done = false;
+        if ~exist('OCTAVE_VERSION', 'builtin') && strcmp(get(fig, 'Visible'), 'on')
+            try
+                drawnow;
+                F = getframe(fig);
+                imwrite(F.cdata, file);
+                done = true;
+            catch
+            end
+        end
+        if ~done, print(fig, file, '-dpng'); end
         out = file;
         return
     otherwise
