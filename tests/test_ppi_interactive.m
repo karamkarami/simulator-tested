@@ -297,6 +297,71 @@ sp = get(S.h.specLine, 'YData');
 ok = check(abs(max(sp) - 30) < 0.01, 'the spectrum at the strongest detection shows its peak') && ok;
 txt = ppi_callbacks('rdhover', fig, [wl.range_m(101)/1e3, rdm.vel_mps(20)]);
 ok = check(~isempty(strfind(txt, '30.0 dB above noise')), 'hover over the map: the cell in dB above noise') && ok;
+S = getappdata(fig, 'ppi');
+ok = check(~isempty(strfind(get(S.h.rdTip, 'String'), 'CFAR detection')) && strcmp(get(S.h.rdTip, 'Visible'), 'on'), ...
+           'map: data tip of the detection under the cursor') && ok;
+ok = check(strcmp(get(get(S.h.specAx, 'XLabel'), 'String'), 'Radial velocity [m/s]') && ...
+           ~isempty(strfind(get(get(S.h.specAx, 'YLabel'), 'String'), 'dB above noise')), 'spectrum: axis labels') && ok;
+% zoom, pan, pinned data tips, reset of the map
+full = [get(S.h.rdAx, 'XLim') get(S.h.rdAx, 'YLim')];
+c = [wl.range_m(101)/1e3, rdm.vel_mps(20)];
+pkBin = floor(wl.range_m(101) / rdm.dR_m) + 1;
+ppi_callbacks('rdzoom', fig, 'map', 4, c);
+v = [get(S.h.rdAx, 'XLim') get(S.h.rdAx, 'YLim')];
+ok = check(abs(diff(v(1:2)) - diff(full(1:2))/4) < 1e-6 && abs(diff(v(3:4)) - diff(full(3:4))/4) < 1e-6 && ...
+           v(1) < c(1) && v(2) > c(1) && v(3) < c(2) && v(4) > c(2), 'map: zoom x4 around the peak (both axes)') && ok;
+ppi_callbacks('rdzoom', fig, 'map', 2, c, [2 1]);
+v1 = [get(S.h.rdAx, 'XLim') get(S.h.rdAx, 'YLim')];
+ok = check(abs(diff(v1(1:2)) - diff(v(1:2))/2) < 1e-6 && abs(diff(v1(3:4)) - diff(v(3:4))) < 1e-6, ...
+           'map: zoom of the range axis only (Shift + wheel)') && ok;
+ppi_callbacks('rdpan', fig, 'map', [1 0]);
+v2 = [get(S.h.rdAx, 'XLim') get(S.h.rdAx, 'YLim')];
+ok = check(abs(v2(1) - v1(1) - 1) < 1e-6, 'map: pan by 1 km') && ok;
+n = ppi_callbacks('rdpin', fig, 'map', c);
+S = getappdata(fig, 'ppi');
+ok = check(n == 1 && isequal(S.rdSel, [pkBin 20]) && numel(S.h.rdPinH) >= 2, 'map: click pins the data tip, selects the cell') && ok;
+ppi_update(ppi, sys, 120, 20.75, 2, p, dets, tk, [], [], V, rdm);
+S = getappdata(fig, 'ppi');
+ok = check(max(abs([get(S.h.rdAx, 'XLim') get(S.h.rdAx, 'YLim')] - v2)) < 1e-9 && size(S.rdPins, 1) == 1 && numel(S.h.rdPinH) >= 2, ...
+           'a new map keeps the zoom and the pinned tip') && ok;
+ppi_callbacks('save', fig, fullfile(tempdir, 'ppi_rd_zoom_test.png'));
+ppi_callbacks('rdreset', fig, 'map');
+ok = check(max(abs([get(S.h.rdAx, 'XLim') get(S.h.rdAx, 'YLim')] - full)) < 1e-9, 'map: reset (double click)') && ok;
+% the plot below the map: data tip, zoom, the range profile
+txt = ppi_callbacks('lowhover', fig, [rdm.vel_mps(20), 25]);
+ok = check(~isempty(strfind(txt, 'CFAR detection')) && strcmp(get(S.h.specTip, 'Visible'), 'on'), ...
+           'spectrum: data tip of the nearest point') && ok;
+lf = [get(S.h.specAx, 'XLim') get(S.h.specAx, 'YLim')];
+ok = check(lf(4) > 30, 'spectrum: room above the peak') && ok;
+ppi_callbacks('rdzoom', fig, 'lower', 2, [rdm.vel_mps(20), 20]);
+lz = [get(S.h.specAx, 'XLim') get(S.h.specAx, 'YLim')];
+ok = check(abs(diff(lz(1:2)) - diff(lf(1:2))/2) < 1e-6, 'spectrum: zoom around the cursor') && ok;
+ppi_callbacks('option', fig, 'rdLower', 'range');
+S = getappdata(fig, 'ppi');
+xs = get(S.h.specLine, 'XData');  ys = get(S.h.specLine, 'YData');
+[pk, ip] = max(ys);
+ok = check(get(S.h.ui.rdLower, 'Value') == 2 && strcmp(get(get(S.h.specAx, 'XLabel'), 'String'), 'Range [km]') && ...
+           abs(pk - 30) < 0.01 && abs(xs(ip) - (pkBin - 0.5) * rdm.dR_m / 1e3) < 1e-9 && ...
+           ~isempty(strfind(get(S.h.specTitle, 'String'), 'Range profile')), ...
+           'Below map box: the range profile through the Doppler bin of the peak') && ok;
+txt = ppi_callbacks('lowhover', fig, [(pkBin - 0.5) * rdm.dR_m / 1e3, 30]);
+ok = check(~isempty(strfind(txt, 'Doppler bin 20')), 'range profile: data tip of the peak') && ok;
+n = ppi_callbacks('rdpin', fig, 'lower', [(pkBin - 0.5) * rdm.dR_m / 1e3, 30]);
+ok = check(n == 0, 'a click on the pinned point removes the tip') && ok;
+ppi_callbacks('save', fig, fullfile(tempdir, 'ppi_rd_range_test.png'));
+ppi_callbacks('option', fig, 'rdLower', 'spectrum');
+% pause: the map stays (also the data tips use it) until resumed
+ppi_callbacks('pause', fig);
+rdm2 = rdm;  rdm2.t_s = 21.5;
+ppi_update(ppi, sys, 120, 21.5, 2, p, dets, tk, [], [], V, rdm2);
+ppi_callbacks('rdhover', fig, c);
+S = getappdata(fig, 'ppi');
+ok = check(S.data.rd.t_s == rdm.t_s && ~isempty(strfind(get(S.h.rdTitle, 'String'), 'PAUSED')) && ...
+           strcmp(get(S.h.ui.pause, 'String'), 'Resume display'), 'paused: the map is not replaced') && ok;
+ppi_callbacks('pause', fig);
+S = getappdata(fig, 'ppi');
+ok = check(S.data.rd.t_s == 21.5 && isempty(S.pending) && isempty(strfind(get(S.h.rdTitle, 'String'), 'PAUSED')), ...
+           'resume: the newest map') && ok;
 ppi_callbacks('save', fig, fullfile(tempdir, 'ppi_rd_test.png'));
 ppi_callbacks('option', fig, 'beam', 2);
 S = getappdata(fig, 'ppi');

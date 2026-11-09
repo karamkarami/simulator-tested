@@ -491,6 +491,9 @@ cfg.display.beam              = 1;        % beam after the DBF shown by 'dbf', '
                                           % tab (also in the panel: Beam)
 cfg.display.tab               = 'ppi';    % tab at the start: 'ppi', or 'rd' (range-Doppler map of the
                                           % selected beam next to a small PPI; computed only in this tab)
+cfg.display.rdLowerPlot       = 'spectrum'; % range-Doppler tab, the plot below the map: 'spectrum' (Doppler
+                                          % spectrum of a range bin) or 'range' (range profile of a Doppler
+                                          % bin); also in the panel (C receiver: --ppi-rd-plot)
 cfg.display.rdRate_Hz         = 10;       % range-Doppler tab: maps handed to the display per second (C
                                           % receiver, radar_config.bin; MATLAB: at most once per PPI
                                           % refresh). The display redraws at most 25 times a second

@@ -63,6 +63,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QContextMenuEvent>
+#include <QCursor>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QDateTime>
@@ -1568,11 +1569,21 @@ double nice_step(double span, int n)
     return (f < 1.5 ? 1.0 : f < 3.5 ? 2.0 : f < 7.5 ? 5.0 : 10.0) * p;
 }
 
+/* What the plot below the map shows: the Doppler spectrum of one range bin or
+ * the range profile of one Doppler bin (the panel's box; --ppi-rd-plot). */
+enum class RdLower { Spectrum, RangeProfile };
+
 /* The power map of the beam (range x radial velocity, colour = dB above the
  * noise floor of the map, from -3 dB to the strongest cell), the CFAR
  * detections of the beam (white circles), the MTI notch (dashed), and below
- * it the Doppler spectrum (dB) of one range bin: the one under the cursor, or
- * else the bin of the strongest detection (or of the strongest cell). */
+ * it a cut through the map: the Doppler spectrum of one range bin or the range
+ * profile of one Doppler bin, through the cell under the cursor, else the
+ * selected cell (a click), else the strongest detection (or strongest cell).
+ * Both plots zoom (wheel at the cursor; Shift: only the horizontal axis,
+ * Ctrl: only the vertical one; keys + -), pan (drag; arrow keys), reset
+ * (double click; key R), show a data tip of the cell, detection or point under
+ * the cursor and pin it with a click (click it again, or key C: remove). The
+ * view and the data tips stay while new maps arrive. */
 class RdWidget : public QWidget {
 public:
     RdWidget()
@@ -1580,11 +1591,16 @@ public:
         setMouseTracking(true);
         setMinimumSize(300, 250);
         setAttribute(Qt::WA_OpaquePaintEvent);
+        setFocusPolicy(Qt::ClickFocus);
     }
     void setFrame(const RdFrame &f)
     {
+        const bool sameLayout = frame_.valid && f.valid && f.nBins == frame_.nBins && f.nfft == frame_.nfft &&
+                                f.dR_m == frame_.dR_m && f.beam == frame_.beam;
         frame_ = f;
-        if (!frame_.valid) { update(); return; }
+        image_ = QImage();
+        if (!sameLayout) { mapAuto_ = true; lowAuto_ = true; pins_.clear(); selB_ = selD_ = -1; }
+        if (!frame_.valid) { first_ = 0; last_ = -1; update(); return; }
         /* range bins with data, dB above noise, the scale */
         first_ = frame_.nBins; last_ = -1;
         maxDb_ = -1e9;
@@ -1601,66 +1617,226 @@ public:
                 maxDb_ = std::max(maxDb_, x);
             }
         hiDb_ = std::max(20.0, std::ceil(maxDb_ / 5.0) * 5.0);
-        /* the bin of the spectrum without a cursor: strongest detection, else strongest cell */
-        autoBin_ = -1;
+        /* the cut without a cursor or a selection: strongest detection, else strongest cell */
+        autoB_ = autoD_ = -1;
         double best = -1e9;
         for (const Detection &dt : frame_.dets) {
-            const int b = (int)std::floor(dt.range_m / frame_.dR_m);
-            if (b >= 0 && b < frame_.nBins && dt.power > best) { best = dt.power; autoBin_ = b; }
+            const int b = binOf(dt.range_m);
+            if (b >= 0 && b < frame_.nBins && dt.dIdx >= 0 && dt.dIdx < frame_.nfft && dt.power > best) {
+                best = dt.power; autoB_ = b; autoD_ = dt.dIdx;
+            }
         }
-        if (autoBin_ < 0) {
+        if (autoB_ < 0) {
             for (size_t i = 0; i < db_.size(); i++)
-                if (db_[i] == db_[i] && db_[i] > best) { best = db_[i]; autoBin_ = (int)(i % frame_.nBins); }
+                if (db_[i] == db_[i] && db_[i] > best) {
+                    best = db_[i]; autoB_ = (int)(i % frame_.nBins); autoD_ = (int)(i / frame_.nBins);
+                }
         }
-        image_ = QImage();
+        if (hasFrame()) fitViews();
         update();
     }
     const RdFrame &frame() const { return frame_; }
     bool   hasFrame() const { return frame_.valid && last_ >= first_; }
     double maxDb() const { return maxDb_; }
-    int    spectrumBin() const { return cursorBin_ >= 0 ? cursorBin_ : autoBin_; }
+    /* the cut of the lower plot: range bin of the spectrum, Doppler bin of the range profile */
+    int    spectrumBin() const { return curB_ >= 0 ? curB_ : selB_ >= 0 ? selB_ : autoB_; }
+    int    profileBin() const { return curD_ >= 0 ? curD_ : selD_ >= 0 ? selD_ : autoD_; }
+    RdLower lower() const { return lower_; }
+    void   setLower(RdLower m) { if (m != lower_) { lower_ = m; lowAuto_ = true; fitViews(); update(); } }
+    void   setPaused(bool on) { if (on != paused_) { paused_ = on; update(); } }
     QRectF mapRect() const { return mapRect_; }
+    QRectF lowerRect() const { return lowRect_; }
     QString readout() const { return readout_; }
-    /* screen point of a range [m] and Doppler bin (for the tests) */
+    QString tipText() const { return tip_; }            /* the data tip under the cursor (tests) */
+    int    pinCount() const { return (int)pins_.size(); }
+    /* the visible part of the map [range bin, Doppler bin coordinates] and of the lower plot */
+    QRectF mapView() const { return QRectF(QPointF(vx0_, vy0_), QPointF(vx1_, vy1_)); }
+    QRectF lowerView() const { return QRectF(QPointF(lx0_, ly0_), QPointF(lx1_, ly1_)); }
+    /* screen point of a range [m] and Doppler bin (the centre of its row) */
     QPointF screenOf(double range_m, int dBin) const
     {
-        const double x0 = first_ * frame_.dR_m, x1 = (last_ + 1) * frame_.dR_m;
-        return QPointF(mapRect_.left() + (range_m - x0) / (x1 - x0) * mapRect_.width(),
-                       mapRect_.top() + (dBin + 0.5) / frame_.nfft * mapRect_.height());
+        return mapScreen(range_m / frame_.dR_m, dBin + 0.5);
     }
-    void hoverAt(QPointF pos) { updateCursor(pos); }
+    /* screen point of the lower plot at a range bin (range profile) or Doppler bin (spectrum) and a level [dB] */
+    QPointF lowerScreenOf(int bin, double db) const { return lowScreen(lowerX(bin), db); }
+    void hoverAt(QPointF pos) { layoutRects(); updateCursor(pos); }
+    void resetViews() { mapAuto_ = lowAuto_ = true; fitViews(); update(); }
 
 protected:
-    void mouseMoveEvent(QMouseEvent *e) override { updateCursor(event_pos(e)); }
-    void leaveEvent(QEvent *) override { cursorBin_ = -1; readout_.clear(); update(); }
-    void resizeEvent(QResizeEvent *) override { update(); }
+    void mouseMoveEvent(QMouseEvent *e) override;
+    void mousePressEvent(QMouseEvent *e) override;
+    void mouseReleaseEvent(QMouseEvent *e) override;
+    void mouseDoubleClickEvent(QMouseEvent *e) override;
+    void wheelEvent(QWheelEvent *e) override;
+    void keyPressEvent(QKeyEvent *e) override;
+    void contextMenuEvent(QContextMenuEvent *e) override;
+    void leaveEvent(QEvent *) override
+    {
+        curB_ = curD_ = -1; readout_.clear(); tip_.clear(); tipKey_ = -2; QToolTip::hideText(); update();
+    }
+    void resizeEvent(QResizeEvent *) override { image_ = QImage(); update(); }
     void paintEvent(QPaintEvent *) override;
 
 private:
+    struct Pin { int b, d; };                          /* a pinned cell (range bin, Doppler bin) */
+    enum Area { None, Map, Lower };
+
+    int binOf(double range_m) const { return (int)std::floor(range_m / frame_.dR_m); }
+    double dv() const { return frame_.nfft > 1 ? frame_.vel[1] - frame_.vel[0] : 1.0; }
+    /* velocity of a Doppler row coordinate (row d spans [d, d+1)) and back */
+    double velAt(double y) const { return frame_.vel[0] + (y - 0.5) * dv(); }
+    double rowOf(double v) const { return (v - frame_.vel[0]) / dv() + 0.5; }
+    double cellDb(int b, int d) const
+    {
+        return b >= 0 && b < frame_.nBins && d >= 0 && d < frame_.nfft ? db_[(size_t)d * frame_.nBins + b] : NAN;
+    }
+    /* lower plot: x of a bin of the cut (velocity [m/s] of a Doppler bin, or range [km] of a range bin) */
+    double lowerX(int bin) const
+    {
+        return lower_ == RdLower::Spectrum ? frame_.vel[std::max(0, std::min(frame_.nfft - 1, bin))]
+                                           : (bin + 0.5) * frame_.dR_m / 1e3;
+    }
+    void lowerFull(double &x0, double &x1, double &y0, double &y1) const
+    {
+        if (lower_ == RdLower::Spectrum) {
+            const double a = frame_.vel[0], b = frame_.vel[frame_.nfft - 1], h = 0.5 * std::fabs(dv());
+            x0 = std::min(a, b) - h;  x1 = std::max(a, b) + h;
+        } else {
+            x0 = first_ * frame_.dR_m / 1e3;  x1 = (last_ + 1) * frame_.dR_m / 1e3;
+        }
+        y0 = -10.0;  y1 = std::max(10.0, std::ceil((maxDb_ + 3.0) / 5.0) * 5.0);   /* room above the peak */
+    }
+    void fitViews()
+    {
+        if (!hasFrame()) return;
+        const double fx0 = first_, fx1 = last_ + 1.0, fy0 = 0.0, fy1 = frame_.nfft;
+        if (mapAuto_) { vx0_ = fx0; vx1_ = fx1; vy0_ = fy0; vy1_ = fy1; }
+        else clampMap();
+        double a, b, c, d;
+        lowerFull(a, b, c, d);
+        if (lowAuto_) { lx0_ = a; lx1_ = b; ly0_ = c; ly1_ = d; }
+        else clampLower();
+    }
+    static void clampSpan(double &lo, double &hi, double fullLo, double fullHi, double minSpan)
+    {
+        double span = std::max(minSpan, std::min(hi - lo, fullHi - fullLo));
+        const double mid = 0.5 * (lo + hi);
+        lo = mid - 0.5 * span;  hi = mid + 0.5 * span;
+        if (lo < fullLo) { hi += fullLo - lo; lo = fullLo; }
+        if (hi > fullHi) { lo -= hi - fullHi; hi = fullHi; }
+    }
+    void clampMap()
+    {
+        clampSpan(vx0_, vx1_, first_, last_ + 1.0, std::min(4.0, last_ + 1.0 - first_));
+        clampSpan(vy0_, vy1_, 0.0, frame_.nfft, std::min(2.0, (double)frame_.nfft));
+    }
+    void clampLower()
+    {
+        double a, b, c, d;
+        lowerFull(a, b, c, d);
+        const double minX = lower_ == RdLower::Spectrum ? 2.0 * std::fabs(dv()) : 4.0 * frame_.dR_m / 1e3;
+        clampSpan(lx0_, lx1_, a, b, std::min(minX, b - a));
+        clampSpan(ly0_, ly1_, c - 30.0, d + 30.0, 3.0);
+    }
     void layoutRects()
     {
-        const double w = width(), h = height(), left = 64.0, right = 78.0, top = 46.0;
-        const double gap = 46.0, specH = std::max(80.0, 0.28 * h);
-        mapRect_ = QRectF(left, top, std::max(50.0, w - left - right), std::max(50.0, h - top - gap - specH - 30.0));
-        specRect_ = QRectF(left, mapRect_.bottom() + gap, mapRect_.width(), specH);
+        const double w = width(), h = height(), left = 64.0, right = 78.0, top = 50.0;
+        const double gap = 58.0, bottom = 40.0, lowH = std::max(80.0, 0.28 * h);
+        mapRect_ = QRectF(left, top, std::max(50.0, w - left - right), std::max(50.0, h - top - gap - lowH - bottom));
+        lowRect_ = QRectF(left, mapRect_.bottom() + gap, mapRect_.width(), lowH);
     }
-    void updateCursor(QPointF pos)
+    QPointF mapScreen(double x, double y) const
     {
-        layoutRects();
-        cursorBin_ = -1;
-        readout_.clear();
-        if (hasFrame() && mapRect_.contains(pos)) {
-            const double fx = (pos.x() - mapRect_.left()) / mapRect_.width();
-            const int b = std::min(last_, first_ + (int)std::floor(fx * (last_ - first_ + 1)));
-            const int d = std::min(frame_.nfft - 1, (int)std::floor((pos.y() - mapRect_.top()) / mapRect_.height() * frame_.nfft));
-            cursorBin_ = b;
-            const float v = db_[(size_t)d * frame_.nBins + b];
-            readout_ = QStringLiteral("R %1 km   v %2 m/s   %3")
-                           .arg((b + 0.5) * frame_.dR_m / 1e3, 0, 'f', 2).arg(frame_.vel[d], 0, 'f', 1)
-                           .arg(v == v ? QStringLiteral("%1 dB above noise").arg(v, 0, 'f', 1) : QStringLiteral("no cell"));
-        }
-        update();
+        return QPointF(mapRect_.left() + (x - vx0_) / (vx1_ - vx0_) * mapRect_.width(),
+                       mapRect_.top() + (y - vy0_) / (vy1_ - vy0_) * mapRect_.height());
     }
+    QPointF mapData(QPointF s) const
+    {
+        return QPointF(vx0_ + (s.x() - mapRect_.left()) / mapRect_.width() * (vx1_ - vx0_),
+                       vy0_ + (s.y() - mapRect_.top()) / mapRect_.height() * (vy1_ - vy0_));
+    }
+    QPointF lowScreen(double x, double y) const
+    {
+        return QPointF(lowRect_.left() + (x - lx0_) / (lx1_ - lx0_) * lowRect_.width(),
+                       lowRect_.bottom() - (y - ly0_) / (ly1_ - ly0_) * lowRect_.height());
+    }
+    QPointF lowData(QPointF s) const
+    {
+        return QPointF(lx0_ + (s.x() - lowRect_.left()) / lowRect_.width() * (lx1_ - lx0_),
+                       ly0_ + (lowRect_.bottom() - s.y()) / lowRect_.height() * (ly1_ - ly0_));
+    }
+    Area areaAt(QPointF pos) const
+    {
+        if (!hasFrame()) return None;
+        return mapRect_.contains(pos) ? Map : lowRect_.contains(pos) ? Lower : None;
+    }
+    /* the points of the lower plot: (x, dB, bin) of the cut, sorted by x */
+    struct LowPoint { double x, db; int bin; };
+    std::vector<LowPoint> lowerPoints() const
+    {
+        std::vector<LowPoint> pts;
+        if (lower_ == RdLower::Spectrum) {
+            const int sb = spectrumBin();
+            if (sb < first_ || sb > last_) return pts;
+            for (int d = 0; d < frame_.nfft; d++) {
+                const double v = cellDb(sb, d);
+                if (v == v) pts.push_back({ lowerX(d), v, d });
+            }
+        } else {
+            const int pd = profileBin();
+            if (pd < 0 || pd >= frame_.nfft) return pts;
+            for (int b = first_; b <= last_; b++) {
+                const double v = cellDb(b, pd);
+                if (v == v) pts.push_back({ lowerX(b), v, b });
+            }
+        }
+        std::sort(pts.begin(), pts.end(), [](const LowPoint &a, const LowPoint &b) { return a.x < b.x; });
+        return pts;
+    }
+    /* the cell of a bin of the lower plot */
+    Pin lowerCell(int bin) const
+    {
+        return lower_ == RdLower::Spectrum ? Pin{ spectrumBin(), bin } : Pin{ bin, profileBin() };
+    }
+    const Detection *detectionAt(QPointF pos) const
+    {
+        const Detection *best = nullptr;
+        double bestD = 8.0;
+        for (const Detection &dt : frame_.dets) {
+            const QPointF d = screenOf(dt.range_m, dt.dIdx) - pos;
+            const double dist = std::hypot(d.x(), d.y());
+            if (dist <= bestD) { bestD = dist; best = &dt; }
+        }
+        return best;
+    }
+    const Detection *detectionOf(int b, int d) const
+    {
+        for (const Detection &dt : frame_.dets)
+            if (binOf(dt.range_m) == b && dt.dIdx == d) return &dt;
+        return nullptr;
+    }
+    /* data tip of a cell (with its detection, if any) */
+    QString cellText(int b, int d, bool html) const
+    {
+        const double v = cellDb(b, d);
+        QStringList rows;
+        const Detection *dt = detectionOf(b, d);
+        rows << (dt ? QStringLiteral("CFAR detection, %1 pulse").arg(dt->pulse == PULSE_LONG ? "long" : "short")
+                    : QStringLiteral("Range-Doppler cell"))
+             << QStringLiteral("Range: %1 km").arg((b + 0.5) * frame_.dR_m / 1e3, 0, 'f', 3)
+             << QStringLiteral("Radial velocity: %1 m/s").arg(frame_.vel[d], 0, 'f', 2)
+             << (v == v ? QStringLiteral("Power: %1 dB above noise").arg(v, 0, 'f', 1) : QStringLiteral("Power: no cell"));
+        if (dt) rows << QStringLiteral("SNR: %1 dB").arg(dt->snr_dB, 0, 'f', 1);
+        rows << QStringLiteral("Range bin %1, Doppler bin %2").arg(b).arg(d);
+        if (html) rows[0] = QStringLiteral("<b>%1</b>").arg(rows[0]);
+        return rows.join(html ? QStringLiteral("<br>") : QStringLiteral("\n"));
+    }
+    void updateCursor(QPointF pos);
+    void zoomAt(Area a, QPointF pos, double fx, double fy);
+    void panBy(Area a, QPointF pixels);
+    void togglePin(QPointF pos);
+    void drawPins(QPainter &p) const;
+    void drawLower(QPainter &p, const QFontMetrics &fm);
     static QRgb colour_db(double x, double lo, double hi)
     {
         const int i = 1 + (int)std::lround(std::max(0.0, std::min(1.0, (x - lo) / (hi - lo))) * 254.0);
@@ -1669,12 +1845,329 @@ private:
 
     RdFrame            frame_;
     std::vector<float> db_;
-    int                first_ = 0, last_ = -1, autoBin_ = -1, cursorBin_ = -1;
+    int                first_ = 0, last_ = -1, autoB_ = -1, autoD_ = -1;
+    int                curB_ = -1, curD_ = -1;       /* the cell under the cursor (map) */
+    int                selB_ = -1, selD_ = -1;       /* the selected cell (click on the map) */
     double             maxDb_ = 0.0, hiDb_ = 20.0;
+    double             vx0_ = 0, vx1_ = 1, vy0_ = 0, vy1_ = 1;     /* map view: range bins, Doppler rows */
+    double             lx0_ = 0, lx1_ = 1, ly0_ = 0, ly1_ = 1;     /* lower plot view: x, dB */
+    bool               mapAuto_ = true, lowAuto_ = true, paused_ = false;
+    RdLower            lower_ = RdLower::Spectrum;
+    std::vector<Pin>   pins_;
     QImage             image_;
-    QRectF             mapRect_, specRect_;
-    QString            readout_;
+    QRectF             mapRect_, lowRect_;
+    QString            readout_, tip_;
+    long long          tipKey_ = -2;                 /* what the shown data tip belongs to */
+    Area               dragArea_ = None;
+    QPointF            pressPos_, lastPos_;
+    bool               dragging_ = false;
 };
+
+void RdWidget::updateCursor(QPointF pos)
+{
+    curB_ = curD_ = -1;
+    readout_.clear();
+    QString tip;
+    long long key = -2;
+    const Area a = areaAt(pos);
+    if (a == Map) {
+        const QPointF q = mapData(pos);
+        const int b = std::max(first_, std::min(last_, (int)std::floor(q.x())));
+        const int d = std::max(0, std::min(frame_.nfft - 1, (int)std::floor(q.y())));
+        curB_ = b;  curD_ = d;
+        const double v = cellDb(b, d);
+        readout_ = QStringLiteral("R %1 km   v %2 m/s   %3")
+                       .arg((b + 0.5) * frame_.dR_m / 1e3, 0, 'f', 2).arg(frame_.vel[d], 0, 'f', 1)
+                       .arg(v == v ? QStringLiteral("%1 dB above noise").arg(v, 0, 'f', 1) : QStringLiteral("no cell"));
+        if (const Detection *dt = detectionAt(pos)) {
+            tip = cellText(binOf(dt->range_m), dt->dIdx, true);
+            key = (long long)binOf(dt->range_m) * 4096 + dt->dIdx;
+        } else {
+            tip = cellText(b, d, true);
+            key = (long long)b * 4096 + d;
+        }
+    } else if (a == Lower) {
+        const std::vector<LowPoint> pts = lowerPoints();
+        double bestD = 1e18;
+        const LowPoint *best = nullptr;
+        for (const LowPoint &pt : pts) {
+            const double dist = std::fabs(lowScreen(pt.x, pt.db).x() - pos.x());
+            if (dist < bestD) { bestD = dist; best = &pt; }
+        }
+        if (best && bestD < 12.0) {
+            const Pin c = lowerCell(best->bin);
+            tip = cellText(c.b, c.d, true);
+            key = -100 - ((long long)c.b * 4096 + c.d);
+        }
+    }
+    tip_ = tip;
+    if (key != tipKey_) {
+        tipKey_ = key;
+        if (!tip.isEmpty()) QToolTip::showText(mapToGlobal(pos.toPoint()), tip, this);
+        else QToolTip::hideText();
+    }
+    update();
+}
+
+void RdWidget::zoomAt(Area a, QPointF pos, double fx, double fy)
+{
+    if (a == Map) {
+        const QPointF c = mapData(pos);
+        vx0_ = c.x() - (c.x() - vx0_) / fx;  vx1_ = c.x() + (vx1_ - c.x()) / fx;
+        vy0_ = c.y() - (c.y() - vy0_) / fy;  vy1_ = c.y() + (vy1_ - c.y()) / fy;
+        mapAuto_ = false;
+        clampMap();
+        image_ = QImage();
+    } else if (a == Lower) {
+        const QPointF c = lowData(pos);
+        lx0_ = c.x() - (c.x() - lx0_) / fx;  lx1_ = c.x() + (lx1_ - c.x()) / fx;
+        ly0_ = c.y() - (c.y() - ly0_) / fy;  ly1_ = c.y() + (ly1_ - c.y()) / fy;
+        lowAuto_ = false;
+        clampLower();
+    }
+    update();
+}
+
+void RdWidget::panBy(Area a, QPointF px)
+{
+    if (a == Map) {
+        const double dx = -px.x() / mapRect_.width() * (vx1_ - vx0_), dy = -px.y() / mapRect_.height() * (vy1_ - vy0_);
+        vx0_ += dx; vx1_ += dx; vy0_ += dy; vy1_ += dy;
+        mapAuto_ = false;
+        clampMap();
+        image_ = QImage();
+    } else if (a == Lower) {
+        const double dx = -px.x() / lowRect_.width() * (lx1_ - lx0_), dy = px.y() / lowRect_.height() * (ly1_ - ly0_);
+        lx0_ += dx; lx1_ += dx; ly0_ += dy; ly1_ += dy;
+        lowAuto_ = false;
+        clampLower();
+    }
+    update();
+}
+
+/* click: pin the data tip of the cell, detection or lower-plot point (again: remove it);
+ * a click on the map also selects the cell for the lower plot */
+void RdWidget::togglePin(QPointF pos)
+{
+    Pin c{ -1, -1 };
+    const Area a = areaAt(pos);
+    if (a == Map) {
+        if (const Detection *dt = detectionAt(pos)) c = Pin{ binOf(dt->range_m), dt->dIdx };
+        else {
+            const QPointF q = mapData(pos);
+            c = Pin{ std::max(first_, std::min(last_, (int)std::floor(q.x()))),
+                     std::max(0, std::min(frame_.nfft - 1, (int)std::floor(q.y()))) };
+        }
+        selB_ = c.b;  selD_ = c.d;
+    } else if (a == Lower) {
+        double bestD = 12.0;
+        for (const LowPoint &pt : lowerPoints()) {
+            const double dist = std::fabs(lowScreen(pt.x, pt.db).x() - pos.x());
+            if (dist < bestD) { bestD = dist; c = lowerCell(pt.bin); }
+        }
+    }
+    if (c.b < 0 || c.d < 0) return;
+    auto it = std::find_if(pins_.begin(), pins_.end(), [&c](const Pin &p) { return p.b == c.b && p.d == c.d; });
+    if (it != pins_.end()) pins_.erase(it);
+    else pins_.push_back(c);
+    update();
+}
+
+void RdWidget::mousePressEvent(QMouseEvent *e)
+{
+    if (e->button() != Qt::LeftButton) return;
+    pressPos_ = lastPos_ = event_pos(e);
+    dragArea_ = areaAt(pressPos_);
+    dragging_ = false;
+}
+
+void RdWidget::mouseMoveEvent(QMouseEvent *e)
+{
+    const QPointF pos = event_pos(e);
+    if ((e->buttons() & Qt::LeftButton) && dragArea_ != None) {
+        if (!dragging_ && std::hypot(pos.x() - pressPos_.x(), pos.y() - pressPos_.y()) > 3.0) dragging_ = true;
+        if (dragging_) {
+            panBy(dragArea_, pos - lastPos_);
+            lastPos_ = pos;
+            setCursor(Qt::ClosedHandCursor);
+            return;
+        }
+    }
+    updateCursor(pos);
+}
+
+void RdWidget::mouseReleaseEvent(QMouseEvent *e)
+{
+    if (e->button() != Qt::LeftButton) return;
+    if (!dragging_ && dragArea_ != None) togglePin(event_pos(e));
+    dragging_ = false;
+    dragArea_ = None;
+    unsetCursor();
+    updateCursor(event_pos(e));                       /* the readout and the cut at the new position */
+}
+
+void RdWidget::mouseDoubleClickEvent(QMouseEvent *e)
+{
+    const Area a = areaAt(event_pos(e));
+    if (a == Map) mapAuto_ = true;
+    else if (a == Lower) lowAuto_ = true;
+    else return;
+    image_ = QImage();
+    fitViews();
+    update();
+}
+
+void RdWidget::wheelEvent(QWheelEvent *e)
+{
+    const QPointF pos = event_pos(e);
+    const Area a = areaAt(pos);
+    if (a == None) { e->ignore(); return; }
+    const double steps = e->angleDelta().y() / 120.0;
+    if (steps == 0.0) return;
+    const double f = std::pow(1.25, steps);
+    const bool onlyX = e->modifiers() & Qt::ShiftModifier, onlyY = e->modifiers() & Qt::ControlModifier;
+    zoomAt(a, pos, onlyY ? 1.0 : f, onlyX ? 1.0 : f);
+    e->accept();
+}
+
+void RdWidget::keyPressEvent(QKeyEvent *e)
+{
+    if (!hasFrame()) { QWidget::keyPressEvent(e); return; }
+    const QPointF mid = mapRect_.center(), lmid = lowRect_.center();
+    const QPoint local = mapFromGlobal(QCursor::pos());
+    const Area a = areaAt(local) == Lower ? Lower : Map;      /* the plot under the cursor, else the map */
+    const QPointF c = a == Lower ? lmid : mid;
+    const double step = 40.0;
+    switch (e->key()) {
+    case Qt::Key_Plus: case Qt::Key_Equal: zoomAt(a, c, 1.5, 1.5); break;
+    case Qt::Key_Minus:                    zoomAt(a, c, 1.0 / 1.5, 1.0 / 1.5); break;
+    case Qt::Key_Left:  panBy(a, QPointF(step, 0.0)); break;
+    case Qt::Key_Right: panBy(a, QPointF(-step, 0.0)); break;
+    case Qt::Key_Up:    panBy(a, QPointF(0.0, step)); break;
+    case Qt::Key_Down:  panBy(a, QPointF(0.0, -step)); break;
+    case Qt::Key_R: case Qt::Key_Home: resetViews(); break;
+    case Qt::Key_C:     pins_.clear(); selB_ = selD_ = -1; update(); break;
+    default: QWidget::keyPressEvent(e); return;
+    }
+}
+
+void RdWidget::contextMenuEvent(QContextMenuEvent *e)
+{
+    QMenu menu(this);
+    QObject::connect(menu.addAction(QStringLiteral("Reset zoom (R, double click)")), &QAction::triggered,
+                     [this]() { resetViews(); });
+    QObject::connect(menu.addAction(QStringLiteral("Remove data tips and selection (C)")), &QAction::triggered,
+                     [this]() { pins_.clear(); selB_ = selD_ = -1; update(); });
+    QAction *spec = menu.addAction(QStringLiteral("Lower plot: Doppler spectrum"));
+    QAction *prof = menu.addAction(QStringLiteral("Lower plot: range profile"));
+    spec->setCheckable(true);  spec->setChecked(lower_ == RdLower::Spectrum);
+    prof->setCheckable(true);  prof->setChecked(lower_ == RdLower::RangeProfile);
+    QObject::connect(spec, &QAction::triggered, [this]() { setLower(RdLower::Spectrum); });
+    QObject::connect(prof, &QAction::triggered, [this]() { setLower(RdLower::RangeProfile); });
+    menu.exec(e->globalPos());
+}
+
+void RdWidget::drawPins(QPainter &p) const
+{
+    const QFont font = pixel_font(this->font(), 11);
+    const QFontMetrics fm(font);
+    p.setFont(font);
+    for (const Pin &pin : pins_) {
+        const QStringList rows = cellText(pin.b, pin.d, false).split(QChar('\n'));
+        int w = 0;
+        for (const QString &r : rows) w = std::max(w, fm.horizontalAdvance(r));
+        const double rowH = fm.height(), boxW = w + 12.0, boxH = rows.size() * rowH + 8.0;
+        auto box_at = [&](QPointF s, const QRectF &area) {
+            QRectF box(s.x() + 12.0, s.y() + 8.0, boxW, boxH);
+            if (box.right() > width()) box.moveRight(s.x() - 12.0);
+            if (box.bottom() > area.bottom() + 30.0) box.moveBottom(s.y() - 8.0);
+            p.setPen(QPen(kColorPin, 1.5));
+            p.setBrush(Qt::NoBrush);
+            p.drawRect(QRectF(s.x() - 6.0, s.y() - 6.0, 12.0, 12.0));
+            p.drawLine(s, box.topLeft());
+            p.setBrush(QColor(10, 40, 10, 225));
+            p.drawRect(box);
+            p.setPen(Qt::white);
+            for (int i = 0; i < rows.size(); ++i)
+                p.drawText(QPointF(box.left() + 6.0, box.top() + 4.0 + fm.ascent() + i * rowH), rows[i]);
+        };
+        /* on the map, when the cell is in view */
+        const QPointF s = mapScreen(pin.b + 0.5, pin.d + 0.5);
+        if (mapRect_.contains(s)) box_at(s, mapRect_);
+        /* on the lower plot, when the cut passes the cell */
+        const bool onCut = lower_ == RdLower::Spectrum ? pin.b == spectrumBin() : pin.d == profileBin();
+        const double v = cellDb(pin.b, pin.d);
+        if (onCut && v == v) {
+            const QPointF q = lowScreen(lowerX(lower_ == RdLower::Spectrum ? pin.d : pin.b), v);
+            if (lowRect_.contains(q)) box_at(q, lowRect_);
+        }
+    }
+}
+
+void RdWidget::drawLower(QPainter &p, const QFontMetrics &fm)
+{
+    const bool spec = lower_ == RdLower::Spectrum;
+    const int sb = spectrumBin(), pd = profileBin();
+    p.setPen(kColorLabel);
+    const QString where = curB_ >= 0 ? QStringLiteral("cursor") : (selB_ >= 0 ? QStringLiteral("selected cell")
+                                                                               : QStringLiteral("strongest peak"));
+    const QString title = spec
+        ? QStringLiteral("Doppler spectrum at %1 km (range bin %2, %3); circles: detections")
+              .arg((sb + 0.5) * frame_.dR_m / 1e3, 0, 'f', 2).arg(sb).arg(where)
+        : QStringLiteral("Range profile at %1 m/s (Doppler bin %2, %3); circles: detections")
+              .arg(pd >= 0 && pd < frame_.nfft ? frame_.vel[pd] : 0.0, 0, 'f', 1).arg(pd).arg(where);
+    p.drawText(QPointF(lowRect_.left(), lowRect_.top() - 7), fm.elidedText(title, Qt::ElideRight, (int)lowRect_.width() + 40));
+    /* grid, ticks and labels of both axes */
+    const double xs = nice_step(lx1_ - lx0_, 8), ys = nice_step(ly1_ - ly0_, 5);
+    for (double x = std::ceil(lx0_ / xs) * xs; x <= lx1_ + 1e-9; x += xs) {
+        const double sx = lowScreen(x, ly0_).x();
+        p.setPen(QPen(kColorGrid, 1.0, Qt::DotLine));
+        p.drawLine(QPointF(sx, lowRect_.top()), QPointF(sx, lowRect_.bottom()));
+        p.setPen(kColorLabel);
+        p.drawLine(QPointF(sx, lowRect_.bottom()), QPointF(sx, lowRect_.bottom() + 4));
+        const QString t = QString::number(std::fabs(x) < 1e-9 ? 0.0 : x, 'g', 5);
+        p.drawText(QPointF(sx - fm.horizontalAdvance(t) / 2.0, lowRect_.bottom() + 16), t);
+    }
+    for (double y = std::ceil(ly0_ / ys) * ys; y <= ly1_ + 1e-9; y += ys) {
+        const double sy = lowScreen(lx0_, y).y();
+        p.setPen(QPen(kColorGrid, 1.0, Qt::DotLine));
+        p.drawLine(QPointF(lowRect_.left(), sy), QPointF(lowRect_.right(), sy));
+        p.setPen(kColorLabel);
+        p.drawLine(QPointF(lowRect_.left() - 4, sy), QPointF(lowRect_.left(), sy));
+        const QString t = QString::number(std::fabs(y) < 1e-9 ? 0.0 : y, 'g', 4);
+        p.drawText(QPointF(lowRect_.left() - 8 - fm.horizontalAdvance(t), sy + 4), t);
+    }
+    const QString xl = spec ? QStringLiteral("Radial velocity [m/s]") : QStringLiteral("Range [km]");
+    p.drawText(QPointF(lowRect_.center().x() - fm.horizontalAdvance(xl) / 2.0, lowRect_.bottom() + 31), xl);
+    const QString yl = QStringLiteral("Power [dB above noise]");
+    p.save();
+    p.translate(14, lowRect_.center().y() + fm.horizontalAdvance(yl) / 2.0);
+    p.rotate(-90);
+    p.drawText(QPointF(0, 0), yl);
+    p.restore();
+    p.setPen(QPen(kColorRim, 1.0));
+    p.setBrush(Qt::NoBrush);
+    p.drawRect(lowRect_);
+    /* the curve and the detections on it */
+    const std::vector<LowPoint> pts = lowerPoints();
+    p.save();
+    p.setClipRect(lowRect_);
+    QPainterPath path;
+    for (size_t i = 0; i < pts.size(); i++) {
+        const QPointF q = lowScreen(pts[i].x, pts[i].db);
+        if (i == 0) path.moveTo(q); else path.lineTo(q);
+    }
+    p.setPen(QPen(QColor(0, 230, 255), 1.5));
+    p.drawPath(path);
+    p.setPen(QPen(Qt::white, 1.5));
+    for (const Detection &dt : frame_.dets) {
+        const int b = binOf(dt.range_m);
+        if (spec ? b != sb : dt.dIdx != pd) continue;
+        const double v = cellDb(b, dt.dIdx);
+        if (v == v) p.drawEllipse(lowScreen(lowerX(spec ? dt.dIdx : b), v), 5.0, 5.0);
+    }
+    p.restore();
+}
 
 void RdWidget::paintEvent(QPaintEvent *)
 {
@@ -1685,89 +2178,101 @@ void RdWidget::paintEvent(QPaintEvent *)
     const QFontMetrics fm(small);
     p.setFont(title);
     p.setPen(Qt::white);
+    const QString pause = paused_ ? QStringLiteral("   [PAUSED]") : QString();
     if (!hasFrame()) {
-        p.drawText(QPointF(16.0, 26.0), frame_.valid ? QStringLiteral("Range-Doppler map: no range cell yet")
-                                                     : QStringLiteral("Range-Doppler map: waiting for a CPI update of %1 ...")
-                                                           .arg(beam_text(g_beam.load())));
+        p.drawText(QPointF(16.0, 26.0), (frame_.valid ? QStringLiteral("Range-Doppler map: no range cell yet")
+                                                      : QStringLiteral("Range-Doppler map: waiting for a CPI update of %1 ...")
+                                                            .arg(beam_text(g_beam.load()))) + pause);
         return;
     }
     const int textW = std::max(50, width() - 24);              /* long lines are cut with "..." */
     p.drawText(QPointF(16.0, 22.0), QFontMetrics(title).elidedText(
-                   QStringLiteral("Range-Doppler map, %1   t = %2 s   az %3   peak %4 dB above noise")
+                   QStringLiteral("Range-Doppler map, %1   t = %2 s   az %3   peak %4 dB above noise%5")
                        .arg(beam_text(frame_.beam)).arg(frame_.time_s, 0, 'f', 2)
-                       .arg(deg_text(frame_.az_deg, 1)).arg(maxDb_, 0, 'f', 1), Qt::ElideRight, textW));
+                       .arg(deg_text(frame_.az_deg, 1)).arg(maxDb_, 0, 'f', 1).arg(pause), Qt::ElideRight, textW));
     p.setFont(small);
     p.setPen(kColorLabel);
-    p.drawText(QPointF(16.0, 38.0), fm.elidedText(readout_.isEmpty() ? QStringLiteral("hover: range, velocity and power of a cell; "
-                                                                                      "the spectrum below follows the cursor")
-                                                                     : readout_, Qt::ElideRight, textW));
-    const int nB = last_ - first_ + 1, nfft = frame_.nfft;
+    p.drawText(QPointF(16.0, 40.0), fm.elidedText(readout_.isEmpty()
+                       ? QStringLiteral("wheel: zoom (Shift: range / x only, Ctrl: velocity / y only)   drag: pan   "
+                                        "double click: reset   hover: data tip   click: pin, select the cut   C: remove tips")
+                       : readout_, Qt::ElideRight, textW));
+    const int nfft = frame_.nfft;
     const double lo = -3.0, hi = hiDb_;
-    const int W = std::max(1, std::min(nB, (int)mapRect_.width()));
-    if (image_.isNull() || image_.width() != W) {
-        /* one column per pixel (at most one per range bin), scaled when drawn; a
-         * column shows the largest of its range bins, so a peak of one bin stays */
-        image_ = QImage(W, nfft, QImage::Format_RGB32);
-        for (int d = 0; d < nfft; d++) {
-            QRgb *line = reinterpret_cast<QRgb *>(image_.scanLine(d));
-            const float *row = &db_[(size_t)d * frame_.nBins + first_];
+    const int W = std::max(1, (int)mapRect_.width()), H = std::max(1, (int)mapRect_.height());
+    if (image_.isNull() || image_.width() != W || image_.height() != H) {
+        /* one pixel per pixel of the view; a pixel shows the largest of its range bins
+         * (a peak of one range bin stays visible when zoomed out) */
+        image_ = QImage(W, H, QImage::Format_RGB32);
+        std::vector<int> b0(W), b1(W);
+        const double sx = (vx1_ - vx0_) / W;
+        for (int c = 0; c < W; c++) {
+            const double xa = vx0_ + c * sx, xb = xa + sx;
+            b0[c] = std::max(first_, std::min(last_, (int)std::floor(xa)));
+            b1[c] = std::max(b0[c] + 1, std::min(last_ + 1, (int)std::ceil(xb - 1e-9)));
+        }
+        for (int r = 0; r < H; r++) {
+            const int d = std::max(0, std::min(nfft - 1, (int)std::floor(vy0_ + (r + 0.5) / H * (vy1_ - vy0_))));
+            QRgb *line = reinterpret_cast<QRgb *>(image_.scanLine(r));
+            const float *row = &db_[(size_t)d * frame_.nBins];
             for (int c = 0; c < W; c++) {
-                const int b0 = (int)((long long)c * nB / W), b1 = std::max(b0 + 1, (int)((long long)(c + 1) * nB / W));
                 float v = NAN;
-                for (int b = b0; b < b1; b++) if (row[b] == row[b] && !(row[b] <= v)) v = row[b];
+                for (int b = b0[c]; b < b1[c]; b++) if (row[b] == row[b] && !(row[b] <= v)) v = row[b];
                 line[c] = v == v ? colour_db(v, lo, hi) : qRgb(0, 0, 0);
             }
         }
     }
-    p.drawImage(mapRect_, image_);
+    p.drawImage(mapRect_.topLeft(), image_);
+    p.save();
+    p.setClipRect(mapRect_);
     p.setRenderHint(QPainter::Antialiasing, true);
     /* MTI notch: the Doppler bins around zero that the CFAR does not test */
     const int z = nfft / 2;
     p.setPen(QPen(QColor(200, 200, 200), 1.0, Qt::DashLine));
     for (int e : { z - frame_.notchBins, z + frame_.notchBins + 1 }) {
-        const double y = mapRect_.top() + (double)e / nfft * mapRect_.height();
+        const double y = mapScreen(vx0_, e).y();
         p.drawLine(QPointF(mapRect_.left(), y), QPointF(mapRect_.right(), y));
     }
     /* detections of the beam */
     p.setPen(QPen(Qt::white, 1.5));
     p.setBrush(Qt::NoBrush);
-    for (const Detection &dt : frame_.dets) {
-        const QPointF c = screenOf(dt.range_m, dt.dIdx);
-        if (mapRect_.adjusted(-4, -4, 4, 4).contains(c)) p.drawEllipse(c, 6.0, 6.0);
-    }
-    /* the range bin of the spectrum */
-    const int sb = spectrumBin();
-    if (sb >= first_ && sb <= last_) {
-        const double x = mapRect_.left() + (sb - first_ + 0.5) / nB * mapRect_.width();
-        p.setPen(QPen(QColor(255, 255, 255, 120), 1.0, Qt::DotLine));
+    for (const Detection &dt : frame_.dets) p.drawEllipse(screenOf(dt.range_m, dt.dIdx), 6.0, 6.0);
+    /* the cut of the lower plot */
+    p.setPen(QPen(QColor(255, 255, 255, 120), 1.0, Qt::DotLine));
+    if (lower_ == RdLower::Spectrum) {
+        const double x = mapScreen(spectrumBin() + 0.5, 0).x();
         p.drawLine(QPointF(x, mapRect_.top()), QPointF(x, mapRect_.bottom()));
+    } else {
+        const double y = mapScreen(0, profileBin() + 0.5).y();
+        p.drawLine(QPointF(mapRect_.left(), y), QPointF(mapRect_.right(), y));
     }
+    p.restore();
     /* axes: range (km) below, radial velocity (m/s) left; frame */
     p.setPen(QPen(kColorRim, 1.0));
     p.drawRect(mapRect_);
-    const double r0 = first_ * frame_.dR_m / 1e3, r1 = (last_ + 1) * frame_.dR_m / 1e3;
+    const double r0 = vx0_ * frame_.dR_m / 1e3, r1 = vx1_ * frame_.dR_m / 1e3;
     const double rs = nice_step(r1 - r0, 8);
     p.setPen(kColorLabel);
     for (double r = std::ceil(r0 / rs) * rs; r <= r1 + 1e-9; r += rs) {
         const double x = mapRect_.left() + (r - r0) / (r1 - r0) * mapRect_.width();
         p.drawLine(QPointF(x, mapRect_.bottom()), QPointF(x, mapRect_.bottom() + 4));
-        const QString t = QString::number(r, 'g', 4);
+        const QString t = QString::number(r, 'g', 5);
         p.drawText(QPointF(x - fm.horizontalAdvance(t) / 2.0, mapRect_.bottom() + 16), t);
     }
-    p.drawText(QPointF(mapRect_.center().x() - 30, mapRect_.bottom() + 31), QStringLiteral("Range [km]"));
-    const double v0 = frame_.vel[0], v1 = frame_.vel[nfft - 1];   /* top: +v (away), bottom: -v */
-    const double vs = nice_step(std::fabs(v0 - v1), 8);
-    for (double v = std::ceil(std::min(v0, v1) / vs) * vs; v <= std::max(v0, v1) + 1e-9; v += vs) {
-        const double y = mapRect_.top() + (v0 - v) / (v0 - v1) * (mapRect_.height() * (nfft - 1.0) / nfft)
-                         + 0.5 * mapRect_.height() / nfft;
+    const QString rl = QStringLiteral("Range [km]");
+    p.drawText(QPointF(mapRect_.center().x() - fm.horizontalAdvance(rl) / 2.0, mapRect_.bottom() + 31), rl);
+    const double vTop = velAt(vy0_), vBot = velAt(vy1_);
+    const double vs = nice_step(std::fabs(vTop - vBot), 8);
+    for (double v = std::ceil(std::min(vTop, vBot) / vs) * vs; v <= std::max(vTop, vBot) + 1e-9; v += vs) {
+        const double y = mapScreen(vx0_, rowOf(v)).y();
         p.drawLine(QPointF(mapRect_.left() - 4, y), QPointF(mapRect_.left(), y));
-        const QString t = QString::number(v, 'f', 0);
+        const QString t = QString::number(std::fabs(v) < 1e-9 ? 0.0 : v, 'g', 4);
         p.drawText(QPointF(mapRect_.left() - 8 - fm.horizontalAdvance(t), y + 4), t);
     }
+    const QString vl = QStringLiteral("Radial velocity [m/s]");
     p.save();
-    p.translate(14, mapRect_.center().y() + 50);
+    p.translate(14, mapRect_.center().y() + fm.horizontalAdvance(vl) / 2.0);
     p.rotate(-90);
-    p.drawText(QPointF(0, 0), QStringLiteral("Radial velocity [m/s]"));
+    p.drawText(QPointF(0, 0), vl);
     p.restore();
     /* colour bar */
     const QRectF bar(mapRect_.right() + 14, mapRect_.top(), 14, mapRect_.height());
@@ -1783,39 +2288,10 @@ void RdWidget::paintEvent(QPaintEvent *)
         p.drawText(QPointF(bar.right() + 4, y + 4), QString::number(x, 'f', 0));
     }
     p.drawText(QPointF(bar.right() + 4, bar.bottom() + 14), QStringLiteral("dB"));
-    /* Doppler spectrum of the selected range bin */
-    p.setPen(QPen(kColorRim, 1.0));
-    p.drawRect(specRect_);
-    if (sb >= first_ && sb <= last_) {
-        const double sLo = -10.0, sHi = std::max(hi, 10.0);
-        auto yOf = [&](double x) { return specRect_.bottom() - (std::max(sLo, std::min(sHi, x)) - sLo) / (sHi - sLo) * specRect_.height(); };
-        p.setPen(QPen(kColorGrid, 1.0, Qt::DashLine));
-        for (double x = 0; x <= sHi; x += nice_step(sHi - sLo, 4)) p.drawLine(QPointF(specRect_.left(), yOf(x)), QPointF(specRect_.right(), yOf(x)));
-        QPainterPath path;
-        bool started = false;
-        for (int d = nfft - 1; d >= 0; d--) {                /* x: velocity from -v (left) to +v (right) */
-            const float v = db_[(size_t)d * frame_.nBins + sb];
-            if (v != v) continue;
-            const QPointF q(specRect_.left() + (nfft - 1 - d + 0.5) / nfft * specRect_.width(), yOf(v));
-            if (!started) { path.moveTo(q); started = true; } else path.lineTo(q);
-        }
-        p.setPen(QPen(QColor(0, 230, 255), 1.5));
-        p.drawPath(path);
-        p.setPen(QPen(Qt::white, 1.5));
-        for (const Detection &dt : frame_.dets)
-            if ((int)std::floor(dt.range_m / frame_.dR_m) == sb) {
-                const float v = db_[(size_t)dt.dIdx * frame_.nBins + sb];
-                if (v == v) p.drawEllipse(QPointF(specRect_.left() + (nfft - 1 - dt.dIdx + 0.5) / nfft * specRect_.width(), yOf(v)), 5.0, 5.0);
-            }
-        p.setPen(kColorLabel);
-        p.drawText(QPointF(specRect_.left(), specRect_.top() - 6), fm.elidedText(
-                   QStringLiteral("Doppler spectrum at %1 km (%2) [dB above noise]; velocity -%3 ... +%3 m/s, circles: detections")
-                       .arg((sb + 0.5) * frame_.dR_m / 1e3, 0, 'f', 2)
-                       .arg(cursorBin_ >= 0 ? QStringLiteral("cursor") : QStringLiteral("strongest peak"))
-                       .arg(std::fabs(v0), 0, 'f', 0), Qt::ElideRight, (int)specRect_.width() + 40));
-        for (double x = 0; x <= sHi; x += nice_step(sHi - sLo, 4))
-            p.drawText(QPointF(specRect_.right() + 4, yOf(x) + 4), QString::number(x, 'f', 0));
-    }
+    /* the lower plot: Doppler spectrum or range profile through the cut */
+    p.setRenderHint(QPainter::Antialiasing, true);
+    drawLower(p, fm);
+    drawPins(p);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1874,6 +2350,19 @@ public:
         tracks_->setChecked(ppi_->showTracks());
         v->addWidget(tracks_);
         QObject::connect(tracks_, &QCheckBox::toggled, [this](bool on) { ppi_->setShowTracks(on); ppi_->setFocus(); });
+        QLabel *lowerLabel = new QLabel(QStringLiteral("Range-Doppler tab: plot below the map"), panel);
+        lowerLabel->setWordWrap(true);
+        v->addWidget(lowerLabel);
+        lower_ = new QComboBox(panel);
+        lower_->addItem(QStringLiteral("Doppler spectrum (range bin)"));
+        lower_->addItem(QStringLiteral("Range profile (Doppler bin)"));
+        v->addWidget(lower_);
+        QObject::connect(lower_, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+                         [this](int i) { rd_->setLower(i == 1 ? RdLower::RangeProfile : RdLower::Spectrum); });
+        pause_ = new QPushButton(QStringLiteral("Pause display (Space)"), panel);
+        pause_->setCheckable(true);
+        v->addWidget(pause_);
+        QObject::connect(pause_, &QPushButton::toggled, [this](bool on) { setPaused(on); });
 
         title(QStringLiteral("Screenshot"));
         save_ = new QPushButton(QStringLiteral("Save screenshot (PNG) ..."), panel);
@@ -1921,7 +2410,8 @@ public:
         timing_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
         v->addWidget(timing_);
         QLabel *help = new QLabel(QStringLiteral("Wheel: zoom   Drag: pan\nDouble click: reset\nHover: data tip   "
-                                                 "Click: pin\nKeys: + - arrows R C D T S Space\nRight click: more options"),
+                                                 "Click: pin\nKeys: + - arrows R C D T S Space\nRight click: more options\n"
+                                                 "(PPI and range-Doppler plots)"),
                                   panel);
         help->setStyleSheet(QStringLiteral("color: #909090;"));
         v->addWidget(help);
@@ -1961,6 +2451,27 @@ public:
 
     PpiWidget &ppi() { return *ppi_; }
     RdWidget &rd() { return *rd_; }
+    QComboBox *lowerBox() { return lower_; }
+protected:
+    void keyPressEvent(QKeyEvent *e) override       /* Space in the range-Doppler tab (the PPI has its own) */
+    {
+        if (e->key() == Qt::Key_Space) setPaused(!ppi_->paused());
+        else QWidget::keyPressEvent(e);
+    }
+public:
+    QPushButton *pauseButton() { return pause_; }
+    /* pause / resume the display: the PPI and the range-Doppler map take no new data
+     * (the processing goes on; the plots that came meanwhile are shown on resume) */
+    void setPaused(bool on)
+    {
+        ppi_->setPaused(on);
+        rd_->setPaused(on);
+        const bool b = pause_->blockSignals(true);
+        pause_->setChecked(on);
+        pause_->setText(on ? QStringLiteral("Resume display (Space)") : QStringLiteral("Pause display (Space)"));
+        pause_->setStyleSheet(on ? QStringLiteral("background: #5a4a10; color: white;") : QString());
+        pause_->blockSignals(b);
+    }
     QTabWidget *tabs() { return tabs_; }
     QComboBox *beamBox() { return beam_; }
     /* the PPI in the first tab (whole page), or small next to the range-Doppler map */
@@ -2002,6 +2513,12 @@ public:
         const double t0 = gui_seconds();
         ppi_->refresh();
         ppi_->addGuiMs((gui_seconds() - t0) * 1e3);
+        if (pause_->isChecked() != ppi_->paused()) setPaused(ppi_->paused());   /* Space or the context menu */
+        if (lower_->currentIndex() != (int)rd_->lower()) {         /* changed in the map's context menu */
+            const bool b = lower_->blockSignals(true);
+            lower_->setCurrentIndex((int)rd_->lower());
+            lower_->blockSignals(b);
+        }
         if (tracks_->isChecked() != ppi_->showTracks()) {          /* changed with T or the context menu */
             const bool b = tracks_->blockSignals(true);
             tracks_->setChecked(ppi_->showTracks());
@@ -2014,7 +2531,7 @@ public:
             {
                 Shared &s = shared();
                 std::lock_guard<std::mutex> lock(s.mutex);
-                if (s.rdSerial != rdSerial_ && tabs_->currentIndex() == 1) {
+                if (s.rdSerial != rdSerial_ && tabs_->currentIndex() == 1 && !ppi_->paused()) {   /* paused: kept */
                     rdSerial_ = s.rdSerial;
                     if (s.rd.beam == ppi_->beam()) { f = s.rd; fresh = true; }
                 }
@@ -2124,8 +2641,9 @@ private:
 
     PpiWidget             *ppi_;
     volatile sig_atomic_t *stopFlag_;
-    QComboBox             *mode_, *beam_;
+    QComboBox             *mode_, *beam_, *lower_;
     QCheckBox             *tracks_;
+    QPushButton           *pause_;
     QTabWidget            *tabs_;
     QVBoxLayout           *pageLayout1_;
     QHBoxLayout           *pageLayout2_;
@@ -2265,6 +2783,7 @@ extern "C" int ppi_take_cfar_request(double *threshold_dB)
 
 static std::atomic<int> g_startMode(PPI_SHOW_PLOTS);
 static std::atomic<int> g_startTab(0);
+static std::atomic<int> g_startRdPlot(0);
 
 extern "C" void ppi_set_beams(int nBeams, const double *beamEl_deg)
 {
@@ -2281,6 +2800,11 @@ extern "C" void ppi_set_beam(int beam)
 extern "C" void ppi_set_tab(int tab)
 {
     g_startTab.store(tab == 1);
+}
+
+extern "C" void ppi_set_rd_plot(int plot)
+{
+    g_startRdPlot.store(plot == 1);
 }
 
 extern "C" int ppi_profile_wanted(int *beam)
@@ -2361,6 +2885,7 @@ extern "C" int ppi_run(int argc, char **argv, double maxRange_m, int (*worker)(v
     widget.setDisplayMode((DisplayMode)g_startMode.load());    /* (also when the index did not change) */
     window.beamBox()->setCurrentIndex(g_beam.load());
     window.showTab(g_startTab.load());
+    window.lowerBox()->setCurrentIndex(g_startRdPlot.load());
     window.showMaximized();                                    /* the whole screen at the start */
 
     std::atomic<bool> workerDone(false);

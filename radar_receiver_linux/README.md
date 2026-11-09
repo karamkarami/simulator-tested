@@ -222,6 +222,7 @@ record within 3e-14 (relative).
 | `--ppi-show MODE` | what the PPI shows at the start: `plots` (default, after the plot extractor), `detections` (CFAR detections before it), `both`, `video` (the raw video: DDC output averaged over the elements), `dbf` (DBF output of the selected beam) or `mf` (pulse compression output of the selected beam) |
 | `--ppi-beam N` | the beam after the DBF of `dbf`, `mf` and the range-Doppler tab at the start (default 1; also in the panel) |
 | `--ppi-tab TAB` | tab at the start: `ppi` (default) or `rd` (range-Doppler map of the selected beam next to a small PPI) |
+| `--ppi-rd-plot P` | plot below the range-Doppler map at the start: `spectrum` (default, Doppler spectrum of a range bin) or `range` (range profile of a Doppler bin); also in the panel |
 | `--ppi-rd-rate HZ` | range-Doppler maps per second handed to that tab (default `cfg.display.rdRate_Hz` in the configuration, 10) |
 | `--cfar-threshold DB` | CFAR threshold factor 10 log10(alpha) in dB of the configured detector and window (default: the configuration, i.e. the method's Pfa); can also be changed in the PPI |
 | `--serial DEVICE` | send the CFAR output to a serial port (`/dev/ttyUSB0`, `COM3`, ...) |
@@ -325,10 +326,17 @@ above its noise floor (the median of the cells), from -3 dB (black) to the
 strongest cell (at least 20 dB), with a colour scale; the CFAR detections of
 the beam (white circles) and the MTI notch (dashed). A pixel column shows
 the largest of its range bins, so a peak of one range cell stays visible.
-Below the map: the Doppler spectrum (dB above noise) of one range bin, the
-one under the cursor or else the bin of the strongest detection (or cell),
-with the detections circled, to see a peak and the spectrum around it;
-hovering shows range, velocity and dB of the cell. The PPI moves into this
+Below the map (panel: *Range-Doppler tab: plot below the map*, also in the
+map's right-click menu; start: `--ppi-rd-plot spectrum|range`): the Doppler
+spectrum (dB above noise) of one range bin or the range profile of one
+Doppler bin, through the cell under the cursor, else the selected cell (a
+click on the map), else the strongest detection (or cell), with the
+detections circled and axis labels, to see a peak and the shape around it.
+Both plots: wheel zoom at the cursor (Shift: horizontal axis only, Ctrl:
+vertical only; keys `+` `-`), drag pan (arrows), double click or `R` all of
+it again, hover data tip of the cell, detection or point, click pins it
+(again: remove; `C` removes all); the view and the pinned tips stay while
+new maps of the beam arrive. The PPI moves into this
 tab, small next to the map, so both are seen live. The worker copies a map
 to the display at most `cfg.display.rdRate_Hz` times a second (default 10,
 `--ppi-rd-rate`; the display redraws at most 25 times a second), and only while this tab is shown
@@ -461,7 +469,7 @@ The PPI is interactive:
 | `+` `-`, arrows | zoom, pan |
 | `C` | remove the pinned data tips |
 | `D` | next display mode (plots / detections / both) |
-| space | pause/resume the display (the processing continues; the plots are shown on resume) |
+| space, *Pause display* button | pause/resume the display (the processing continues; no new plots, video or range-Doppler map are taken, those of the pause are shown on resume, up to the queue limits) |
 | `S` | save a screenshot (PNG) |
 | `T` | show/hide the tracks |
 
@@ -789,5 +797,5 @@ Timing:
 | `export_config`, `core_exported` | `radar_export_config` writes the configuration of `../radar_config.m`, and the core test runs the whole chain with it |
 | `serial` | frame encoding and CRC; real output to a pseudo-terminal (Linux): exact bytes, 200-detection split, non-blocking drops, close |
 | `ppi` | the Qt PPI runs off-screen with antenna updates, plots, detections and a CFAR threshold report and saves a snapshot |
-| `ppi_interactive` | mouse, wheel and key events: data tips, cursor readout, zoom around the cursor, pan, pin/unpin, reset, filters, persistence options, pause, clear; detections (display modes, arcs drawn, data tips, key D); window panel: display mode box, CFAR threshold Apply/Default and its report, screenshot, mean block times (labels of at most 15 characters, the peak interpolation row); raw video (box and key D, rows of 160 azimuth bins, noise floor, echo drawn, nothing where the antenna did not pass, plots hidden, Clear); DBF out / MF out (beam selector, profile wanted only in these modes and for the selected beam, rows of another kind or beam not shown, noise floor of one-sample rows, echo bright); range-Doppler tab (map wanted only in the tab, the PPI moved next to it and back, map drawn with the peak bright and the noise dark, spectrum at the strongest detection, hover readout, a map of another beam ignored, screenshot of the tab); tracks (triangle drawn around the plot, data tip, PMBM data tip with existence and model probabilities, checkbox and key T, deletion) |
+| `ppi_interactive` | mouse, wheel and key events: data tips, cursor readout, zoom around the cursor, pan, pin/unpin, reset, filters, persistence options, pause, clear; detections (display modes, arcs drawn, data tips, key D); window panel: display mode box, CFAR threshold Apply/Default and its report, screenshot, mean block times (labels of at most 15 characters, the peak interpolation row); raw video (box and key D, rows of 160 azimuth bins, noise floor, echo drawn, nothing where the antenna did not pass, plots hidden, Clear); DBF out / MF out (beam selector, profile wanted only in these modes and for the selected beam, rows of another kind or beam not shown, noise floor of one-sample rows, echo bright); range-Doppler tab (map wanted only in the tab, the PPI moved next to it and back, map drawn with the peak bright and the noise dark, spectrum at the strongest detection, hover readout, data tips of a detection, a cell and a spectrum point, zoom of both axes around the cursor and of one (Shift), pan by dragging, pin and unpin by a click, zoom and pins kept by a new map, reset by double click, range profile through the detection's Doppler bin, a map of another beam ignored, screenshot of the tab); pause button (no new map or plot while paused, the newest on resume, follows Space); data tip readable in the window; tracks (triangle drawn around the plot, data tip, PMBM data tip with existence and model probabilities, checkbox and key T, deletion) |
 | `../tests/test_c_receiver.m` (Octave/MATLAB) | the six-target scenario streamed over UDP to this receiver: the C plots must match the MATLAB plots; the recording is replayed to check that the result is repeatable and to measure the time |

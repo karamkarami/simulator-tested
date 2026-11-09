@@ -13,6 +13,13 @@ function ppi = ppi_init(sys)
 %     keys                 + / - zoom, arrows pan, r reset, c clear the
 %                          pinned data tips, space pause/resume the display,
 %                          d next display mode
+%   Range-Doppler tab (map of the selected beam and, below it, the Doppler
+%   spectrum of a range bin or the range profile of a Doppler bin: 'Below map'
+%   in the panel): wheel zoom at the cursor (Shift: horizontal axis only, Ctrl:
+%   vertical only), drag pan, double click all of it again, hover data tip of
+%   the cell / detection / point, click pin it (a click on the map also selects
+%   the cell for the plot below it; again: remove; c or 'Remove data tips').
+%   Pause display (button, space): no new data is drawn until Resume.
 %   The panel on the right selects what is shown: the plots (after the plot
 %   extractor), the CFAR detections before the extractor (each detection is
 %   an arc over the azimuth step of its CPI update, so a target appears as an
@@ -143,8 +150,14 @@ h.specAx = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.06 0.10 0.4
 hold(h.specAx, 'on');
 h.specLine = plot(h.specAx, NaN, NaN, '-', 'Color', [0 0.9 1], 'LineWidth', 1.2, 'Visible', 'off');
 h.specDet = plot(h.specAx, NaN, NaN, 'o', 'Color', 'w', 'Visible', 'off');
-xlabel(h.specAx, 'Radial velocity [m/s]');  ylabel(h.specAx, 'dB above noise');
+xlabel(h.specAx, 'Radial velocity [m/s]');  ylabel(h.specAx, 'Power [dB above noise]');
 h.specTitle = title(h.specAx, '', 'Color', [0.8 0.8 0.8], 'FontSize', 8);
+% data tips of the cell / point under the cursor (map, plot below it) and the pinned ones
+tipStyle = {'Color', 'w', 'BackgroundColor', [0.05 0.2 0.05], 'EdgeColor', [0.3 0.9 0.3], 'FontSize', 8, ...
+            'VerticalAlignment', 'top', 'Margin', 3, 'HitTest', 'off', 'Visible', 'off', 'Clipping', 'off'};
+h.rdTip = text(0, 0, '', 'Parent', h.rdAx, tipStyle{:});
+h.specTip = text(0, 0, '', 'Parent', h.specAx, tipStyle{:});
+h.rdPinH = [];
 set(fig, 'CurrentAxes', ax);                               % (axes(ax) would raise it above the scale)
 % Tabs (Octave has no uitabgroup: two toggle buttons above the display)
 h.tabBtn(1) = uicontrol(fig, 'Style', 'togglebutton', 'String', 'PPI', 'Units', 'normalized', ...
@@ -199,6 +212,18 @@ h.ui.beam = uicontrol(fig, 'Style', 'popupmenu', 'Units', 'normalized', 'Positio
     'Callback', @(src, evt) ppi_callbacks('option', fig, 'beam', get(src, 'Value')));
 opt.beam = beam0;
 opt.tab = 1;
+% What the range-Doppler tab shows below the map: the Doppler spectrum of a range bin or the
+% range profile of a Doppler bin
+y = y - rowH;
+label('Below map', [x0 y 0.05 rowH]);
+lowerModes = {'spectrum', 'range'};
+lower0 = 1;
+if isfield(cfg.display, 'rdLowerPlot') && strcmpi(cfg.display.rdLowerPlot, 'range'), lower0 = 2; end
+h.ui.rdLower = uicontrol(fig, 'Style', 'popupmenu', 'Units', 'normalized', 'Position', [x0+0.05 y w-0.05 rowH], ...
+    'String', {'Doppler spectrum (range bin)', 'Range profile (Doppler bin)'}, 'Value', lower0, ...
+    'BackgroundColor', bg, 'ForegroundColor', fg, ...
+    'Callback', @(src, evt) ppi_callbacks('option', fig, 'rdLower', lowerModes{get(src, 'Value')}));
+opt.rdLower = lowerModes{lower0};
 checks = {'showShort', 'Short pulse', true;  'showLong', 'Long pulse', true;
           'showTruth', 'True targets', logical(cfg.display.showTruth);  'showRings', 'Range rings', true;
           'showLabels', 'Plot labels', false;  'showAntenna', 'Antenna', true;
@@ -279,7 +304,14 @@ S.opt = opt;
 S.sys = sys;
 S.data = struct('az_deg', 0, 't_s', 0, 'scan', 1, 'plots', [], 'dets', zeros(0, 10), ...
                 'tracks', [], 'timing_us', [], 'timingPris', [], 'video', video, 'rd', []);
-S.rdCursorBin = [];                                        % range bin of the spectrum under the cursor
+S.rdCursorBin = [];                                        % range-Doppler cell under the cursor (map):
+S.rdCursorD = [];                                          % range bin and Doppler bin
+S.rdSel = [];                                              % the selected cell [bin d] (click on the map)
+S.rdPins = zeros(0, 2);                                    % pinned data tips of the tab: cells [bin d]
+S.rdView = [];                                             % zoomed view of the map [x0 x1 v0 v1] ([] = all)
+S.lowView = [];                                            % zoomed view of the plot below it ([] = all)
+S.lowPts = zeros(0, 3);                                    % its points [x dB bin]
+S.pending = [];                                            % data that came while the display was paused
 S.vis = struct('x', [], 'y', [], 'idx', []);               % visible plots (for picking)
 S.visDet = struct('x', [], 'y', [], 'idx', []);            % visible detections
 S.visTrk = struct('x', [], 'y', [], 'idx', []);            % visible tracks

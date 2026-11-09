@@ -37,9 +37,9 @@ void send_mouse(QWidget &w, QEvent::Type type, QPointF pos, Qt::MouseButton butt
     QCoreApplication::sendEvent(&w, &e);
 }
 
-void send_wheel(QWidget &w, QPointF pos, int angle)
+void send_wheel(QWidget &w, QPointF pos, int angle, Qt::KeyboardModifiers mods = Qt::NoModifier)
 {
-    QWheelEvent e(pos, w.mapToGlobal(pos.toPoint()), QPoint(), QPoint(0, angle), Qt::NoButton, Qt::NoModifier,
+    QWheelEvent e(pos, w.mapToGlobal(pos.toPoint()), QPoint(), QPoint(0, angle), Qt::NoButton, mods,
                   Qt::NoScrollPhase, false);
     QCoreApplication::sendEvent(&w, &e);
 }
@@ -523,10 +523,92 @@ int main(int argc, char **argv)
               "the peak is drawn bright, the noise dark");
         rdw.hoverAt(rdw.screenOf(det.range_m, pd));
         check(rdw.readout().contains("30.0 dB above noise") && rdw.spectrumBin() == pb, "hover: the cell's values, its spectrum");
+        /* data tips, zoom, pan, pins on the map and on the plot below it */
+        check(rdw.tipText().contains("CFAR detection") && rdw.tipText().contains("30.0 dB above noise") &&
+              QToolTip::text() == rdw.tipText(), "map: data tip of the detection under the cursor");
+        rdw.hoverAt(rdw.screenOf(30e3, 50));
+        check(rdw.tipText().contains("Range-Doppler cell") && rdw.tipText().contains("Doppler bin 50"),
+              "map: data tip of a cell");
+        const QRectF full = rdw.mapView();
+        const QPointF at = rdw.screenOf(det.range_m, pd);
+        send_wheel(rdw, at, 3 * 120);
+        const QPointF at2 = rdw.screenOf(det.range_m, pd);
+        check(rdw.mapView().width() < 0.6 * full.width() && rdw.mapView().height() < 0.6 * full.height() &&
+              std::hypot(at2.x() - at.x(), at2.y() - at.y()) < 1.5, "map: wheel zooms both axes around the cursor");
+        send_wheel(rdw, at, 120, Qt::ShiftModifier);
+        const QRectF z1 = rdw.mapView();
+        check(z1.height() > 0.99 * rdw.mapView().height() && z1.width() < full.width(), "map: Shift + wheel zooms the range only");
+        const QRectF before = rdw.mapView();
+        send_mouse(rdw, QEvent::MouseButtonPress, at, Qt::LeftButton);
+        send_mouse(rdw, QEvent::MouseMove, at + QPointF(60, 0), Qt::LeftButton);
+        send_mouse(rdw, QEvent::MouseMove, at + QPointF(120, 30), Qt::LeftButton);
+        send_mouse(rdw, QEvent::MouseButtonRelease, at + QPointF(120, 30), Qt::LeftButton);
+        const QPointF at3 = rdw.screenOf(det.range_m, pd);
+        check(rdw.mapView().left() < before.left() && rdw.pinCount() == 0 &&
+              std::fabs(at3.x() - at.x() - 120) < 1.5 && std::fabs(at3.y() - at.y() - 30) < 1.5,
+              "map: drag pans (the peak follows the mouse), no pin");
+        send_mouse(rdw, QEvent::MouseButtonPress, at3, Qt::LeftButton);
+        send_mouse(rdw, QEvent::MouseButtonRelease, at3, Qt::LeftButton);
+        check(rdw.pinCount() == 1, "map: click pins the data tip");
+        if (!folder.empty()) rdw.grab().save(QString::fromStdString(folder + "/ppi_rd_zoom_pin.png"));
+        RdFrame same = rdw.frame();
+        same.time_s = 40.5;
+        rdw.setFrame(same);
+        check(rdw.pinCount() == 1 && std::fabs(rdw.mapView().left() - before.left()) > 1e-9 &&
+              rdw.mapView().width() < full.width(), "a new map of the beam keeps the zoom and the pinned tip");
+        send_mouse(rdw, QEvent::MouseButtonDblClick, at3, Qt::LeftButton);
+        check(rdw.mapView() == full, "map: double click resets the zoom");
+        send_mouse(rdw, QEvent::MouseButtonPress, rdw.screenOf(det.range_m, pd), Qt::LeftButton);
+        send_mouse(rdw, QEvent::MouseButtonRelease, rdw.screenOf(det.range_m, pd), Qt::LeftButton);
+        check(rdw.pinCount() == 0, "map: a second click removes the pinned tip");
+        rdw.hoverAt(QPointF(-5, -5));                             /* the cursor leaves the map */
+        check(rdw.spectrumBin() == pb, "the selected cell (the click) stays the cut of the lower plot");
+        /* the plot below the map: axis labels, zoom, data tip; the range profile */
+        const QPointF lp = rdw.lowerScreenOf(pd, 30.0);
+        check(rdw.lowerRect().contains(lp), "spectrum: the peak inside the plot (room above it)");
+        rdw.hoverAt(lp);
+        check(rdw.tipText().contains("CFAR detection") && rdw.spectrumBin() == pb, "spectrum: data tip of the point under the cursor");
+        const QRectF lfull = rdw.lowerView();
+        send_wheel(rdw, lp, 2 * 120);
+        check(rdw.lowerView().width() < 0.7 * lfull.width() && rdw.lowerView().height() < 0.7 * lfull.height(),
+              "spectrum: wheel zooms around the cursor");
+        send_mouse(rdw, QEvent::MouseButtonDblClick, rdw.lowerRect().center(), Qt::LeftButton);
+        check(rdw.lowerView() == lfull, "spectrum: double click resets the zoom");
+        win.lowerBox()->setCurrentIndex(1);
+        rdw.hoverAt(QPointF(-5, -5));
+        const QPointF rp = rdw.lowerScreenOf(pb, 30.0);
+        rdw.hoverAt(rp);
+        check(rdw.lower() == RdLower::RangeProfile && rdw.profileBin() == pd && rdw.lowerRect().contains(rp) &&
+              rdw.tipText().contains("Range: 30.0") && rdw.tipText().contains("CFAR detection"),
+              "panel box: the range profile through the detection's Doppler bin, its data tip");
+        if (!folder.empty()) win.grab().save(QString::fromStdString(folder + "/ppi_rd_range_profile.png"));
+        rdw.hoverAt(rdw.screenOf(20e3, 10));
+        check(rdw.profileBin() == 10, "range profile: follows the cursor's Doppler bin");
+        win.lowerBox()->setCurrentIndex(0);
+        rdw.hoverAt(QPointF(-5, -5));
+        /* pause: no new map and no new plots until resumed */
+        win.pauseButton()->click();
+        check(pw.paused() && win.pauseButton()->text().startsWith("Resume"), "pause button: the display paused");
+        m.time_s = 42.0;
+        ppi_post_rdmap(&m);
+        const Detection late = make_plot(35e3, 300.0, 3.0, 10.0, 20.0, PULSE_LONG, 900);
+        const size_t nPlots = pw.plotCount();
+        ppi_post_plot(&late);
+        win.refresh();
+        check(rdw.frame().time_s == 40.5 && pw.plotCount() == nPlots, "paused: no new map, no new plot");
+        win.pauseButton()->click();
+        win.refresh();
+        check(!pw.paused() && rdw.frame().time_s == 42.0 && pw.plotCount() == nPlots + 1 &&
+              win.pauseButton()->text().startsWith("Pause"), "resume: the newest map and the plots of the pause shown");
+        send_key(pw, Qt::Key_Space, " ");
+        win.refresh();
+        check(pw.paused() && win.pauseButton()->isChecked(), "the button follows Space in the PPI");
+        send_key(pw, Qt::Key_Space, " ");
+        win.refresh();
         m.beam = 2;  m.time_s = 41.0;
         ppi_post_rdmap(&m);                                       /* a map of another beam is not shown */
         win.refresh();
-        check(rdw.frame().time_s == 40.0, "a map of another beam is not taken");
+        check(rdw.frame().time_s == 42.0, "a map of another beam is not taken");
         if (!folder.empty()) {
             const QString shot = QString::fromStdString(folder + "/ppi_rd_tab.png");
             check(win.saveSnapshot(shot) && QImage(shot).width() == win.tabs()->currentWidget()->width(),

@@ -19,8 +19,17 @@ function out = ppi_callbacks(action, fig, varargin)
 %     'timing'                    write the block processing times into the panel
 %     'tab', k                    tab 1 (PPI) or 2 (range-Doppler map of the
 %                                 selected beam, small PPI next to it)
-%     'rdhover', [range_km v]     readout and spectrum of the range-Doppler map at
-%                                 that point (out = the readout text)
+%     'rdhover', [range_km v]     readout, data tip and cut of the range-Doppler map
+%                                 at that point (out = the readout text)
+%     'lowhover', [x dB]          data tip of the nearest point of the plot below
+%                                 the map (out = its text)
+%     'rdzoom', which, f, [x y]   zoom the map ('map') or the plot below it ('lower')
+%                                 by f (> 1 = in) around [x y]; optional [fx fy]: per axis
+%     'rdpan', which, [dx dy]     move that view by [dx dy] (data units)
+%     'rdpin', which, [x y]       pin (or remove) the data tip of the cell there (a
+%                                 click on the map also selects the cell for the
+%                                 plot below it); out = the number of pinned tips
+%     'rdreset', which            the whole map / plot again (double click)
 %     'reset' 'clear' 'cleartips' 'pause'   buttons of the panel
 %     'save' [, fileName]         save a screenshot of the PPI as a PNG file
 %                                 (without fileName: file dialog; out = file)
@@ -43,8 +52,36 @@ switch action
         S = redraw(S);
     case 'rdhover'
         [S, out] = rd_hover(S, varargin{1});
+    case 'lowhover'
+        [S, out] = low_hover(S, varargin{1});
+    case 'rdzoom'
+        f = varargin{2};  fxy = [f f];
+        if numel(varargin) > 3, fxy = varargin{4}; end
+        S = rd_zoom(S, varargin{1}, fxy, varargin{3});
+    case 'rdpan'
+        [ax, view] = rd_axes(S, varargin{1});
+        if ~isempty(ax)
+            S = rd_set_view(S, varargin{1}, view(1:2) + varargin{2}(1), view(3:4) + varargin{2}(2));
+        end
+    case 'rdpin'
+        S = rd_pin(S, varargin{1}, varargin{2});
+        out = size(S.rdPins, 1);
+    case 'rdreset'
+        S = rd_set_view(S, varargin{1}, [], []);
     case 'scroll'
         evt = varargin{1};
+        [which, q] = rd_axes_at(S);
+        if ~isempty(which)                                  % range-Doppler tab: zoom that plot
+            f = 1.25^(-evt.VerticalScrollCount);
+            mods = {};
+            try, mods = get(fig, 'CurrentModifier'); catch, end
+            fxy = [f f];
+            if any(strcmp(mods, 'shift')), fxy(2) = 1; end  % Shift: only the horizontal axis
+            if any(strcmp(mods, 'control')), fxy(1) = 1; end   % Ctrl: only the vertical axis
+            S = rd_zoom(S, which, fxy, q);
+            setappdata(fig, 'ppi', S);
+            return
+        end
         p = cursor_km(S);
         if ~isempty(p)
             S = zoom_at(S, 1.25^(-evt.VerticalScrollCount), p);
@@ -54,32 +91,60 @@ switch action
     case 'pan'
         S = set_limits(S, get(S.ax, 'XLim') + varargin{1}(1), get(S.ax, 'YLim') + varargin{1}(2));
     case 'down'
+        [which, q] = rd_axes_at(S);
+        if ~isempty(which)                                  % the range-Doppler map or the plot below it
+            ax = rd_axes(S, which);
+            if strcmp(get(fig, 'SelectionType'), 'open')    % double click: all of it again
+                S = rd_set_view(S, which, [], []);
+                S.drag = [];
+            else
+                S.drag = struct('ax', which, 'px', figure_px(fig), 'xl', get(ax, 'XLim'), 'yl', get(ax, 'YLim'), ...
+                                'moved', false, 'p', q);
+            end
+            setappdata(fig, 'ppi', S);
+            return
+        end
         p = cursor_km(S);
         if isempty(p), return; end                          % outside the axes
         if strcmp(get(fig, 'SelectionType'), 'open')        % double click
             S = set_limits(S, S.home(1:2), S.home(3:4));
             S.drag = [];
         else
-            S.drag = struct('px', figure_px(fig), 'xl', get(S.ax, 'XLim'), 'yl', get(S.ax, 'YLim'), ...
+            S.drag = struct('ax', 'ppi', 'px', figure_px(fig), 'xl', get(S.ax, 'XLim'), 'yl', get(S.ax, 'YLim'), ...
                             'moved', false, 'p', p);
         end
     case 'move'
         if ~isempty(S.drag)                                 % pan with the mouse
             d = figure_px(fig) - S.drag.px;
             if any(abs(d) > 3), S.drag.moved = true; end
-            if S.drag.moved
+            if S.drag.moved && strcmp(S.drag.ax, 'ppi')
                 k = km_per_pixel(S, S.drag.xl, S.drag.yl);
                 S = set_limits(S, S.drag.xl - d(1)*k, S.drag.yl - d(2)*k);
+            elseif S.drag.moved                             % the range-Doppler map or the plot below it
+                pos = getpixelposition(rd_axes(S, S.drag.ax));
+                kx = diff(S.drag.xl) / pos(3);  ky = diff(S.drag.yl) / pos(4);
+                S = rd_set_view(S, S.drag.ax, S.drag.xl - d(1)*kx, S.drag.yl - d(2)*ky);
             end
         else
-            if S.opt.tab == 2                               % over the range-Doppler map: readout, spectrum
-                q = get(S.h.rdAx, 'CurrentPoint');
-                xl = get(S.h.rdAx, 'XLim');  yl = get(S.h.rdAx, 'YLim');
-                if q(1, 1) >= xl(1) && q(1, 1) <= xl(2) && q(1, 2) >= yl(1) && q(1, 2) <= yl(2)
-                    [S, out] = rd_hover(S, q(1, 1:2));
+            if S.opt.tab == 2                               % range-Doppler tab: readout, data tips, cut
+                [which, q] = rd_axes_at(S);
+                if strcmp(which, 'map')
+                    [S, out] = rd_hover(S, q);
                     setappdata(fig, 'ppi', S);
                     return
                 end
+                if ~isempty(S.rdCursorBin)                  % the cursor left the map: the selected cut
+                    S.rdCursorBin = [];  S.rdCursorD = [];
+                    set(S.h.rdInfo, 'String', '');
+                    S = draw_rd(S);
+                end
+                set(S.h.rdTip, 'Visible', 'off');
+                if strcmp(which, 'lower')
+                    [S, out] = low_hover(S, q);
+                    setappdata(fig, 'ppi', S);
+                    return
+                end
+                set(S.h.specTip, 'Visible', 'off');
             end
             p = cursor_km(S);
             S = show_cursor(S, p);
@@ -87,7 +152,11 @@ switch action
         end
     case 'up'
         if ~isempty(S.drag) && ~S.drag.moved                % a click: pin the data tip
-            S = pin(S, S.drag.p);
+            if strcmp(S.drag.ax, 'ppi')
+                S = pin(S, S.drag.p);
+            else
+                S = rd_pin(S, S.drag.ax, S.drag.p);
+            end
         end
         S.drag = [];
     case 'hover'
@@ -104,7 +173,12 @@ switch action
         elseif strcmp(varargin{1}, 'beam')
             set(S.h.ui.beam, 'Value', varargin{2});
             S.data.rd = [];                                 % the map of the new beam comes with the next update
-            S.rdCursorBin = [];
+            if ~isempty(S.pending), S.pending.rd = []; end
+            S.rdCursorBin = [];  S.rdCursorD = [];  S.rdSel = [];  S.rdPins = zeros(0, 2);
+            S.rdView = [];  S.lowView = [];
+        elseif strcmp(varargin{1}, 'rdLower')
+            set(S.h.ui.rdLower, 'Value', find(strcmp(varargin{2}, {'spectrum', 'range'})));
+            S.lowView = [];                                 % the whole new plot
         end
         S = redraw(S);
     case 'cfar'
@@ -132,10 +206,7 @@ switch action
     case 'cleartips'
         S = clear_pins(S);
     case 'pause'
-        S.opt.paused = ~S.opt.paused;
-        labels = {'Pause display', 'Resume display'};
-        set(S.h.ui.pause, 'String', labels{1 + S.opt.paused});
-        if ~S.opt.paused, S = redraw(S); end
+        S = toggle_pause(S);
     case 'save'
         if ~isempty(varargin)
             file = varargin{1};
@@ -315,6 +386,9 @@ set(h.tabBtn(1), 'Value', ~two, 'BackgroundColor', [0.12 0.12 0.12] + 0.13*~two)
 set(h.tabBtn(2), 'Value', two, 'BackgroundColor', [0.12 0.12 0.12] + 0.13*two);
 set([h.rdAx h.rdBar h.specAx], 'Visible', vis{1 + two});
 set([h.rdImg h.rdNotch h.rdDet h.rdCut h.rdInfo h.rdBarImg h.specLine h.specDet], 'Visible', vis{1 + two});
+set([h.rdTip h.specTip], 'Visible', 'off');
+S.h.rdPinH = S.h.rdPinH(ishandle(S.h.rdPinH));
+set(S.h.rdPinH, 'Visible', vis{1 + two});
 labels = [get(h.rdAx, 'XLabel') get(h.rdAx, 'YLabel') h.rdTitle get(h.specAx, 'XLabel') get(h.specAx, 'YLabel') h.specTitle];
 set(labels, 'Visible', vis{1 + two});                      % (Octave shows them also on hidden axes)
 if two
@@ -333,76 +407,166 @@ end
 function S = draw_rd(S)
 % Range-Doppler map of the selected beam (tab 2): dB above the noise floor of the map (its
 % median), -3 dB (black) ... the strongest cell (at least 20 dB); the beam's CFAR detections
-% (circles), the MTI notch (dashed), and the Doppler spectrum of the range bin under the cursor
-% or else of the strongest detection (strongest cell).
+% (circles), the MTI notch (dashed); below it the Doppler spectrum of one range bin or the range
+% profile of one Doppler bin (S.opt.rdLower) through the cell under the cursor, else the
+% selected cell, else the strongest detection (strongest cell). Both keep their zoomed view
+% (S.rdView, S.lowView) and the pinned data tips (S.rdPins) while new maps arrive.
 h = S.h;
 if S.opt.tab ~= 2, return; end
+S.h.rdPinH = S.h.rdPinH(ishandle(S.h.rdPinH));
+delete(S.h.rdPinH);
+S.h.rdPinH = [];
 rd = S.data.rd;
 if isempty(rd) || rd.beam ~= S.opt.beam || all(isnan(rd.P(:)))
     set(h.rdTitle, 'String', sprintf('Range-Doppler map, beam %d: waiting for a CPI update ...', S.opt.beam));
-    set([h.rdImg h.specLine h.specDet h.rdDet h.rdNotch h.rdCut], 'Visible', 'off');
+    set([h.rdImg h.specLine h.specDet h.rdDet h.rdNotch h.rdCut h.rdTip h.specTip], 'Visible', 'off');
+    S.lowPts = zeros(0, 3);
     return
 end
 cols = find(any(~isnan(rd.P), 2));
 b0 = cols(1);  b1 = cols(end);
-dB = 10*log10(rd.P(b0:b1, :).' / rd.noise);              % [nfft x nBins]
-hi = max(20, ceil(max(dB(:)) / 5) * 5);  lo = -3;
-nB = b1 - b0 + 1;
+dR = rd.dR_m;  vel = rd.vel_mps(:).';  nfft = numel(vel);
+dv = 1;  if nfft > 1, dv = abs(vel(2) - vel(1)); end
+dBall = 10*log10(rd.P / rd.noise);                         % [nBins x nfft]
+mx = max(max(dBall(b0:b1, :)));
+hi = max(20, ceil(mx / 5) * 5);  lo = -3;
+% the map in its view
+full = [(b0 - 1) * dR / 1e3, b1 * dR / 1e3, min(vel) - dv/2, max(vel) + dv/2];
+view = full;
+if ~isempty(S.rdView)
+    [view(1), view(2)] = clamp_span(S.rdView(1), S.rdView(2), full(1), full(2), min(4*dR/1e3, diff(full(1:2))));
+    [view(3), view(4)] = clamp_span(S.rdView(3), S.rdView(4), full(3), full(4), min(2*dv, diff(full(3:4))));
+    S.rdView = view;
+end
+bv0 = max(b0, floor(view(1) * 1e3 / dR) + 1);  bv1 = max(bv0, min(b1, ceil(view(2) * 1e3 / dR)));
+dB = dBall(bv0:bv1, :).';                                  % [nfft x bins in view]
+nB = bv1 - bv0 + 1;
 W = min(nB, 600);                                          % columns: the largest bin of each (peaks stay)
+e = floor((0:W) * nB / W);
 if W < nB
-    e = floor((0:W) * nB / W);
-    D = NaN(size(dB, 1), W);
+    D = NaN(nfft, W);
     for c = 1:W, D(:, c) = max(dB(:, e(c)+1:max(e(c+1), e(c)+1)), [], 2); end
 else
     D = dB;
 end
+xc = (bv0 - 1 + (e(1:end-1) + max(e(2:end), e(1:end-1) + 1)) / 2) * dR / 1e3;   % column centres [km]
 cmap = S.data.video.cmap;
 k = round((D - lo) / (hi - lo) * 255) + 1;
 k = min(max(k, 1), 256);
 rgb = reshape(cmap(k(:), :), [size(D) 3]);
 rgb(repmat(isnan(D), [1 1 3])) = 0;
-x = [b0 - 0.5, b1 - 0.5] * rd.dR_m / 1e3;  y = rd.vel_mps([1 end]);
-set(h.rdImg, 'CData', rgb, 'XData', x, 'YData', y, 'Visible', 'on');
-dv = abs(diff(rd.vel_mps(1:2)));
-set(h.rdAx, 'XLim', [b0 - 1, b1] * rd.dR_m / 1e3, 'YLim', sort(y) + [-dv dv]/2);
-z = floor(numel(rd.vel_mps)/2) + 1;                        % zero Doppler
-yn = rd.vel_mps(z) + [1 -1] * (rd.notchBins + 0.5) * dv;
-xl = get(h.rdAx, 'XLim');
-set(h.rdNotch, 'XData', [xl NaN xl], 'YData', [yn(1) yn(1) NaN yn(2) yn(2)], 'Visible', 'on');
+set(h.rdImg, 'CData', rgb, 'XData', xc([1 end]), 'YData', vel([1 end]), 'Visible', 'on');
+set(h.rdAx, 'XLim', view(1:2), 'YLim', view(3:4));
+z = floor(nfft/2) + 1;                                     % zero Doppler
+yn = vel(z) + [1 -1] * (rd.notchBins + 0.5) * dv;
+set(h.rdNotch, 'XData', [view(1:2) NaN view(1:2)], 'YData', [yn(1) yn(1) NaN yn(2) yn(2)], 'Visible', 'on');
 if ~isempty(rd.dets)
-    set(h.rdDet, 'XData', rd.dets(:, 1).' / 1e3, 'YData', rd.vel_mps(rd.dets(:, 2)), 'Visible', 'on');
+    set(h.rdDet, 'XData', rd.dets(:, 1).' / 1e3, 'YData', vel(rd.dets(:, 2)), 'Visible', 'on');
 else
     set(h.rdDet, 'XData', NaN, 'YData', NaN);
 end
 set(h.rdBarImg, 'XData', [0 1], 'YData', [lo hi], 'Visible', 'on');
 set(h.rdBar, 'YLim', [lo hi], 'YTick', 0:10:hi);
-set(h.rdTitle, 'FontSize', 9, 'String', sprintf('Range-Doppler, beam %d   t = %.2f s   az %.1f deg   peak %.1f dB', ...
-    rd.beam, rd.t_s, rd.az_deg, max(dB(:))));
-% Doppler spectrum: the bin under the cursor, else the strongest detection, else the strongest cell
-bin = S.rdCursorBin;
-if isempty(bin) || bin < b0 || bin > b1
-    if ~isempty(rd.dets)
-        [~, i] = max(rd.dets(:, 3));
-        bin = floor(rd.dets(i, 1) / rd.dR_m) + 1;
-    else
-        [~, i] = max(rd.P(:));
-        [bin, ~] = ind2sub(size(rd.P), i);
+paused = '';  if S.opt.paused, paused = '   [PAUSED]'; end
+set(h.rdTitle, 'FontSize', 9, 'String', sprintf('Range-Doppler, beam %d   t = %.2f s   az %.1f deg   peak %.1f dB%s', ...
+    rd.beam, rd.t_s, rd.az_deg, mx, paused));
+% the plot below the map: the cut through the cursor / selected / strongest cell
+[cb, cd, src] = rd_cut(S, rd, b0, b1);
+detBin = [];
+if ~isempty(rd.dets), detBin = floor(rd.dets(:, 1) / dR) + 1; end
+if strcmp(S.opt.rdLower, 'range')
+    bins = b0:b1;
+    x = (bins - 0.5) * dR / 1e3;  y = dBall(bins, cd).';
+    lowX = full(1:2);
+    m = find(~isnan(y));
+    S.lowPts = [x(m).' y(m).' bins(m).'];
+    md = [];
+    if ~isempty(detBin), md = find(rd.dets(:, 2) == cd); end
+    set(h.specDet, 'XData', (detBin(md) - 0.5).' * dR / 1e3, 'YData', dBall(sub2ind(size(dBall), detBin(md), cd * ones(numel(md), 1))).', ...
+        'Visible', 'on');
+    set(h.rdCut, 'XData', view(1:2), 'YData', [1 1] * vel(cd), 'Visible', 'on');
+    xlabel(h.specAx, 'Range [km]');
+    set(h.specTitle, 'String', sprintf('Range profile at %.1f m/s (Doppler bin %d, %s), circles: detections', ...
+        vel(cd), cd, src));
+else
+    x = vel;  y = dBall(cb, :);
+    lowX = full(3:4);
+    m = find(~isnan(y));
+    S.lowPts = [x(m).' y(m).' m(:)];
+    md = [];
+    if ~isempty(detBin), md = rd.dets(detBin == cb, 2); end
+    set(h.specDet, 'XData', vel(md), 'YData', y(md), 'Visible', 'on');
+    set(h.rdCut, 'XData', [1 1] * (cb - 0.5) * dR / 1e3, 'YData', view(3:4), 'Visible', 'on');
+    xlabel(h.specAx, 'Radial velocity [m/s]');
+    set(h.specTitle, 'String', sprintf('Doppler spectrum at %.2f km (range bin %d, %s), circles: detections', ...
+        (cb - 0.5) * dR / 1e3, cb, src));
+end
+[xs, is] = sort(x);
+set(h.specLine, 'XData', xs, 'YData', y(is), 'Visible', 'on');
+lowFull = [lowX, -10, max(10, ceil((mx + 3) / 5) * 5)];   % room above the peak
+lv = lowFull;
+if ~isempty(S.lowView)
+    [lv(1), lv(2)] = clamp_span(S.lowView(1), S.lowView(2), lowFull(1), lowFull(2), min(diff(lowX), 2*dv*strcmp(S.opt.rdLower, 'spectrum') + 4*dR/1e3*strcmp(S.opt.rdLower, 'range')));
+    [lv(3), lv(4)] = clamp_span(S.lowView(3), S.lowView(4), lowFull(3) - 30, lowFull(4) + 30, 3);
+    S.lowView = lv;
+end
+set(h.specAx, 'XLim', lv(1:2), 'YLim', lv(3:4));
+% pinned data tips: on the map when the cell is in view, below it when the cut passes the cell
+for i = 1:size(S.rdPins, 1)
+    b = S.rdPins(i, 1);  d = S.rdPins(i, 2);
+    txt = rd_cell_text(rd, b, d);
+    px = (b - 0.5) * dR / 1e3;  py = vel(d);
+    if px >= view(1) && px <= view(2) && py >= view(3) && py <= view(4)
+        S.h.rdPinH(end+1) = plot(h.rdAx, px, py, 's', 'Color', [0.3 0.9 0.3], 'MarkerSize', 11, 'LineWidth', 1.5, 'HitTest', 'off');
+        S.h.rdPinH(end+1) = text(px + 0.01*diff(view(1:2)), py - 0.02*diff(view(3:4)), txt, 'Parent', h.rdAx, ...
+            'Color', 'w', 'BackgroundColor', [0.05 0.2 0.05], 'EdgeColor', [0.3 0.9 0.3], 'FontSize', 8, ...
+            'VerticalAlignment', 'top', 'Margin', 3, 'HitTest', 'off');
+    end
+    onCut = (strcmp(S.opt.rdLower, 'range') && d == cd) || (~strcmp(S.opt.rdLower, 'range') && b == cb);
+    if onCut && ~isnan(dBall(b, d))
+        lx = py;  if strcmp(S.opt.rdLower, 'range'), lx = px; end
+        ly = dBall(b, d);
+        if lx >= lv(1) && lx <= lv(2) && ly >= lv(3) && ly <= lv(4)
+            S.h.rdPinH(end+1) = plot(h.specAx, lx, ly, 's', 'Color', [0.3 0.9 0.3], 'MarkerSize', 11, 'LineWidth', 1.5, 'HitTest', 'off');
+            S.h.rdPinH(end+1) = text(lx + 0.01*diff(lv(1:2)), ly - 0.03*diff(lv(3:4)), txt, 'Parent', h.specAx, ...
+                'Color', 'w', 'BackgroundColor', [0.05 0.2 0.05], 'EdgeColor', [0.3 0.9 0.3], 'FontSize', 8, ...
+                'VerticalAlignment', 'top', 'Margin', 3, 'HitTest', 'off');
+        end
     end
 end
-s = 10*log10(rd.P(bin, :) / rd.noise);
-set(h.specLine, 'XData', rd.vel_mps, 'YData', s, 'Visible', 'on');
-m = [];
-if ~isempty(rd.dets), m = rd.dets(floor(rd.dets(:, 1) / rd.dR_m) + 1 == bin, 2); end
-set(h.specDet, 'XData', rd.vel_mps(m), 'YData', s(m), 'Visible', 'on');
-set(h.specAx, 'XLim', sort(rd.vel_mps([1 end])), 'YLim', [-10 max(hi, 10)]);
-set(h.rdCut, 'XData', [1 1] * (bin - 0.5) * rd.dR_m / 1e3, 'YData', get(h.rdAx, 'YLim'), 'Visible', 'on');
-src = 'strongest peak';  if ~isempty(S.rdCursorBin), src = 'cursor'; end
-set(h.specTitle, 'String', sprintf('Doppler spectrum at %.2f km (%s), circles: detections', ...
-    (bin - 0.5) * rd.dR_m / 1e3, src));
+end
+
+function [cb, cd, src] = rd_cut(S, rd, b0, b1)
+% The cell of the cut: under the cursor, else the selected one, else the strongest detection
+% (else the strongest cell).
+if ~isempty(rd.dets)
+    [~, i] = max(rd.dets(:, 3));
+    cb = floor(rd.dets(i, 1) / rd.dR_m) + 1;  cd = rd.dets(i, 2);
+else
+    P = rd.P;  P(isnan(P)) = -Inf;
+    [~, i] = max(P(:));
+    [cb, cd] = ind2sub(size(P), i);
+end
+src = 'strongest peak';
+if ~isempty(S.rdSel), cb = S.rdSel(1);  cd = S.rdSel(2);  src = 'selected cell'; end
+if ~isempty(S.rdCursorBin), cb = S.rdCursorBin;  cd = S.rdCursorD;  src = 'cursor'; end
+cb = min(max(cb, b0), b1);
+cd = min(max(cd, 1), numel(rd.vel_mps));
+end
+
+function txt = rd_cell_text(rd, b, d)
+% Data tip of a range-Doppler cell (and of its detection, if any).
+v = 10*log10(rd.P(b, d) / rd.noise);
+isDet = ~isempty(rd.dets) && any(floor(rd.dets(:, 1) / rd.dR_m) + 1 == b & rd.dets(:, 2) == d);
+head = 'Range-Doppler cell';  if isDet, head = 'CFAR detection'; end
+if isnan(v), pw = 'Power: no cell'; else, pw = sprintf('Power: %.1f dB above noise', v); end
+txt = sprintf('%s\nRange: %.3f km\nRadial velocity: %.2f m/s\n%s\nRange bin %d, Doppler bin %d', ...
+              head, (b - 0.5) * rd.dR_m / 1e3, rd.vel_mps(d), pw, b, d);
 end
 
 function [S, txt] = rd_hover(S, p)
-% Readout of the range-Doppler cell at p = [range_km velocity]; the spectrum follows the cursor.
+% Readout and data tip of the range-Doppler cell at p = [range_km velocity] (a detection
+% within 8 pixels wins); the plot below the map follows the cursor.
 txt = '';
 rd = S.data.rd;
 if isempty(rd) || S.opt.tab ~= 2, return; end
@@ -417,7 +581,127 @@ else
                   10*log10(v / rd.noise));
 end
 set(S.h.rdInfo, 'String', txt);
-S.rdCursorBin = bin;
+S.rdCursorBin = bin;  S.rdCursorD = d;
+[tb, td] = rd_detection_near(S, rd, p);
+if isempty(tb), tb = bin;  td = d; end
+xl = get(S.h.rdAx, 'XLim');  yl = get(S.h.rdAx, 'YLim');
+vis = 'on';                                                % (a pinned cell shows its tip already)
+if any(S.rdPins(:, 1) == tb & S.rdPins(:, 2) == td), vis = 'off'; end
+set(S.h.rdTip, 'String', rd_cell_text(rd, tb, td), 'Visible', vis, ...
+    'Position', [p(1) + 0.015*diff(xl), p(2) - 0.02*diff(yl), 0]);
+set(S.h.specTip, 'Visible', 'off');
+S = draw_rd(S);
+end
+
+function [b, d] = rd_detection_near(S, rd, p)
+% The detection of the map within 8 pixels of p = [range_km velocity] ([] if none).
+b = [];  d = [];
+if isempty(rd.dets), return; end
+pos = getpixelposition(S.h.rdAx);
+xl = get(S.h.rdAx, 'XLim');  yl = get(S.h.rdAx, 'YLim');
+dx = (rd.dets(:, 1) / 1e3 - p(1)) / diff(xl) * pos(3);
+dy = (rd.vel_mps(rd.dets(:, 2)) - p(2)) / diff(yl) * pos(4);
+[dist, i] = min(hypot(dx(:), dy(:)));
+if dist <= 8
+    b = floor(rd.dets(i, 1) / rd.dR_m) + 1;  d = rd.dets(i, 2);
+end
+end
+
+function [S, txt] = low_hover(S, q)
+% Data tip of the point of the plot below the map nearest to the cursor (within 12 pixels).
+txt = '';
+rd = S.data.rd;
+set(S.h.specTip, 'Visible', 'off');
+if isempty(rd) || isempty(S.lowPts), return; end
+pos = getpixelposition(S.h.specAx);
+xl = get(S.h.specAx, 'XLim');  yl = get(S.h.specAx, 'YLim');
+[dist, i] = min(abs(S.lowPts(:, 1) - q(1)) / diff(xl) * pos(3));
+if dist > 12, return; end
+[b, d] = low_cell(S, rd, S.lowPts(i, 3));
+txt = rd_cell_text(rd, b, d);
+set(S.h.specTip, 'String', txt, 'Visible', 'on', ...
+    'Position', [S.lowPts(i, 1) + 0.015*diff(xl), S.lowPts(i, 2) - 0.03*diff(yl), 0]);
+end
+
+function [b, d] = low_cell(S, rd, k)
+% The cell of point k (range bin or Doppler bin) of the plot below the map.
+cols = find(any(~isnan(rd.P), 2));
+[cb, cd] = rd_cut(S, rd, cols(1), cols(end));
+if strcmp(S.opt.rdLower, 'range'), b = k;  d = cd; else, b = cb;  d = k; end
+end
+
+function [ax, view] = rd_axes(S, which)
+% Axes of the map ('map') or of the plot below it ('lower') and their limits.
+ax = [];  view = [];
+if strcmp(which, 'map'), ax = S.h.rdAx; elseif strcmp(which, 'lower'), ax = S.h.specAx; end
+if ~isempty(ax), view = [get(ax, 'XLim') get(ax, 'YLim')]; end
+end
+
+function [which, q] = rd_axes_at(S)
+% 'map' / 'lower' when the cursor is over the range-Doppler map / the plot below it (tab 2).
+which = '';  q = [];
+if S.opt.tab ~= 2 || isempty(S.data.rd), return; end
+names = {'map', 'lower'};
+for i = 1:2
+    [ax, v] = rd_axes(S, names{i});
+    cp = get(ax, 'CurrentPoint');
+    p = cp(1, 1:2);
+    if p(1) >= v(1) && p(1) <= v(2) && p(2) >= v(3) && p(2) <= v(4)
+        which = names{i};  q = p;
+        return
+    end
+end
+end
+
+function S = rd_zoom(S, which, fxy, c)
+% Zoom the map or the plot below it by fxy = [fx fy] (> 1 = in) around c.
+[ax, v] = rd_axes(S, which);
+if isempty(ax), return; end
+S = rd_set_view(S, which, c(1) + (v(1:2) - c(1)) / fxy(1), c(2) + (v(3:4) - c(2)) / fxy(2));
+end
+
+function S = rd_set_view(S, which, xl, yl)
+% New view of the map or of the plot below it ([] = all of it); draw_rd keeps it inside the data.
+if strcmp(which, 'map')
+    if isempty(xl), S.rdView = []; else, S.rdView = [xl yl]; end
+else
+    if isempty(xl), S.lowView = []; else, S.lowView = [xl yl]; end
+end
+S = draw_rd(S);
+end
+
+function [lo, hi] = clamp_span(lo, hi, fullLo, fullHi, minSpan)
+% Keep a view [lo hi] inside [fullLo fullHi], at least minSpan wide.
+span = max(minSpan, min(hi - lo, fullHi - fullLo));
+mid = (lo + hi) / 2;
+lo = mid - span/2;  hi = mid + span/2;
+if lo < fullLo, hi = hi + fullLo - lo;  lo = fullLo; end
+if hi > fullHi, lo = lo - (hi - fullHi);  hi = fullHi; end
+end
+
+function S = rd_pin(S, which, q)
+% Pin (or remove) the data tip of the cell at q on the map (a detection within 8 pixels wins;
+% the cell also becomes the selected cut) or of the nearest point of the plot below it.
+rd = S.data.rd;
+if isempty(rd), return; end
+if strcmp(which, 'map')
+    [b, d] = rd_detection_near(S, rd, q);
+    if isempty(b)
+        b = floor(q(1) * 1e3 / rd.dR_m) + 1;
+        [~, d] = min(abs(rd.vel_mps - q(2)));
+    end
+    if b < 1 || b > size(rd.P, 1), return; end
+    S.rdSel = [b d];
+else
+    pos = getpixelposition(S.h.specAx);
+    xl = get(S.h.specAx, 'XLim');
+    if isempty(S.lowPts), return; end
+    [dist, i] = min(abs(S.lowPts(:, 1) - q(1)) / diff(xl) * pos(3));
+    if dist > 12, return; end
+    [b, d] = low_cell(S, rd, S.lowPts(i, 3));
+end
+k = find(S.rdPins(:, 1) == b & S.rdPins(:, 2) == d, 1);
+if isempty(k), S.rdPins(end+1, :) = [b d]; else, S.rdPins(k, :) = []; end
 S = draw_rd(S);
 end
 
@@ -571,6 +855,8 @@ end
 function show_timing(S)
 % Mean time per PRI of every block, of the console output and of the display in the panel.
 % The labels are at most 15 characters, so the value column stays inside the panel.
+% (Also while the display is paused: the processing goes on.)
+if ~isempty(S.pending), S.data = S.pending; end
 us = S.data.timing_us;
 if isempty(us), return; end
 names = {'DBF', 'Matched filter', 'MTI (clutter)', 'Doppler FFT+NCI', compact_label(['CFAR ' S.sys.cfar.label]), ...
@@ -628,6 +914,9 @@ for i = 1:numel(S.h.pins)
     delete([S.h.pins{i}.txt S.h.pins{i}.mk]);
 end
 S.h.pins = {};
+S.rdPins = zeros(0, 2);                                     % and those of the range-Doppler tab
+S.rdSel = [];
+S = draw_rd(S);
 end
 
 function S = key(S, evt)
@@ -649,10 +938,20 @@ switch evt.Key
         set(S.h.ui.showMode, 'Value', find(strcmp(S.opt.showMode, modes)));
         S = redraw(S);
     case 'space'
-        S.opt.paused = ~S.opt.paused;
-        labels = {'Pause display', 'Resume display'};
-        set(S.h.ui.pause, 'String', labels{1 + S.opt.paused});
-        if ~S.opt.paused, S = redraw(S); end
+        S = toggle_pause(S);
+end
+end
+
+function S = toggle_pause(S)
+% Pause / resume the display: while paused ppi_update keeps the new data aside (S.pending);
+% on resume the newest data is shown.
+S.opt.paused = ~S.opt.paused;
+labels = {'Pause display', 'Resume display'};
+colours = {[0.15 0.15 0.15], [0.45 0.36 0.05]};
+set(S.h.ui.pause, 'String', labels{1 + S.opt.paused}, 'BackgroundColor', colours{1 + S.opt.paused});
+if ~S.opt.paused
+    if ~isempty(S.pending), S.data = S.pending; S.pending = []; end
+    S = redraw(S);
 end
 end
 

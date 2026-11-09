@@ -434,10 +434,13 @@ enum { PPI_SHOW_PLOTS = 0, PPI_SHOW_DETECTIONS = 1, PPI_SHOW_BOTH = 2, PPI_SHOW_
 void ppi_set_display_mode(int mode);
 /* Beams after the DBF for the beam selector of the panel (call before ppi_run):
  * their number and elevations (NaN without DBF); the beam (0-based) and the
- * tab (0 PPI, 1 range-Doppler map with a small PPI) at the start. */
+ * tab (0 PPI, 1 range-Doppler map with a small PPI) and the plot below the
+ * range-Doppler map (0 Doppler spectrum of a range bin, 1 range profile of a
+ * Doppler bin) at the start. */
 void ppi_set_beams(int nBeams, const double *beamEl_deg);
 void ppi_set_beam(int beam);
 void ppi_set_tab(int tab);
+void ppi_set_rd_plot(int plot);
 /* Display modes PPI_SHOW_DBF / PPI_SHOW_MF: ppi_profile_wanted() returns
  * PROFILE_DBF / PROFILE_MF (else PROFILE_NONE) and the selected beam; the worker
  * then hands the profile of every PRI to ppi_post_profile(). The range-Doppler

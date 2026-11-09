@@ -17,6 +17,7 @@
  *     --ppi-beam N           beam shown by dbf / mf and the range-Doppler tab (1 ... beams, default 1)
  *     --ppi-tab TAB          tab at the start: 'ppi' (default) or 'rd' (range-Doppler map + small PPI)
  *     --ppi-rd-rate HZ       range-Doppler maps per second of the tab (default cfg.display.rdRate_Hz)
+ *     --ppi-rd-plot P        plot below the range-Doppler map: 'spectrum' (default) or 'range' (profile)
  *     --serial DEVICE        send the CFAR detections to a serial port (e.g. /dev/ttyUSB0, COM3)
  *     --baud N               serial baud rate (default 921600)
  *     --serial-content X     'detections' (default) or 'plots'
@@ -54,7 +55,7 @@
 
 typedef struct {
     const char *configPath, *recordPath, *replayPath, *snapshotPath;
-    const char *serialDevice, *serialContent, *plotsCsv, *detectionsCsv, *tracksCsv, *mf, *ppiShow, *ppiTab;
+    const char *serialDevice, *serialContent, *plotsCsv, *detectionsCsv, *tracksCsv, *mf, *ppiShow, *ppiTab, *ppiRdPlot;
     int ppiBeam;                  /* 1-based */
     int port, baud, threads, updateEvery, ppi, quiet, queue, noSkip;
     double rdRate;                   /* --ppi-rd-rate (0 = from the configuration) */
@@ -90,6 +91,7 @@ static void usage(void)
     puts("usage: radar_receiver [--config FILE] [--port N] [--record FILE] [--replay FILE]\n"
          "                      [--ppi] [--ppi-snapshot FILE] [--ppi-show plots|detections|both|video|dbf|mf]\n"
          "                      [--ppi-beam N] [--ppi-tab ppi|rd] [--ppi-rd-rate HZ]\n"
+         "                      [--ppi-rd-plot spectrum|range]\n"
          "                      [--serial DEVICE] [--baud N]\n"
          "                      [--serial-content detections|plots] [--threads N] [--mf auto|direct|fft]\n"
          "                      [--update-every N]\n"
@@ -110,6 +112,7 @@ static int parse_options(int argc, char **argv, Options *o)
     o->mf = "auto";
     o->ppiShow = "plots";
     o->ppiTab = "ppi";
+    o->ppiRdPlot = "spectrum";
     o->ppiBeam = 1;
     o->queue = 64;
     o->cfarThreshold_dB = NAN;
@@ -127,6 +130,7 @@ static int parse_options(int argc, char **argv, Options *o)
         else if (!strcmp(a, "--ppi-show"))       TAKE(o->ppiShow = v);
         else if (!strcmp(a, "--ppi-beam"))       TAKE(o->ppiBeam = atoi(v));
         else if (!strcmp(a, "--ppi-tab"))        TAKE(o->ppiTab = v);
+        else if (!strcmp(a, "--ppi-rd-plot"))    TAKE(o->ppiRdPlot = v);
         else if (!strcmp(a, "--ppi-rd-rate"))    TAKE(o->rdRate = atof(v));
         else if (!strcmp(a, "--serial"))         TAKE(o->serialDevice = v);
         else if (!strcmp(a, "--baud"))           TAKE(o->baud = atoi(v));
@@ -170,6 +174,10 @@ static int parse_options(int argc, char **argv, Options *o)
     }
     if (strcmp(o->ppiTab, "ppi") && strcmp(o->ppiTab, "rd")) {
         fprintf(stderr, "--ppi-tab must be 'ppi' or 'rd'\n");
+        return -1;
+    }
+    if (strcmp(o->ppiRdPlot, "spectrum") && strcmp(o->ppiRdPlot, "range")) {
+        fprintf(stderr, "--ppi-rd-plot must be 'spectrum' or 'range'\n");
         return -1;
     }
     if (o->ppiBeam < 1) {
@@ -667,6 +675,7 @@ int main(int argc, char **argv)
             if (app.opt.ppiBeam > nB) fprintf(stderr, "--ppi-beam %d: only %d beam(s), beam 1 is shown\n", app.opt.ppiBeam, nB);
             ppi_set_beam(app.opt.ppiBeam <= nB ? app.opt.ppiBeam - 1 : 0);
             ppi_set_tab(!strcmp(app.opt.ppiTab, "rd"));
+            ppi_set_rd_plot(!strcmp(app.opt.ppiRdPlot, "range"));
         }
         app.exitCode = ppi_run(argc, argv, app.cfg.maxRange_m, worker, &app, &g_stop, app.opt.snapshotPath);
 #else

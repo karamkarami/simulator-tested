@@ -17,7 +17,8 @@ function [sys, want] = ppi_update(ppi, sys, az_deg, t_s, scan, plots, dets, trac
 %   beam want.beam) or '' (none), want.rd = true while the range-Doppler tab
 %   is shown (pass the map of beam want.beam).
 %   While the display is paused (space key or the Pause button) the data is
-%   still stored but not drawn.
+%   kept aside and not drawn (the display, its data tips and the range-Doppler
+%   map stay as they were); Resume shows the newest data.
 %   When the user applied a new CFAR threshold in the panel, the returned sys
 %   holds it (sys.cfar.alpha), so the processing uses it from now on.
 if nargin < 7, dets = zeros(0, 10); end
@@ -38,10 +39,18 @@ if ~isempty(dB)
 end
 S = getappdata(ppi.fig, 'ppi');
 S.sys = sys;
-if isempty(video), video = S.data.video; end
-if isempty(rd), rd = S.data.rd; end
-S.data = struct('az_deg', az_deg, 't_s', t_s, 'scan', scan, 'plots', plots, 'dets', dets, ...
-                'tracks', tracks, 'timing_us', timing_us, 'timingPris', timingPris, 'video', video, 'rd', rd);
+base = S.data;
+if S.opt.paused && ~isempty(S.pending), base = S.pending; end
+if isempty(video), video = base.video; end
+if isempty(rd), rd = base.rd; end
+new = struct('az_deg', az_deg, 't_s', t_s, 'scan', scan, 'plots', plots, 'dets', dets, ...
+             'tracks', tracks, 'timing_us', timing_us, 'timingPris', timingPris, 'video', video, 'rd', rd);
+if S.opt.paused
+    S.pending = new;                                      % shown on resume
+else
+    S.data = new;
+    S.pending = [];
+end
 if any(strcmp(S.opt.showMode, {'video', 'dbf', 'mf'})), want.raw = S.opt.showMode; end
 want.beam = S.opt.beam;
 want.rd = S.opt.tab == 2;

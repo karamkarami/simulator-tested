@@ -764,7 +764,7 @@ The PPI (`ppi_init.m`) is interactive, also while the simulation runs:
 | keys `+` `-`, arrows | zoom, pan |
 | key `c` | remove the pinned data tips |
 | key `d` | next display mode (plots / detections / both / video / DBF out / MF out) |
-| key space | pause/resume the display (the simulation continues) |
+| key space, *Pause display* button | pause/resume the display (the simulation continues; nothing new is drawn, also not in the range-Doppler tab, until Resume shows the newest data) |
 
 The figure opens maximized and has two tabs (buttons above the display;
 start value `cfg.display.tab`, `'ppi'` or `'rd'`). **PPI**: the PPI as
@@ -774,11 +774,18 @@ the MTI, the Doppler FFT and the noise-gain equalisation, i.e. the map the
 CFAR tests), colour = dB above the noise floor of the map (its median), from
 -3 dB (black) to the strongest cell (at least 20 dB), with a colour scale,
 the CFAR detections of that beam as white circles and the MTI notch as
-dashed lines. Below it the Doppler spectrum (dB) of one range bin: the bin
-under the cursor, else the bin of the strongest detection (or the strongest
-cell), so a peak and the shape of the spectrum around it (Doppler mainlobe,
-sidelobes, clutter residue near zero) are seen directly; hovering over the
-map shows the range, velocity and power of the cell. The PPI is drawn small
+dashed lines. Below it (panel: *Below map*, start value
+`cfg.display.rdLowerPlot`) the Doppler spectrum (dB above noise) of one
+range bin or the range profile of one Doppler bin, through the cell under
+the cursor, else the selected cell (a click on the map), else the strongest
+detection (or the strongest cell), so a peak and the shape around it
+(Doppler mainlobe, sidelobes, clutter residue near zero; range sidelobes)
+are seen directly; both plots have axis labels. Both plots zoom with the
+wheel at the cursor (Shift: horizontal axis only, Ctrl: vertical only), pan
+by dragging, show all again with a double click, show a data tip of the cell
+or detection (map) or point (plot below) under the cursor, and pin it with a
+click (again: remove; key `c` / *Remove data tips*); the view and the
+pinned tips stay while new maps arrive. The PPI is drawn small
 next to the map, so both can be watched live. The map is taken from the
 processing only while this tab is shown (at the display updates, at most
 `cfg.display.rdRate_Hz` times a second, default 10; also the rate of the C
@@ -1016,7 +1023,7 @@ budget.
 | `test_generate_ddc` | `generate_ddc_files`: without noise its DDC files equal those of `run_radar_sim` bit by bit (2 and 4 MHz, header included); with noise a pulse gives the same file whatever other pulses are generated (order and number of workers do not matter) |
 | `test_short_pulse_ghost` | a strong target at 65 km is detected, and its short-pulse echo in the long window gives no ghost plot |
 | `test_six_targets(mode, clutterOn, keepRaw)` | 6 targets (0.5 - 10 m^2 mean RCS, Swerling 1, 8 - 48 km, up to 290 m/s, around the radar) are detected with the right range, azimuth, elevation and (folded) velocity, with at most 2 false plots; a target at a blind speed (`snr_budget`: with the staggered PRF at 170 MHz T1 and T6) may be missed; one raw file per PRI, named by the pulse number |
-| `test_ppi_interactive` | PPI interaction: data tips, zoom around the cursor, pan, keys, filters, pinned tips, pause, clear, PNG; detection display (modes, arcs, data tips, filters); CFAR threshold field (Apply, hand-over through `ppi_update`, invalid input, Default, Pfa); tracks (triangles, data tip, checkbox); block processing times |
+| `test_ppi_interactive` | PPI interaction: data tips, zoom around the cursor, pan, keys, filters, pinned tips, pause, clear, PNG; range-Doppler tab (axis labels, zoom of both axes or one, pan, reset, data tips, pins kept by a new map, range profile, pause keeps the map); detection display (modes, arcs, data tips, filters); CFAR threshold field (Apply, hand-over through `ppi_update`, invalid input, Default, Pfa); tracks (triangles, data tip, checkbox); block processing times |
 | `test_setup` | configuration edge cases without a simulation: the simulated sectors (`[0 360]` = whole circle, across North, several sectors), settings that cannot work stop with a message naming them (MTI notch over all Doppler bins, CPI too short, unknown CFAR method, DDC rate, PRF mode), a short pulse that hands over within its first CFAR window keeps one whole window (and the C receiver accepts the exported configuration); the DDC output and the PRI header are the same for every CFAR method and pulse compression filter |
 | `test_vhf_challenges` | demanding cases at 170 MHz (one CPI each, clutter): ADC overload detected at 60 dB without STC, none with the STC (and at 30 dB without it); strong targets at 5, 8, 12 and 21 km (up to 10 m^2) give one detection and no ghost of their eclipsed long-pulse echo with the STC (the number without it is printed); targets at 30 and 23.5 km (deepest long-window STC) behind a strong near target are detected, no other long-pulse detection; fixed PRF: blind at 5 m/s, 30 - 430 m/s detected with the right velocity; staggered PRF: the row blind speed (225 m/s) flagged and not detected, 150 m/s detected; two targets 300 m apart resolved; 33 000 CFAR detections pruned in about a second, exactly as the direct rules |
 | `test_clutter` | clutter power and terrain (5 min): the CNR measured at the matched filter output equals `cfg.clutter.cnr_dB` (60, 72.7, 85 dB) and `cnr_dB = []` keeps `sigma0_dB`; desert and sea 15 dB below land; nothing flat beyond the horizon, mountains seen beyond it, their back slopes shadowed, one steering vector per elevation group; internal motion of every type (sea: its drift); no ADC clipping over 360 deg at the default CNR, clipping above the warning at +15 dB; one CPI over land, hills, mountains, desert and sea: the target detected, nothing else |
