@@ -218,7 +218,6 @@ static void ca_chunk(const RadarConfig *cfg, const CfarMap *m, int b, int cf, in
     const int nfft = cfg->nfft, nR = m->nR, R = w->ringRows;
     const int gR = cfg->guardRange, oR = gR + cfg->trainRange;
     const int gD = cfg->guardDoppler, oD = gD + cfg->trainDoppler;
-    const int zeroBin = nfft / 2;
     const size_t nCells = (size_t)m->nCells;
     int a, z, e0, e1;
     needed_span(nR, oR, cf, cl, &a, &z, &e0, &e1);
@@ -283,7 +282,6 @@ static void goso_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, i
     const int nfft = cfg->nfft, nR = m->nR, go = cfg->cfarType == CFAR_GO;
     const int gR = cfg->guardRange, oR = gR + cfg->trainRange;
     const int gD = cfg->guardDoppler, oD = gD + cfg->trainDoppler;
-    const int zeroBin = nfft / 2;
     const size_t nCells = (size_t)m->nCells;
     const double scale = cfg->cfarNoiseScale;
     const float *Pb = m->P + (size_t)b * nR;
@@ -298,7 +296,7 @@ static void goso_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, i
             cO[r] = sa;  cG[r] = sb;
         }
         for (int d = 0; d < nfft; d++) {
-            if (abs(d - zeroBin) > cfg->notchBins) {
+            {
                 unsigned char *det = m->det + (size_t)d * nCells + (size_t)b * nR;
                 const float *x = ROW(d);
                 for (int r = cf; r <= cl; r++) {
@@ -330,7 +328,7 @@ static void goso_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, i
         cO[i] = so;  cG[i] = sg;
     }
     for (int d = 0; d < nfft; d++) {
-        if (abs(d - zeroBin) > cfg->notchBins) {
+        {
             unsigned char *det = m->det + (size_t)d * nCells + (size_t)b * nR;
             const float *x = ROW(d);
             sO[0] = sG[0] = 0.0;                               /* sO[i - e0] = sum of the cells e0 ... i-1 */
@@ -417,7 +415,7 @@ static void os_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int
     const int nfft = cfg->nfft, nR = m->nR;
     const int gR = cfg->guardRange, oR = gR + cfg->trainRange;
     const int gD = cfg->guardDoppler, oD = gD + cfg->trainDoppler;
-    const int zeroBin = nfft / 2, nWin = (2 * oR + 1) * (2 * oD + 1);
+    const int nWin = (2 * oR + 1) * (2 * oD + 1);
     const size_t nCells = (size_t)m->nCells;
     const float *Pb = m->P + (size_t)b * nR;
     for (int d = 0; d < nfft; d++) {
