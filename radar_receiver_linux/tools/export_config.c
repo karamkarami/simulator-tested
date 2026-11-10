@@ -1239,7 +1239,7 @@ static void export_config(void)
         const int m = 2 * nRows;
         double *A = xcalloc((size_t)(m * m), sizeof(double));
         for (int i = 0; i < nfft; i++) {
-            if (!(abs(i + 1 - zeroBin) > notchBins)) continue;
+            if (notchMaxRange_m >= maxRange && !(abs(i + 1 - zeroBin) > notchBins)) continue;
             anyTested = 1;
             double tr = 0;
             for (int r1 = 0; r1 < nRows; r1++) {
