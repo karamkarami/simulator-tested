@@ -1288,7 +1288,16 @@ void PpiWidget::addVideoRow(const VideoRow &row)
          * sample per bin (exponential power: 9.77 dB), the video the mean over the elements
          * (one element: also 9.77 dB, 48 elements: 0.86 dB) */
         const double m = 10.0 * std::log10((double)*mid) + p10_offset_dB(row.kind == 0 ? row.nAvg : 1);
-        videoNoise_dB_ = std::isfinite(videoNoise_dB_) ? 0.98 * videoNoise_dB_ + 0.02 * m : m;
+        if (!std::isfinite(videoNoise_dB_)) {
+            videoNoise_dB_ = m;
+        } else {
+            /* A short mountain-clutter burst can raise this row's 10th percentile
+             * even though the receiver noise is unchanged. Limit upward movement
+             * of the measurement to 0.05 dB per PRI before smoothing: a transient
+             * cannot shift the global video colour scale and requantise the map. */
+            const double bounded = std::min(m, videoNoise_dB_ + 0.05);
+            videoNoise_dB_ = 0.98 * videoNoise_dB_ + 0.02 * bounded;
+        }
     }
     bool requantise = false;
     if (std::isfinite(videoNoise_dB_) && !(std::fabs(videoNoise_dB_ - 3.0 - videoLo_dB_) < 0.5)) {

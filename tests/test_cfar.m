@@ -21,6 +21,7 @@ function ok = test_cfar()
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
 ok = closed_forms();
+ok = range_limited_notch() && ok;
 rng(11);
 for type = {'ca', 'go', 'so', 'os'}
     for method = {'2d', 'range', 'doppler'}
@@ -38,6 +39,7 @@ for type = {'ca', 'go', 'so', 'os'}
         nTrials = 12;
         if strcmp(type{1}, 'os') && strcmp(method{1}, '2d'), nTrials = 4; end   % 296 cells per test
         wv.testIdx = [1 nR];
+        wv.range_m = (0:nR-1) * 100;
         fa = 0;  faEdge = 0;  nEdge = 0;  nInner = 0;
         edge = false(1, nR);
         edge([1:oR, nR-oR+1:nR]) = true;
@@ -57,7 +59,7 @@ for type = {'ca', 'go', 'so', 'os'}
         isDet = cfar_detect(P, sys, wv);
         edgeOk = isDet(2, 1, 10) && isDet(2, nR, 20);
         % tested interval: cells 50 ... 120 only
-        wv2.testIdx = [50 120];
+        wv2.testIdx = [50 120];  wv2.range_m = wv.range_m;
         P(:, 30, 5) = 1e3;  P(:, 80, 5) = 1e3;  P(:, 150, 5) = 1e3;
         isDet = cfar_detect(P, sys, wv2);
         hit = squeeze(any(any(isDet, 1), 3));
@@ -65,7 +67,7 @@ for type = {'ca', 'go', 'so', 'os'}
         % noise estimate = the statistic of the training cells of the (shifted) window
         noiseOk = true;
         for iv = [1 3; 1 oR+1; 4 9; nR-2 nR; nR-oR nR; nR-12 nR-6; 100 140; 1 nR].'
-            wv3.testIdx = iv.';
+            wv3.testIdx = iv.';  wv3.range_m = wv.range_m;
             [isD, noise] = cfar_detect(P, sys, wv3);
             ref = direct_noise(P, sys, iv(1):iv(2));
             got = double(noise(:, iv(1):iv(2), :));
@@ -102,6 +104,26 @@ for type = {'ca', 'go', 'so', 'os'}
     end
 end
 fprintf('CFAR detectors (CA, GO, SO, OS), windows, edges and range interval: %s\n', ternary(ok, 'PASS', 'FAIL'));
+end
+
+function ok = range_limited_notch()
+% The MTI notch suppresses its Doppler bins only through the configured range.
+cfg = radar_config();
+cfg.console.enable = false;
+cfg.cfar.method = '2d';
+cfg.cfar.notchMaxRange_m = 500;
+sys = setup_radar(cfg);
+sys.dop.notchBins = 2;
+sys.cfar.alpha = 10;
+nR = 100;  nD = 64;  zeroBin = floor(nD/2) + 1;
+wv.testIdx = [1 nR];
+wv.range_m = (0:nR-1) * 100;
+P = ones(1, nR, nD, 'single');
+P(1, 3, zeroBin) = 100;                         % 200 m: notch still applies
+P(1, 80, zeroBin) = 100;                        % 7.9 km: full CFAR applies
+isDet = cfar_detect(P, sys, wv);
+ok = ~isDet(1, 3, zeroBin) && isDet(1, 80, zeroBin);
+fprintf('  Range-limited MTI notch (500 m): %s\n', ternary(ok, 'ok', 'FAIL'));
 end
 
 function ok = closed_forms()

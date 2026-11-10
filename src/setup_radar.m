@@ -409,7 +409,11 @@ end
 % The residue is as wide as the Doppler window mainlobe: +-2*nfft/rowLen bins for Hamming.
 sys.dop.notchBins = round(cfg.cfar.notchWidth * 2 * nfft / rowLen);
 zeroBin = floor(nfft/2) + 1;
-tested = abs((1:nfft) - zeroBin) > sys.dop.notchBins;
+if sys.cfar.notchMaxRange_m < cfg.rx.maxRange_m
+    tested = true(1, nfft);                  % beyond the notch range, every Doppler bin is tested
+else
+    tested = abs((1:nfft) - zeroBin) > sys.dop.notchBins;
+end
 if ~any(tested)
     error('The MTI notch (cfg.cfar.notchWidth = %g: +-%d bins) covers every Doppler bin (FFT length %d).', ...
           cfg.cfar.notchWidth, sys.dop.notchBins, nfft);
@@ -526,6 +530,13 @@ function w = cfar_window(cfg)
 c = cfg.cfar;
 w.method = lower(c.method);
 w.notchWidth = c.notchWidth;
+w.notchMaxRange_m = Inf;
+if isfield(c, 'notchMaxRange_m') && ~isempty(c.notchMaxRange_m)
+    w.notchMaxRange_m = c.notchMaxRange_m;
+end
+if ~isscalar(w.notchMaxRange_m) || ~isreal(w.notchMaxRange_m) || isnan(w.notchMaxRange_m) || w.notchMaxRange_m < 0
+    error('cfg.cfar.notchMaxRange_m must be a non-negative scalar range in metres (Inf is allowed).');
+end
 w.type = 'ca';                                     % detector: cfg.cfar.type
 if isfield(c, 'type') && ~isempty(c.type), w.type = lower(c.type); end
 if ~any(strcmp(w.type, {'ca', 'go', 'so', 'os'}))

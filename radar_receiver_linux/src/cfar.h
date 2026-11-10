@@ -33,12 +33,12 @@ typedef struct {
 void cfar_scratch_init(CfarScratch *w, const RadarConfig *cfg, int maxNR);
 void cfar_scratch_free(CfarScratch *w);
 
-/* The tested range cells cf ... cl of beam b (all Doppler bins outside the
- * MTI notch) with the detector cfg->cfarType, the window of cfg and the
- * threshold factor alpha: m->det marks the cells that exceed alpha times the
- * statistic of their training cells and are local peaks (3 x 3 x 3 beam x
- * range x Doppler); m->noise gets the noise estimate of every detection. The
- * other cells of m->det are left as they are (cleared by the caller). */
-void cfar_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int b, int cf, int cl, CfarScratch *w);
+/* The tested range cells cf ... cl of beam b. All Doppler bins are evaluated;
+ * the MTI notch is then suppressed only through notchLastCell. m->det marks
+ * cells above alpha times the training statistic and local peaks (3 x 3 x 3
+ * beam x range x Doppler); m->noise gets the estimate of every detection.
+ * Other cells of m->det are left as they are (cleared by the caller). */
+void cfar_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int b, int cf, int cl,
+                int notchLastCell, CfarScratch *w);
 
 #endif

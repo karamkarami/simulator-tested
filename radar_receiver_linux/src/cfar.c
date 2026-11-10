@@ -242,7 +242,7 @@ static void ca_chunk(const RadarConfig *cfg, const CfarMap *m, int b, int cf, in
         for (int r = a; r <= z; r++) aG[r] += g[r];
     }
     for (int d = 0; d < nfft; d++) {
-        if (abs(d - zeroBin) > cfg->notchBins) {
+        {
             unsigned char *det = m->det + (size_t)d * nCells + (size_t)b * nR;
             ca_test_row(Pb + (size_t)d * nCells, aO, aG, m->thrScale, det, cf, cl, oR, nR);
             peaks_row(m, b, d, cf, cl, w->colMax, det);
@@ -421,7 +421,7 @@ static void os_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int
     const size_t nCells = (size_t)m->nCells;
     const float *Pb = m->P + (size_t)b * nR;
     for (int d = 0; d < nfft; d++) {
-        if (abs(d - zeroBin) <= cfg->notchBins) continue;
+        /* The range-limited notch is applied by cfar_chunk after detection. */
         unsigned char *det = m->det + (size_t)d * nCells + (size_t)b * nR;
         for (int r = cf; r <= cl; r++) det[r] = 1;
         peaks_row(m, b, d, cf, cl, w->colMax, det);              /* the candidates */
@@ -467,13 +467,30 @@ static void os_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int
     }
 }
 
-void cfar_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int b, int cf, int cl, CfarScratch *w)
+void cfar_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int b, int cf, int cl,
+                int notchLastCell, CfarScratch *w)
 {
     switch (cfg->cfarType) {
     case CFAR_GO:
     case CFAR_SO: goso_chunk(cfg, m, alpha, b, cf, cl, w); break;
     case CFAR_OS: os_chunk(cfg, m, alpha, b, cf, cl, w); break;
     default:      ca_chunk(cfg, m, b, cf, cl, w); break;
+    }
+    /* Suppress only near-range cells in the MTI notch. Beyond notchLastCell
+     * the CFAR result above is retained for every Doppler bin. */
+    if (notchLastCell >= cf) {
+        const int d0 = cfg->nfft / 2 - cfg->notchBins > 0 ? cfg->nfft / 2 - cfg->notchBins : 0;
+        const int d1 = cfg->nfft / 2 + cfg->notchBins < cfg->nfft - 1 ? cfg->nfft / 2 + cfg->notchBins : cfg->nfft - 1;
+        const int r1 = notchLastCell < cl ? notchLastCell : cl;
+        const size_t nCells = (size_t)m->nCells;
+        for (int d = d0; d <= d1; d++) {
+            unsigned char *det = m->det + (size_t)d * nCells + (size_t)b * m->nR;
+            memset(det + cf, 0, (size_t)(r1 - cf + 1));
+            if (m->noise) {
+                float *noise = m->noise + (size_t)d * nCells + (size_t)b * m->nR;
+                memset(noise + cf, 0, sizeof(float) * (size_t)(r1 - cf + 1));
+            }
+        }
     }
 }
 

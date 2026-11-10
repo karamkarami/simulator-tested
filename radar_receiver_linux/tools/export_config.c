@@ -1230,6 +1230,7 @@ static void export_config(void)
         free(y); free(Yr); free(Yi); free(cosT); free(sinT);
     }
     const double notchWidth = num("cfar.notchWidth");
+    const double notchMaxRange_m = num("cfar.notchMaxRange_m");
     const int notchBins = (int)lround(notchWidth * 2 * nfft / rowLen);
     const int zeroBin = nfft / 2 + 1;
     double nLooks = INFINITY;
@@ -1385,6 +1386,7 @@ static void export_config(void)
     rec_vec("noiseGain", noiseGain, nfft, 0);
     rec_vec("dopFreq_Hz", fHz, nfft, 0);
     rec_scalar("notchBins", notchBins);
+    rec_scalar("notchMaxRange_m", notchMaxRange_m);
     rec_scalar("medianToMean", medianToMean);
     rec_scalar("cfarMethod", cfarMethod);
     rec_scalar("guardRange", guardR);

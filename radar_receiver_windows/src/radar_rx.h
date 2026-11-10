@@ -99,6 +99,7 @@ typedef struct {
     float  *noiseGain;     /* [nfft] noise gain of every Doppler bin (after fftshift) */
     double *dopFreq_Hz;    /* [nfft] Doppler axis (after fftshift)                    */
     int     notchBins;     /* bins on each side of zero Doppler that are not tested   */
+    double  notchMaxRange_m; /* apply the MTI notch only at range_m <= this limit      */
     double  medianToMean;  /* median / mean of the noise power (noise floor estimate) */
 
     /* CFAR, pruning, plot extraction */

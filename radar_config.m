@@ -214,6 +214,7 @@ cfg.cfar.doppler.threshold_dB = [];
 
 cfg.cfar.notchWidth   = 1;     % half-width of the zero-Doppler band that is not tested (MTI notch,
                                % clutter residue), in Doppler window mainlobes (1 -> +-2 bins)
+cfg.cfar.notchMaxRange_m = Inf; % apply notchWidth only through this range [m]; beyond it, test every Doppler bin
 % Range interval in which each sub-pulse is tested (all methods); the cells
 % outside it are only used as training cells. The short pulse also stops
 % where the long pulse starts (handover).

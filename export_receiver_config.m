@@ -9,7 +9,8 @@ function export_receiver_config(cfg, fileName)
 %   tested range cells, CFAR detector (CA, GO, SO, OS), noise floor of the SNR, plot extraction and tracker
 %   settings, clutter filter, peak interpolation). Export again
 %   whenever cfg changes, before starting the C receiver. Default file:
-%   radar_receiver_<os>/config/radar_config.bin.
+%   both radar_receiver_windows/config/radar_config.bin and
+%   radar_receiver_linux/config/radar_config.bin.
 %
 %   Without MATLAB: the C program radar_export_config of the receiver project
 %   (CLion run configuration of the same name) reads radar_config.m itself and
@@ -23,7 +24,12 @@ function export_receiver_config(cfg, fileName)
 root = fileparts(mfilename('fullpath'));
 addpath(root, fullfile(root, 'src'));
 if nargin < 1, cfg = radar_config(); end
-if nargin < 2, fileName = fullfile(receiver_dir(), 'config', 'radar_config.bin'); end
+if nargin < 2 || isempty(fileName)
+    fileNames = {fullfile(root, 'radar_receiver_windows', 'config', 'radar_config.bin'), ...
+                 fullfile(root, 'radar_receiver_linux',  'config', 'radar_config.bin')};
+else
+    fileNames = {fileName};                         % explicit destination: write only that file
+end
 sys = setup_radar(cfg);
 
 r = {};                                              % {name, value} pairs
@@ -76,6 +82,7 @@ r{end+1} = {'dopWindow', sys.dop.window};
 r{end+1} = {'noiseGain', reshape(sys.dop.noiseGain, 1, [])};
 r{end+1} = {'dopFreq_Hz', sys.dop.f_Hz};
 r{end+1} = {'notchBins', sys.dop.notchBins};
+r{end+1} = {'notchMaxRange_m', sys.cfar.notchMaxRange_m};
 r{end+1} = {'medianToMean', sys.dop.medianToMean};
 r{end+1} = {'cfarMethod', find(strcmp(sys.cfar.method, {'2d', 'range', 'doppler'})) - 1};   % 0 2-D, 1 range, 2 Doppler
 r{end+1} = {'guardRange', sys.cfar.guardRange};      % window of the selected method (0 = none in that dimension)
@@ -145,25 +152,29 @@ if strcmp(tk.method, 'pmbm')                                             % PMBM 
     r{end+1} = {'pmbmTiming', [m.latency_s, m.maintStep_s]};
 end
 
-folder = fileparts(fileName);
-if ~isempty(folder) && ~exist(folder, 'dir'), mkdir(folder); end
-fid = fopen(fileName, 'w', 'ieee-le');
-if fid < 0, error('Cannot write %s', fileName); end
-fwrite(fid, 'RADRXCFG', 'char');
-fwrite(fid, [2 numel(r)], 'uint32');
-for i = 1:numel(r)
-    name = r{i}{1};
-    value = double(r{i}{2});
-    nameBytes = zeros(1, 32);
-    nameBytes(1:numel(name)) = double(name);
-    fwrite(fid, nameBytes, 'uint8');
-    fwrite(fid, [~isreal(value), size(value, 1), size(value, 2)], 'uint32');
-    if isreal(value)
-        fwrite(fid, value(:), 'double');
-    else
-        fwrite(fid, [real(value(:)).'; imag(value(:)).'], 'double');
+for kFile = 1:numel(fileNames)
+    fileName = fileNames{kFile};
+    folder = fileparts(fileName);
+    if ~isempty(folder) && ~exist(folder, 'dir'), mkdir(folder); end
+    fid = fopen(fileName, 'w', 'ieee-le');
+    if fid < 0, error('Cannot write %s', fileName); end
+    cleanFile = onCleanup(@() fclose(fid));
+    fwrite(fid, 'RADRXCFG', 'char');
+    fwrite(fid, [2 numel(r)], 'uint32');
+    for i = 1:numel(r)
+        name = r{i}{1};
+        value = double(r{i}{2});
+        nameBytes = zeros(1, 32);
+        nameBytes(1:numel(name)) = double(name);
+        fwrite(fid, nameBytes, 'uint8');
+        fwrite(fid, [~isreal(value), size(value, 1), size(value, 2)], 'uint32');
+        if isreal(value)
+            fwrite(fid, value(:), 'double');
+        else
+            fwrite(fid, [real(value(:)).'; imag(value(:)).'], 'double');
+        end
     end
+    clear cleanFile;                              % close before reporting / next destination
+    fprintf('Receiver configuration (%d records, %s PRF) written to %s\n', numel(r), cfg.prf.mode, fileName);
 end
-fclose(fid);
-fprintf('Receiver configuration (%d records, %s PRF) written to %s\n', numel(r), cfg.prf.mode, fileName);
 end

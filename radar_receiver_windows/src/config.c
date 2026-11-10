@@ -263,6 +263,13 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         cfg->noiseGain    = get_floats(&rs, "noiseGain", cfg->nfft);
         cfg->dopFreq_Hz   = get_doubles(&rs, "dopFreq_Hz", cfg->nfft, NULL);
         cfg->notchBins    = get_int(&rs, "notchBins");
+        {                                              /* optional: preserve the old all-range notch in older files */
+            const Record *r = find_optional(&rs, "notchMaxRange_m");
+            if (!r) cfg->notchMaxRange_m = INFINITY;
+            else if (r->isComplex || r->rows * r->cols != 1)
+                set_error(&rs, "configuration value 'notchMaxRange_m' must be a real scalar");
+            else cfg->notchMaxRange_m = r->data[0];
+        }
         cfg->medianToMean = get_scalar(&rs, "medianToMean");
         cfg->guardRange   = get_int(&rs, "guardRange");
         cfg->trainRange   = get_int(&rs, "trainRange");
@@ -390,7 +397,7 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         if (!rs.failed && (cfg->updateEvery < 1 || cfg->minHits < 1 || cfg->maxMiss < 0 || cfg->cpiLength < 1 ||
                            cfg->nfft < 1 || cfg->nRows < 1 || cfg->rowLen < 1 || cfg->rowLen > cfg->nfft ||
                            cfg->nBeams < 1 || cfg->nCh < 1 || cfg->nStagger < 1 || cfg->nMtiTaps < 1 ||
-                           !cfg->mtiCoeffs || cfg->notchBins < 0))
+                           !cfg->mtiCoeffs || cfg->notchBins < 0 || isnan(cfg->notchMaxRange_m) || cfg->notchMaxRange_m < 0.0))
             set_error(&rs, "invalid sizes in the configuration");
         for (int p = 0; p < N_PULSES && !rs.failed; p++) {
             const PulseConfig *pc = &cfg->pulse[p];

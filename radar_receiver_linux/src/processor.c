@@ -714,6 +714,8 @@ static void cfar(const Processor *p, PulseState *s, const PulseConfig *pc)
     memset(s->det, 0, (size_t)cfg->nfft * s->nCells);
     if (l < f) return;
     for (int r = f; r <= l; r++) s->thrScale[r] = p->alpha * s->cntInv[r];
+    int notchLastCell = -1;
+    for (int r = 0; r < pc->nRange && pc->range_m[r] <= cfg->notchMaxRange_m; r++) notchLastCell = r;
     const CfarMap map = { s->P, s->det, s->noise, s->cntInv, s->thrScale, s->nR, s->nCells, nB, cfg->nfft };
     int nChunks = 1;
     if (nB < p->nThreads) {
@@ -729,7 +731,7 @@ static void cfar(const Processor *p, PulseState *s, const PulseConfig *pc)
         for (int it = 0; it < nItems; it++) {
             const int c = it % nChunks;
             cfar_chunk(cfg, &map, p->alpha, it / nChunks, f + (int)((long long)nTest * c / nChunks),
-                       f + (int)((long long)nTest * (c + 1) / nChunks) - 1, &w->cfar);
+                       f + (int)((long long)nTest * (c + 1) / nChunks) - 1, notchLastCell, &w->cfar);
         }
     }
 }

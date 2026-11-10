@@ -13,8 +13,8 @@ function [isDet, noise] = cfar_detect(P, sys, wv)
 %   inwards at the edges). A cell is detected when P > sys.cfar.alpha times
 %   the statistic. noise is the noise estimate of the tested cells: the
 %   statistic / sys.cfar.noiseScale (its mean for unit noise: 1 for CA), 0
-%   elsewhere (OS: only at its detections). The sys.dop.notchBins Doppler
-%   bins on each side of zero (MTI notch, clutter residue) are not tested.
+%   elsewhere (OS: only at its detections). The MTI notch is applied only
+%   through sys.cfar.notchMaxRange_m; every Doppler bin is tested beyond it.
 nD = size(P, 3);
 zeroBin = floor(nD/2) + 1;                         % zero Doppler after fftshift
 notch = max(1, zeroBin-sys.dop.notchBins):min(nD, zeroBin+sys.dop.notchBins);
@@ -24,9 +24,17 @@ switch sys.cfar.type
     case {'go', 'so'}
         [isDet, noise] = cfar_goso(P, sys, wv);
     case 'os'
-        [isDet, noise] = cfar_os(P, sys, wv, notch);
+        [isDet, noise] = cfar_os(P, sys, wv);
     otherwise
         error('Unknown CFAR type %s.', sys.cfar.type);
 end
-isDet(:, :, notch) = false;
+if isfield(wv, 'range_m')
+    inNotchRange = reshape(wv.range_m, 1, []) <= sys.cfar.notchMaxRange_m;
+else
+    inNotchRange = true(1, size(P, 2));           % legacy callers without a range axis
+end
+if any(inNotchRange)
+    isDet(:, inNotchRange, notch) = false;
+    noise(:, inNotchRange, notch) = 0;
+end
 end

@@ -1,4 +1,4 @@
-function [isDet, noise] = cfar_os(P, sys, wv, notch)
+function [isDet, noise] = cfar_os(P, sys, wv)
 %CFAR_OS  Order-statistic (OS) CFAR (cfg.cfar.type = 'os'), called by cfar_detect.m.
 %   [isDet, noise] = CFAR_OS(P, sys, wv, notch): the statistic of a tested
 %   cell is the k-th smallest of the N training cells of its window
@@ -24,7 +24,8 @@ isDet = false(nB, nR, nD);
 noise = zeros(nB, nR, nD, class(P));
 t = wv.testIdx;
 if t(2) < t(1), return; end
-% candidates: local maxima of the tested cells outside the notch
+% candidates: local maxima of all tested cells; cfar_detect masks the
+% range-limited MTI notch after the detector has run.
 M = local_max(P);
 cand = false(nB, nR, nD);
 if isfield(c, 'osAllCells') && c.osAllCells          % tests (false alarm rate): every tested cell
@@ -32,7 +33,6 @@ if isfield(c, 'osAllCells') && c.osAllCells          % tests (false alarm rate):
 else
     cand(:, t(1):t(2), :) = P(:, t(1):t(2), :) >= M(:, t(1):t(2), :);
 end
-cand(:, :, notch) = false;
 idx = find(cand);
 if isempty(idx), return; end
 [b, r, d] = ind2sub([nB nR nD], idx);
