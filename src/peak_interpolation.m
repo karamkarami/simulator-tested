@@ -34,7 +34,7 @@ if doDop
     [delta, ok] = vertex(P, lin(b, r, mod(d - 2, nfft) + 1), lin(b, r, d), lin(b, r, mod(d, nfft) + 1));
     df = 1 / (nfft * sys.dop.rowPri_s);                        % Doppler bin width [Hz]
     for i = find(ok)
-        rep(i).vr_mps = -(sys.dop.f_Hz(d(i)) + delta(i) * df) * sys.lambda / 2;
+        rep(i).vr_mps = -(sys.dop.f_Hz(d(i)) + delta(i) * df) * wave_of(sys, rep(i)).lambda_m / 2;
     end
 end
 if doEl
@@ -42,10 +42,18 @@ if doEl
     [delta, ok] = vertex(P, lin(b(mid) - 1, r(mid), d(mid)), lin(b(mid), r(mid), d(mid)), lin(b(mid) + 1, r(mid), d(mid)));
     for i = mid(ok)
         k = find(mid == i);
-        u = interp1(1:sys.nBeams, sys.dbf.beamU, b(i) + delta(k));
+        wv = wave_of(sys, rep(i));
+        bu = sys.dbf.beamU;  if isfield(wv, 'beamU'), bu = wv.beamU; end
+        u = interp1(1:sys.nBeams, bu, b(i) + delta(k));
         rep(i).el_deg = sys.ant.tilt_deg + asind(u);
     end
 end
+end
+
+function wv = wave_of(sys, r)
+% The sub-pulse of a report (its carrier and beam directions).
+wv = struct('lambda_m', sys.lambda);
+if isfield(r, 'pulse') && isfield(sys, 'wave') && isfield(sys.wave, r.pulse), wv = sys.wave.(r.pulse); end
 end
 
 function [delta, ok] = vertex(P, i1, i2, i3)

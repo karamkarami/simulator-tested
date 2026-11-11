@@ -71,10 +71,14 @@ for type = {'ca', 'go', 'so', 'os'}
             [isD, noise] = cfar_detect(P, sys, wv3);
             ref = direct_noise(P, sys, iv(1):iv(2));
             got = double(noise(:, iv(1):iv(2), :));
+            nD = size(P, 3);  z = floor(nD/2) + 1;        % the MTI notch bins are not tested (noise 0)
+            tested = repmat(reshape(abs((1:nD) - z) > sys.dop.notchBins, 1, 1, nD), size(got, 1), size(got, 2), 1);
             if strcmp(type{1}, 'os')                       % OS: the estimate only at the detections
-                m = isD(:, iv(1):iv(2), :);
-                got = got(m);  ref = ref(m);
+                m = isD(:, iv(1):iv(2), :) & tested;
+            else
+                m = tested;
             end
+            got = got(m);  ref = ref(m);
             err = abs(got - ref) ./ ref;
             noiseOk = noiseOk && (isempty(err) || max(err(:)) < 1e-4);
         end

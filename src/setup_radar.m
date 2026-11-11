@@ -111,6 +111,18 @@ end
 if size(sys.mtiCoeffs, 1) == 1
     sys.mtiCoeffs = repmat(sys.mtiCoeffs, sys.nStagger, 1);
 end
+% Range limit of the clutter filter (cfg.mti.maxRange_m, Inf = every cell). The cells beyond it
+% get the "bypass" weights: only the last tap (output m = pulse m + L - 1), so their CPI has the
+% same nOut samples and the same time as the filtered cells.
+sys.mti.maxRange_m = Inf;
+if isfield(cfg, 'mti') && isfield(cfg.mti, 'maxRange_m') && ~isempty(cfg.mti.maxRange_m)
+    sys.mti.maxRange_m = cfg.mti.maxRange_m;
+end
+if ~isscalar(sys.mti.maxRange_m) || ~isreal(sys.mti.maxRange_m) || isnan(sys.mti.maxRange_m) || sys.mti.maxRange_m < 0
+    error('cfg.mti.maxRange_m must be a non-negative scalar range in metres (Inf is allowed).');
+end
+sys.mtiBypass = zeros(size(sys.mtiCoeffs));
+sys.mtiBypass(:, end) = 1;
 
 %% DDC filters (signed 16-bit integers with coefFracBits fractional bits) and NCO
 D1 = ddcDecim(1);
@@ -158,7 +170,24 @@ end
 for i = 1:2
     wv = cfg.wave.(names{i});
     wv.name     = names{i};
-    wv.lambda_m = sys.lambda;                                 % both sub-pulses are on fc
+    % sub-pulse on or off (cfg.wave.<pulse>.enable) and its carrier (cfg.wave.<pulse>.fc_Hz, [] = cfg.fc).
+    % The receiver LO stays at cfg.fc - fIF: a sub-pulse on another carrier is on the IF
+    % fIF + (fc_Hz - cfg.fc), and the DDC mixes its receive window with that IF.
+    if ~isfield(wv, 'enable') || isempty(wv.enable), wv.enable = true; end
+    wv.enable = logical(wv.enable);
+    if ~isfield(wv, 'fc_Hz') || isempty(wv.fc_Hz), wv.fc_Hz = cfg.fc; end
+    if ~isscalar(wv.fc_Hz) || ~(wv.fc_Hz > 0) || ~isfinite(wv.fc_Hz)
+        error('cfg.wave.%s.fc_Hz must be a positive carrier frequency [Hz] (or [] = cfg.fc).', names{i});
+    end
+    wv.lambda_m = c / wv.fc_Hz;
+    wv.fIF_Hz   = sys.fIF + (wv.fc_Hz - cfg.fc);
+    bwHalf = 0.5 * waveform_bandwidth(wv);
+    if wv.enable && (wv.fIF_Hz - bwHalf <= 0 || wv.fIF_Hz + bwHalf >= fs/2)
+        error(['cfg.wave.%s.fc_Hz = %.3f MHz puts the sub-pulse on the IF %.3f MHz: it must lie inside ' ...
+               '(0, %.1f MHz) with its bandwidth (LO = cfg.fc - cfg.adc.fIF_Hz = %.3f MHz).'], names{i}, ...
+              wv.fc_Hz/1e6, wv.fIF_Hz/1e6, fs/2e6, sys.fLO/1e6);
+    end
+    wv.radarConst = sys.radarConst * (wv.lambda_m / sys.lambda)^2;   % received power ~ lambda^2
     wv.compression = lower(wv.compression);
     if strcmpi(wv.type, 'phasecode')
         wv.code = codes.([names{i} 'Code'])(:);
@@ -181,9 +210,13 @@ for i = 1:2
 end
 ws = sys.wave.short;
 wl = sys.wave.long;
-if wl.tTx_s < ws.tTx_s + ws.width_s
+if ~ws.enable && ~wl.enable
+    error('Both sub-pulses are switched off (cfg.wave.short.enable, cfg.wave.long.enable).');
+end
+if ws.enable && wl.enable && wl.tTx_s < ws.tTx_s + ws.width_s
     error('The long pulse must start after the end of the short pulse.');
 end
+sys.pulseOn = [ws.enable, wl.enable];                         % sub-pulses transmitted and processed
 filterSpan    = (L1-1)/fs + (L2-1)/fs1;                       % input span of one DDC output sample
 sys.rxStart_s = 0;                                            % the record starts with the PRI
 % (the CFAR tests the range cells up to the end of the window: its range
@@ -191,21 +224,31 @@ sys.rxStart_s = 0;                                            % the record start
 % record, and so the DDC output, depends only on the timing, the DDC filters
 % and the decimation: not on the pulse compression filters or the CFAR (a
 % filter longer than the pulse sees zeros after the end of the record).
-rxEnd = wl.tTx_s + wl.width_s + 2*cfg.rx.maxRange_m/c + filterSpan + 2/sys.fsOut;
+wLast = wl;                                                   % the last transmitted sub-pulse ends the record
+if ~wl.enable, wLast = ws; end
+rxEnd = wLast.tTx_s + wLast.width_s + 2*cfg.rx.maxRange_m/c + filterSpan + 2/sys.fsOut;
 if rxEnd > min(sys.pri)
     error(['Receive window (%.1f us) does not fit in the shortest PRI (%.1f us): reduce ', ...
            'cfg.rx.maxRange_m or start the long pulse earlier.'], rxEnd*1e6, min(sys.pri)*1e6);
 end
 sys.nAdc = round((rxEnd - sys.rxStart_s) * fs);
 sys.tAdc = sys.rxStart_s + (0:sys.nAdc-1)' / fs;             % ADC sample times in the PRI [s]
-sys.adc.rxSamples = find((sys.tAdc >= ws.tTx_s + ws.width_s & sys.tAdc < wl.tTx_s) | ...
-                         sys.tAdc >= wl.tTx_s + wl.width_s);  % receive intervals (adc_overload.m)
+shortEnd = inf;  if wl.enable, shortEnd = wl.tTx_s; end      % (without the long pulse the short window
+sys.shortRxEnd_s = shortEnd;                                  %  lasts to the end of the record)
+sys.adc.rxSamples = find((ws.enable & sys.tAdc >= ws.tTx_s + ws.width_s & sys.tAdc < shortEnd) | ...
+                         (wl.enable & sys.tAdc >= wl.tTx_s + wl.width_s));  % receive intervals (adc_overload.m)
 sys.rx.stcGain = single(stc_gain(sys, sys.tAdc));            % STC in front of the receiver (1 = off)
 
 % NCO of the DDC: the real line is multiplied by cos(2*pi*fIF*t), the imaginary
 % line by -sin(2*pi*fIF*t). At fIF = fs/4 these are exactly 1, 0, -1, 0, ...
-sys.ddc.cos      = round(cos(2*pi*sys.fIF*sys.tAdc) * 2^15) / 2^15;   % 16-bit NCO values
-sys.ddc.minusSin = round(-sin(2*pi*sys.fIF*sys.tAdc) * 2^15) / 2^15;
+% With sub-pulses on different carriers the NCO switches to the IF of the long
+% pulse when it is transmitted (no DDC output of the receive windows straddles it).
+fNco = repmat(ws.fIF_Hz, sys.nAdc, 1);
+if ~ws.enable, fNco(:) = wl.fIF_Hz; end
+if ws.enable && wl.enable, fNco(sys.tAdc >= wl.tTx_s) = wl.fIF_Hz; end
+sys.ddc.fNco_Hz  = fNco;
+sys.ddc.cos      = round(cos(2*pi*fNco.*sys.tAdc) * 2^15) / 2^15;   % 16-bit NCO values
+sys.ddc.minusSin = round(-sin(2*pi*fNco.*sys.tAdc) * 2^15) / 2^15;
 
 % DDC output samples: their time (a valid output is centred on its input window, linear-phase
 % FIR) and the first/last ADC sample each of them depends on
@@ -227,11 +270,17 @@ lastAdc  = (k*D2 + L2 - 1)*D1 + L1;
 %         pulse (mismatch filter) needs samples before and after the interval,
 %         which are taken as zeros (ddc_segment.m), so its range cells are the
 %         same as those of the matched filter.
-rxInterval.short = [ws.tTx_s + ws.width_s, wl.tTx_s];         % [start end) of the receive interval
+rxInterval.short = [ws.tTx_s + ws.width_s, shortEnd];         % [start end) of the receive interval
 rxInterval.long  = [wl.tTx_s + wl.width_s, inf];
 for i = 1:2
     wv = sys.wave.(names{i});
     iv = rxInterval.(names{i});
+    if ~wv.enable                                             % switched off: no receive interval, no cells
+        wv.rxIdx = zeros(1, 0);  wv.nRange = 0;  wv.ddcIdx = zeros(1, 0);
+        wv.delay_s = zeros(1, 0);  wv.range_m = zeros(1, 0);
+        sys.wave.(names{i}) = wv;
+        continue
+    end
     wv.rxIdx = find(sys.tAdc(firstAdc) >= iv(1) & sys.tAdc(lastAdc) < iv(2)).';
     Lp = round(wv.width_s * sys.fsOut);                       % pulse length [samples]
     L  = numel(wv.mfTaps);                                    % compression filter length [samples]
@@ -259,14 +308,15 @@ end
 % shortened (ddcIdx, range cells): its receive interval rxIdx, and so the PRI
 % header, stays the same for every CFAR method.
 oR = sys.cfar.guardRange + sys.cfar.trainRange;
-handover_m = sys.wave.long.range_m(1);
+handover_m = inf;                                             % (no long pulse: the short pulse to the end)
+if sys.wave.long.enable, handover_m = sys.wave.long.range_m(1); end
 ws = sys.wave.short;
-if ws.range_m(end) + abs(diff(ws.range_m(1:2))) < handover_m
+if ws.enable && wl.enable && ws.range_m(end) + abs(diff(ws.range_m(1:2))) < handover_m
     warning('Gap in the range coverage: short pulse up to %.1f km, long pulse from %.1f km.', ...
         ws.range_m(end)/1e3, handover_m/1e3);
 end
 nKeep = max(find(ws.range_m < handover_m, 1, 'last') + oR, 2*oR + 1);   % + cells only used as CFAR training
-if nKeep < ws.nRange
+if ws.enable && wl.enable && nKeep < ws.nRange
     ws.nRange  = nKeep;
     ws.ddcIdx  = ws.ddcIdx(1:nKeep + numel(ws.mfTaps) - 1);   % the compression filter then gives nKeep cells
     ws.delay_s = ws.delay_s(1:nKeep);
@@ -279,6 +329,11 @@ sys.handover_m = handover_m;
 % and, for the short pulse, the handover. testIdx = [first last] (1-based).
 for i = 1:2
     wv = sys.wave.(names{i});
+    if ~wv.enable
+        wv.testIdx = [1 0];  wv.mtiCells = 0;
+        sys.wave.(names{i}) = wv;
+        continue
+    end
     lim = cfg.cfar.(names{i});
     ok = wv.range_m >= lim.minRange_m & wv.range_m <= lim.maxRange_m;
     if i == 1, ok = ok & wv.range_m < handover_m; end
@@ -289,6 +344,7 @@ for i = 1:2
         first = 1;  last = 0;
     end
     wv.testIdx = [first last];
+    wv.mtiCells = sum(wv.range_m <= sys.mti.maxRange_m);      % cells 1 ... mtiCells get the clutter filter
     sys.wave.(names{i}) = wv;
 end
 
@@ -309,6 +365,15 @@ else
     sys.dbf.beamU = NaN;
 end
 sys.nBeams = numel(sys.dbf.beamEl_deg);
+% The DBF weights steer a beam with fixed element phases: on another carrier the beam
+% points elsewhere, u = beamU * cfg.fc / fc (beam elevation of every sub-pulse, NaN without DBF)
+for i = 1:2
+    wv = sys.wave.(names{i});
+    wv.beamU = sys.dbf.beamU * (cfg.fc / wv.fc_Hz);
+    wv.beamU(abs(wv.beamU) > 1) = sign(wv.beamU(abs(wv.beamU) > 1));
+    wv.beamEl_deg = sys.ant.tilt_deg + asind(wv.beamU);
+    sys.wave.(names{i}) = wv;
+end
 
 %% Ground clutter: reflectivity from the CNR, elevation groups of the terrain
 % cfg.clutter.cnr_dB is the CNR of land at cfg.clutter.cnrRange_m at the
@@ -340,16 +405,42 @@ sys.clutterSteer = zeros(sys.nCh, numel(sys.clutter.groupEl_deg));
 for g = 1:numel(sys.clutter.groupEl_deg)
     sys.clutterSteer(:, g) = steering_vector(sys, 0, sys.clutter.groupEl_deg(g));
 end
+for i = 1:2                                                   % on the carrier of every sub-pulse
+    wv = sys.wave.(names{i});
+    wv.clutterSteer = sys.clutterSteer;
+    if wv.fc_Hz ~= cfg.fc
+        for g = 1:numel(sys.clutter.groupEl_deg)
+            wv.clutterSteer(:, g) = steering_vector(sys, 0, sys.clutter.groupEl_deg(g), wv.lambda_m);
+        end
+    end
+    sys.wave.(names{i}) = wv;
+end
 
 %% CPI buffer and Doppler processing
 % CPI = time a target stays inside the 3 dB azimuth beam; the buffer holds
 % the pulses that arrive during one CPI.
 sys.cpi.time_s = sys.ant.azBeamwidth_deg / sys.ant.rate_dps;
-if isempty(cfg.proc.cpiLength)
-    sys.cpi.length = round(sys.cpi.time_s / mean(sys.pri));
-else
-    sys.cpi.length = cfg.proc.cpiLength;
+% cfg.proc.cpiMode: 'auto' (from the beam dwell) or 'manual' (cfg.proc.cpiLength); without
+% the field (older configurations) cpiLength = [] means auto
+cpiMode = 'manual';
+if isfield(cfg.proc, 'cpiMode') && ~isempty(cfg.proc.cpiMode)
+    cpiMode = lower(cfg.proc.cpiMode);
+elseif ~isfield(cfg.proc, 'cpiLength') || isempty(cfg.proc.cpiLength)
+    cpiMode = 'auto';
 end
+switch cpiMode
+    case 'auto'
+        sys.cpi.length = round(sys.cpi.time_s / mean(sys.pri));
+    case 'manual'
+        if ~isfield(cfg.proc, 'cpiLength') || isempty(cfg.proc.cpiLength) || ~isscalar(cfg.proc.cpiLength) || ...
+                cfg.proc.cpiLength < 1 || cfg.proc.cpiLength ~= round(cfg.proc.cpiLength)
+            error('cfg.proc.cpiMode = ''manual'' needs cfg.proc.cpiLength: a whole number of pulses.');
+        end
+        sys.cpi.length = cfg.proc.cpiLength;
+    otherwise
+        error('cfg.proc.cpiMode must be ''auto'' or ''manual''.');
+end
+sys.cpi.mode = cpiMode;
 if sys.staggered
     % Staggered PRF: a whole number of stagger periods in the buffer
     sys.cpi.length = sys.nStagger * floor(sys.cpi.length / sys.nStagger);
@@ -383,7 +474,10 @@ sys.dop.window = w / norm(w);
 sys.dop.nfft   = nfft;
 sys.dop.rowPri_s = rowPri;
 sys.dop.f_Hz   = ((0:nfft-1) - floor(nfft/2)) / (nfft*rowPri); % after fftshift
-sys.dop.v_mps  = -sys.dop.f_Hz * sys.lambda / 2;              % radial velocity (+ = away)
+sys.dop.v_mps  = -sys.dop.f_Hz * sys.lambda / 2;              % radial velocity (+ = away) at cfg.fc
+for i = 1:2                                                   % and at the carrier of every sub-pulse
+    sys.wave.(names{i}).v_mps = -sys.dop.f_Hz * sys.wave.(names{i}).lambda_m / 2;
+end
 
 % Noise power of every Doppler bin for white noise at the MTI input. The MTI
 % colours the noise (e.g. +4 dB near PRF/2 for [1 -2 1]); doppler_process
@@ -394,6 +488,14 @@ impulses = reshape(eye(n), 1, n, n);                          % one impulse per 
 st = mod(0:n-1, sys.nStagger) + 1;
 [pN, Y] = doppler_process(mti_filter(impulses, sys.mtiCoeffs, st), sys);
 sys.dop.noiseGain = sum(pN, 2);
+% the same for the range cells beyond cfg.mti.maxRange_m (no clutter filter)
+sys.dop.noiseGainBypass = sys.dop.noiseGain;
+bypassUsed = sys.wave.short.mtiCells < sys.wave.short.nRange || sys.wave.long.mtiCells < sys.wave.long.nRange;
+if bypassUsed
+    sysB = sys;  sysB.dop.noiseGain = 1;                      % (doppler_process divides by it)
+    [pB, YB] = doppler_process(mti_filter(impulses, sys.mtiBypass, st), sysB);
+    sys.dop.noiseGainBypass = sum(pB, 2);
+end
 % Effective number of independent looks of the non-coherent integration.
 % De-interleaved rows (staggered PRF) are built from overlapping MTI outputs,
 % so their noise is correlated. The tail of the averaged noise power decays
@@ -404,6 +506,11 @@ for k = 1:nfft
     Yk = reshape(Y(1, :, k, :), n, nRows);
     C  = Yk' * Yk;                                            % noise covariance of the rows
     nLooks(k) = real(trace(C)) / max(real(eig(C)));
+    if bypassUsed                                             % the unfiltered cells: the fewer looks count
+        Yk = reshape(YB(1, :, k, :), n, nRows);
+        C  = Yk' * Yk;
+        nLooks(k) = min(nLooks(k), real(trace(C)) / max(real(eig(C))));
+    end
 end
 % MTI notch: Doppler bins around zero (clutter residue) that the CFAR does not test.
 % The residue is as wide as the Doppler window mainlobe: +-2*nfft/rowLen bins for Hamming.
@@ -506,6 +613,11 @@ switch wv.compression
         error('cfg.wave.%s.compression must be ''matched'' or ''mismatch''.', wv.name);
 end
 taps = (h / norm(h)).';
+end
+
+function B = waveform_bandwidth(wv)
+% Bandwidth of a sub-pulse [Hz]: the LFM sweep, or 1/chip of a phase code.
+if strcmpi(wv.type, 'phasecode'), B = 1 / wv.chip_s; else, B = wv.bandwidth_Hz; end
 end
 
 function K = mismatch_length(wv)

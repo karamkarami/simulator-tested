@@ -45,7 +45,8 @@ or `radar_receiver_linux/README.md`; below `radar_receiver_<os>`).
  Tracking (optional, cfg.track.method): 'ekf' EKF, 2-D (range, azimuth) or 3-D (+ elevation),
           constant velocity or constant acceleration, global nearest neighbour (GNN) association;
           'pmbm' multi-target Bayesian tracker: PMBM filter with IMM-UKF state estimation
-          (CV / CA / coordinated turn), 2-D or 3-D
+          (CV / CA / coordinated turn), 2-D or 3-D; 'tomht' track-oriented MHT (k-best global
+          hypotheses, N-scan pruning) with the same IMM-UKF filter
  PPI display (updated while the antenna turns): plots / detections / raw video, tracks, block, console and display times
 ```
 
@@ -183,6 +184,16 @@ cfg = radar_config;                 % only the DDC files, in parallel (parfor, P
 cfg.io.saveRaw = false;
 cfg.ddc.outputRate_Hz = 4e6;        % DDC output at 2 MHz (default) or 4 MHz
 info = generate_ddc_files(cfg, 8);  % 8 workers -> output/ddc_pulses/ddc_<n>.mat
+% (the same without MATLAB: radar_receiver_<os>/build/radar_generate_ddc, see below)
+
+cfg = radar_config;                 % new options (all in radar_config.m)
+cfg.wave.long.enable = false;       % sub-pulses on/off ...
+cfg.wave.short.fc_Hz = 165e6;       % ... and on their own carrier ([] = cfg.fc)
+cfg.proc.cpiMode = 'manual';  cfg.proc.cpiLength = 96;   % CPI length 'auto' or 'manual'
+cfg.mti.maxRange_m = 30e3;          % clutter filter only up to 30 km (Inf = everywhere)
+cfg.io.saveMf = true;  cfg.io.saveDoppler = true;        % matched filter / Doppler output per PRI
+cfg.track.method = 'tomht';         % 'ekf', 'pmbm' or 'tomht' (track-oriented MHT, IMM-UKF)
+results = run_radar_sim(cfg);
 
 cd tests
 run_all_tests                       % SNR budget, UDP, ghost and six-target tests
@@ -259,6 +270,10 @@ file was built for other values (for example after you change
 | `tests/` | tests (see below) |
 | `radar_receiver_windows/`, `radar_receiver_linux/` | the receiver processing in C (CMake/CLion, Qt PPI, serial output), one project per operating system with the same `src`, `tests`, `tools` and `config` (test `same_sources`; the Linux one also has real-time options) |
 | `src/receiver_dir.m` | the folder of the C receiver for this computer (`ispc`: Windows, else Linux) |
+| `src/track_tomht.m` | TOMHT tracker: track-oriented MHT, k-best global hypotheses (Murty), N-scan pruning, IMM-UKF filter (`cfg.track.method = 'tomht'`) |
+| `src/plot_vr_span.m`, `plot_params.m` | the span of the Doppler axis of a plot on the carrier of its sub-pulse (trackers) |
+| `src/save_block_file.m` | matched filter / Doppler output of a PRI to a .mat file (`cfg.io.saveMf`, `cfg.io.saveDoppler`) |
+| `src/write_config_m.m`, `export_targets_csv.m` | a cfg changed in MATLAB as a file of assignments, the targets as CSV: for the C programs (`radar_generate_ddc --config-m FILE --targets FILE`, `radar_export_config --config-m FILE`) |
 
 ## Input files (`inputs/`)
 
@@ -433,6 +448,28 @@ there, at the same beam and Doppler, behind very strong far targets.
   16 bits costs SNR only when the noise is near 1 LSB (a low receiver
   gain), which `setup_radar` (`sys.N0ddc`) and the SNR budget include
   (`run_radar_sim` prints both losses).
+* **Sub-pulses on/off and their carriers (`cfg.wave.<pulse>.enable`,
+  `cfg.wave.<pulse>.fc_Hz`):** a sub-pulse that is off is not transmitted
+  (no echo, no leakage) and not processed (no CPI buffer, no plots; its
+  receive interval in the PRI header is [0 0]). Without the long pulse the
+  short-pulse receive window lasts to `cfg.rx.maxRange_m` (the record ends
+  after it: 4.2 - 80.6 km with 1021 cells), without the short pulse the long
+  pulse covers 22.9 - 80.6 km (blind below). `fc_Hz = []` is `cfg.fc`; another
+  carrier keeps the receiver LO at `cfg.fc - cfg.adc.fIF_Hz`, so the
+  sub-pulse is on the IF `fIF_Hz + (fc_Hz - cfg.fc)` (it must lie inside
+  0 ... 60 MHz with its bandwidth; e.g. 165 / 175 MHz: 25 / 35 MHz). The DDC
+  NCO switches to the IF of the long pulse when it is transmitted (no DDC
+  sample of a receive window straddles the switch). Its wavelength sets its
+  received power (radar constant ~ lambda^2), element phases, clutter
+  Doppler and clutter power, the radial velocity axis of its plots
+  (`wv.lambda_m`, `wv.v_mps`) and the span of its Doppler axis in the
+  trackers (a plot is unfolded with the span of its own sub-pulse); the DBF
+  weights (made for `cfg.fc`) steer its beams to `sin(el) = sin(el_fc) *
+  cfg.fc / fc_Hz` (`wv.beamU`, used for the elevation of its plots). With
+  carriers more than the pulse bandwidth apart the short-pulse echo of a
+  far target no longer falls into the long window (the DDC filters reject
+  it). The C receiver reads all of this from its configuration
+  (`<pulse>_enable`, `_fc_Hz`, `_beamU`, `trackVrSpanPulse`).
 * **Elements and DBF:** the antenna has a fixed 4.1 deg beam in azimuth
   and a column of `cfg.ant.nElements` elements (default 48) spaced 0.66
   wavelength in elevation. The default DBF matrix forms 21 beams equally
@@ -497,7 +534,14 @@ there, at the same beam and Doppler, behind very strong far targets.
   a staggered PRF the number is reduced to a multiple of the number of PRIs
   in the stagger: 116 with the default 4-PRI stagger (mean PRI 980 us). The
   buffers are circular, and MTI, Doppler and CFAR run on every new pulse
-  (`cfg.proc.updateEvery`).
+  (`cfg.proc.updateEvery`). `cfg.proc.cpiMode`: `'auto'` (default) derives
+  the number from the radar parameters as above; `'manual'` uses
+  `cfg.proc.cpiLength` (a whole number of pulses; with a staggered PRF
+  rounded down to whole stagger periods). The Doppler FFT length
+  (`cfg.proc.nfft = []`) follows the CPI in both modes; the MTI, the noise
+  gains, the looks and the CFAR factor are derived from it, in MATLAB, in
+  `export_receiver_config` and in `radar_export_config` (older configurations
+  without `cpiMode`: `cpiLength = []` means auto).
 * **Clutter filter (`cfg.mti.type`):** `'canceller'` (default: the
   three-pulse canceller [1 -2 1], or the stagger weights of
   `inputs/stagger_prf.mat` with a staggered PRF) or `'fir'`: any real FIR
@@ -508,6 +552,17 @@ there, at the same beam and Doppler, behind very strong far targets.
   floor stays flat and the CFAR keeps its Pfa. The C receiver gets the
   coefficients from its configuration file (`mtiCoeffs`) and needs no
   setting of its own.
+  **Range limit of the clutter filter (`cfg.mti.maxRange_m`, default
+  `Inf`):** the canceller (or FIR filter) is applied only to the range cells
+  up to this range, of both sub-pulses (`wv.mtiCells`); the cells beyond it
+  go to the Doppler FFT unfiltered: output m is pulse m + L - 1 (the last tap
+  only, `sys.mtiBypass`), so every cell keeps the same CPI length and time.
+  The unfiltered cells get their own noise gain (`sys.dop.noiseGainBypass`,
+  flat, 1 with the fixed PRF) so the noise floor stays flat across the limit;
+  the CFAR looks are the smaller of both. Clutter beyond the limit is not
+  cancelled: use `cfg.cfar.notchMaxRange_m` (the zero-Doppler bins) together
+  with it. Exported as `mtiMaxRange_m`, `noiseGainBypass`; the C receiver
+  does the same (`processor.c`, test `core` / `core_carriers`).
 * **Doppler:** fixed PRF: 3-pulse canceller (112 outputs), Hamming window
   and one FFT whose length is the next power of 2 of the number of pulses
   (114 -> 128). Staggered PRF: the stagger MTI weights from the file, then
@@ -711,6 +766,40 @@ there, at the same beam and Doppler, behind very strong far targets.
   crossing targets on their own tracks, and confirms 12 of the 13 challenge
   targets in 6 scans (the EKF 11). About 1 - 2 ms per plot-track pair in
   Octave.
+* **Tracking with `cfg.track.method = 'tomht'`: track-oriented multiple
+  hypothesis tracker** (`src/track_tomht.m`, settings `cfg.track.tomht`; C:
+  `tracker_tomht.c`). Every track is a tree of track hypotheses: the plot or
+  the miss of every antenna look, an IMM-UKF density (the filter of the PMBM:
+  CV / CA / CT, unscented transform, `cfg.track.tomht.imm`, `.ukf`) and a
+  score, the log-likelihood ratio (LLR) "a target" against "false plots":
+  log(pd lambdaU / lambdaC) for a new track, + log(pd l(z) / lambdaC) for a
+  plot (l the IMM-UKF likelihood, the radial velocity included), + log(1 - pd)
+  for a missed look (`pd` 0.9, `falsePlotsPerScan` 2 and `undetectedTargets` 1
+  per unit measurement volume). Every tree also holds the "no target"
+  hypothesis (score 0). A global hypothesis takes one hypothesis of every tree
+  without a plot in two tracks; its score is the sum of theirs. The plots of a
+  GNN batch update every global hypothesis with its k best assignments
+  (Murty's algorithm on the Hungarian assignment; a plot goes to a track or
+  starts a tentative track; at most `kBest` = 10 per hypothesis and as many as
+  its weight earns of `maxHypotheses` = 25). Hypothesis management: **k-best**
+  (the best 25 global hypotheses, none below `hypPrune` = 1e-4 of the best,
+  equal ones merged), **N-scan pruning** (`nScan` = 3: the decisions older
+  than 3 looks are those of the best global hypothesis; the other branches
+  of every tree are cut, a tree whose "no target" hypothesis is the best is
+  deleted), deletion of a track hypothesis whose LLR fell `deleteScore` = 10
+  below its maximum or after `maxMiss` / `maxMissTentative` missed scans, of
+  a tree whose probability is below `pDelete` (1e-3), speed gate. Confirmed:
+  the hypothesis of the best global hypothesis has an LLR of at least
+  `confirmScore` (10) and `confirmHits` (3) plots. The tracks shown are those
+  of the best global hypothesis; the track numbers stay with the targets as
+  with the PMBM. `test_tracker_tomht` (the cases of `test_tracker_pmbm`): a
+  4 deg/s turn (CT 0.77 - 0.79 in the turn, 119 m instead of the EKF's 143 m
+  rms), 6 m/s^2 (CA 0.82 - 0.87, 11 m/s instead of 45 m/s), six targets with
+  8 false plots per scan (fixed and staggered PRF), Pd 0.7 and 30 false plots
+  per scan without a false track, two targets 200 m apart, two crossing
+  targets without a swap, termination, speed gate, and all 13 challenge
+  targets confirmed in 6 scans (the EKF 11) without a false track; the C
+  tracker gives every track update of MATLAB.
 * **Pruning and plots:** only local maxima in beam x range x Doppler are
   kept. Range, elevation and Doppler sidelobes more than 20 dB below a
   stronger peak are removed. Detections of the same target in successive
@@ -812,14 +901,29 @@ The panel on the right has:
   the newest video of every azimuth bin (0.5 deg in MATLAB, 0.25 deg in the C
   PPI) until the antenna passes again, so the display is a surface over range
   and azimuth whose third dimension, the power, is the colour: from 3 dB
-  below the noise floor (black; a running 10th percentile of the video, as
+  below the noise floor (black; the 10th percentile of the video of a PRI, as
   most of the raw video is clutter: the long pulse smears near clutter over
   22.5 km; plus the offset of the 10th percentile of a mean of N exponential
   powers, N the elements: 9.77 dB for one element, 0.86 dB for 48, so the
-  noise of the video and of DBF out agree with one element) over blue,
+  noise of the video and of DBF out agree with one element; the floor is the
+  20th percentile of these estimates over all azimuth bins seen, see below) over blue,
   cyan, green, yellow and red to 50 dB above it (white), with a colour scale
   in the corner. A pixel shows the largest range bin under it, so a small
-  echo does not disappear when zoomed out. The video costs about 0.3 ms per
+  echo does not disappear when zoomed out. *Noise floor over the mountains:*
+  the 10th percentile of one PRI is the noise only while at least 10% of its
+  range bins hold no echo. Over the mountain range (42 - 62 km, 30 - 75 deg)
+  the near clutter, its long-pulse smear and the mountain itself cover more
+  than 90% of the bins, so those PRIs estimate the floor several dB too high.
+  Before, the floor was a running mean of the PRIs (MATLAB) or a running mean
+  with a 0.05 dB/PRI limit (C): while the antenna crossed the mountains
+  (about 1.2 s, 1250 PRIs) it rose by 1.2 dB (C) and more (MATLAB), crossed
+  the 0.5 dB step at which the whole map is re-coloured, and fell back after
+  the sector: the noise changed colour for a moment. The receiver noise does
+  not depend on the azimuth, so the floor is now the 20th percentile of the
+  newest estimate of every azimuth bin (0.25 / 0.5 deg): a clutter sector
+  smaller than 80% of the circle cannot move it (C test: 0.01 dB instead of
+  1.22 dB over a 45 deg sector with 95% clutter; the same in MATLAB,
+  `test_new_options`). The video costs about 0.3 ms per
   PRI in MATLAB and is computed only while it is shown (display time).
   *DBF out* and *MF out*: the same kind of display for the beam chosen
   under **Beam** (default 1; the list shows the elevation of every beam
@@ -879,12 +983,14 @@ toolbar work as well; their data tips also list the plot values.
 
 ## Raw data, DDC files and UDP format
 
-Two recordings can be switched on and off separately in `radar_config.m`:
+Four recordings can be switched on and off separately in `radar_config.m`:
 
 | Option | Files (one per PRI) | Content |
 |---|---|---|
 | `cfg.io.saveRaw` (default `true`) | `cfg.io.rawFolder/pulse_<n>.mat` | `adcData`: raw ADC samples, int16 [nSamples x nElements] |
 | `cfg.io.saveDdc` (default `false`) | `cfg.io.ddcFolder/ddc_<n>.mat` | `I`, `Q`: DDC output, int16 [nDdc x nElements], both sub-pulses |
+| `cfg.io.saveMf` (default `false`) | `cfg.io.mfFolder/mf_<n>.mat` | `short`, `long`: matched filter (pulse compression) output, complex single [nBeams x nRange] of every sub-pulse (`[]` when it is off); `shortRange_m`, `longRange_m` |
+| `cfg.io.saveDoppler` (default `false`) | `cfg.io.dopplerFolder/doppler_<n>.mat` (PRIs with a CPI update) | `short`, `long`: range-Doppler power after the noise-gain equalisation, single [nBeams x nRange x nfft] (`[]` without an update of that sub-pulse); the axes `f_Hz`, `shortV_mps`, `longV_mps`, `shortRange_m`, `longRange_m`, the CPI centre `azCenter_deg`, `tCenter_s` |
 
 Both files also hold `hdr`: pulse number, scan number, time, antenna
 azimuth, PRI, stagger index, fs, IF, carrier, record start, pulse timing,
@@ -897,6 +1003,11 @@ one PRI is about 9.5 MB of raw data (a full scan of 10 000 PRIs is about
 95 GB) and 342 kB of DDC output (3.4 GB per scan; twice that with the
 4 MHz DDC output). Use `cfg.sim.sectors_deg` or a smaller
 `cfg.rx.maxRange_m` for long runs.
+
+The matched filter and Doppler files are written by `run_radar_sim`
+(`save_block_file.m`, `cfg.io.matFormat`); with 48 elements a Doppler file is
+about 12 MB per sub-pulse, so record short sectors (`cfg.sim.sectors_deg`)
+or set `cfg.proc.updateEvery`.
 
 ### Generating the DDC files in parallel
 
@@ -916,6 +1027,36 @@ files are bit-identical to those of `run_radar_sim` (`test_generate_ddc`).
 cfg = radar_config;  cfg.io.saveRaw = false;  cfg.sim.nScans = 3;
 info = generate_ddc_files(cfg, 8);                    % -> cfg.io.ddcFolder
 radar_receiver_<os>/build/radar_stream_send output/ddc_pulses --port 50000   % (shell) to the C receiver
+```
+
+### Generating the DDC files without MATLAB (C, `radar_generate_ddc`)
+
+The receiver project has a program (a CLion run configuration) that does
+what `generate_ddc_files.m` does: `radar_generate_ddc` reads
+`radar_config.m` itself (the interpreter of `radar_export_config`; `--set
+"cfg.x = ...;"` changes it, `--config-m FILE` reads another file, e.g. one
+written by `write_config_m(cfg, file)`), simulates every active PRI up to the
+DDC output in parallel (OpenMP) and writes the same `ddc_<n>.mat` files (and,
+with `cfg.io.saveRaw` or `--raw`, `pulse_<n>.mat`), header included: targets
+of `cfg.scenario.type` (`'six'`, `'challenge'`, `'random'`) or from a CSV file
+(`--targets`, written by `export_targets_csv(cfg.targets, file)`), Swerling
+RCS, the terrain clutter (`clutter_terrain.m`, CNR -> sigma0, shadowing,
+types, internal motion), leakage, STC, both sub-pulses on their carriers,
+thermal and ADC noise, 16-bit ADC, the fixed-point DDC (2 / 4 MHz). It takes
+about 70 ms per PRI on 4 threads (48 elements, clutter; MATLAB about 1 s). The
+random numbers are its own (the same statistics, not MATLAB's values); every
+PRI has its own stream, so the files do not depend on the number of threads.
+`test_generate_ddc_c`: without noise, clutter and fluctuation the files equal
+MATLAB's (headers equal, at most a few samples 1 LSB apart: MATLAB sums the
+signal in single precision) with 2 and 4 MHz, other carriers, the long pulse
+off and phase codes; with fixed clutter reflectivities the same over the
+mountains and the hills; the random clutter and noise power agree within
+1 dB / 0.3 dB; the six targets generated in C give their 6 plots in the C
+receiver. See `radar_receiver_<os>/README.md`.
+
+```
+radar_receiver_<os>/build/radar_generate_ddc --set "cfg.sim.sectors_deg = [20 45];" --no-raw
+radar_receiver_<os>/build/radar_stream_send output/ddc_pulses --port 50000
 ```
 
 ### Replaying the DDC files over UDP
@@ -1035,8 +1176,22 @@ budget.
 | `test_tracker_pmbm` | PMBM tracker with IMM-UKF on synthetic plots (target positions from `target_state`, plots at the antenna looks, errors of `cfg.track`, folded radial velocity), 3-D and 2-D, against the EKF on the same plots: six targets with 8 false plots per scan (fixed and staggered PRF): one confirmed track per target, no false track; a 4 deg/s turn: one track, smaller position error than the EKF, CT dominant in the turn; a 6 m/s^2 acceleration: one track, CA dominant, smaller velocity error than the EKF; Pd 0.7 with 30 false plots per scan: every target detected in the last 3 scans tracked, at most one false track; two targets 200 m apart and two crossing targets: no merge, no swap; track termination after the missed scans; speed gate; the 13 challenge targets with detections from the SNR budget: every target detected in the last 3 scans tracked, no false track |
 | `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA, with and without the radial velocity: one confirmed track per target, close to it, no false track; the radial velocity lowers the velocity error after two scans; staggered PRF (folded plot velocities): the track radial velocity is unfolded; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |
 | `test_peak_interpolation` | peak interpolation: a peak that is Gaussian in Doppler and across the beams gives its exact fractional Doppler bin (radial velocity) and beam (elevation); the Doppler axis wraps; the lowest beam keeps its centre; with the options off the bin and beam centres stay (the C `test_cfar` checks the same in `processor.c`) |
+| `test_new_options` | the options of this revision: `cfg.proc.cpiMode` auto / manual; `cfg.mti.maxRange_m` (a stationary echo cancelled before the limit and kept beyond it, a flat noise floor on both sides); the long pulse off (the short pulse to 80.6 km, a target at 50 km as a short-pulse plot), the short pulse off (blind below 22.9 km, long-pulse plots only); the sub-pulses on 165 / 175 MHz (IF 25 / 35 MHz, the radial velocity of each plot on its own carrier within one Doppler bin, the DBF beams scaled by fc / fc_Hz); `cfg.io.saveMf` / `saveDoppler` (one file per PRI / per CPI update, block sizes, `[]` for a sub-pulse that is off); the PPI video noise floor over a mountain sector (0.5 dB); `radar_export_config` writes the same records as `export_receiver_config` for all of them and the TOMHT tracker |
+| `test_tracker_tomht` | the cases of `test_tracker_pmbm` with the TOMHT tracker (`test_tracker_pmbm('tomht')`), and the C TOMHT tracker on the same calls |
+| `test_generate_ddc_c` | the C program `radar_generate_ddc` against `generate_ddc_files.m`: equal files without noise (2 / 4 MHz, other carriers, long pulse off, phase codes), equal clutter with fixed reflectivities, the same power of random clutter and noise, reproducible with any number of threads, the six targets generated in C detected by the C receiver |
 | `test_mti_fir` | clutter filter option: the FIR file instead of [1 -2 1], CPI - (L - 1) outputs, deeper notch than the canceller, flat noise floor after the noise gain of every bin, one row for every stagger position or one row per position, invalid files refused, `mtiCoeffs` and `mtiType` exported |
 | `test_c_receiver(mode, ..., cfarMethod, cfarType, trackMethod)` | the six-target scenario streamed over UDP to the C receiver (`radar_receiver_<os>/`) with the given CFAR window, detector and tracker: its plots and track updates must match MATLAB; the recorded stream is replayed to check repeatability and speed |
+
+Results of this revision (Octave 8.4, 4 vCPUs): `test_new_options`,
+`test_tracker_tomht` (every case; the C TOMHT tracker equals MATLAB in all
+16 runs), `test_generate_ddc_c`, `test_tracker`, `test_tracker_pmbm` (C
+equal), `test_setup`, `test_cfar`, `test_mti_fir`, `test_peak_interpolation`,
+`test_udp_stream`, `test_generate_ddc` pass; `test_c_receiver` (fixed PRF,
+EKF and TOMHT trackers): the C receiver gives exactly MATLAB's 6 plots and
+track updates; `ctest` (26 tests, Qt) passes in both CLion projects.
+(`test_setup` and `test_cfar` compared the noise estimate also in the MTI
+notch bins, which the range-limited notch of the previous revision sets to
+0; they now skip those untested bins.)
 
 Latest results at 170 MHz with the receiver gain of 60 dB and the STC
 (Octave 8.4 on a 4-vCPU VM): every SNR budget check passes (fixed and

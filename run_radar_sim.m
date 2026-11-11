@@ -76,6 +76,10 @@ end
 if cfg.io.saveDdc && ~exist(cfg.io.ddcFolder, 'dir')
     mkdir(cfg.io.ddcFolder);
 end
+saveMf  = isfield(cfg.io, 'saveMf') && cfg.io.saveMf;          % matched filter / Doppler outputs per PRI
+saveDop = isfield(cfg.io, 'saveDoppler') && cfg.io.saveDoppler;
+if saveMf && ~exist(cfg.io.mfFolder, 'dir'), mkdir(cfg.io.mfFolder); end
+if saveDop && ~exist(cfg.io.dopplerFolder, 'dir'), mkdir(cfg.io.dopplerFolder); end
 if ~exist(cfg.io.outFolder, 'dir')
     mkdir(cfg.io.outFolder);
 end
@@ -187,6 +191,8 @@ for k = 1:sched.nPulses
         blockUs(10) = blockUs(10) + 1e6*toc(tb);
     end
     prof = {[], []};                                    % DBF / MF output of the selected beam (PPI)
+    mfOut = struct('short', [], 'long', []);            % recordings of this PRI (cfg.io.saveMf / saveDoppler)
+    dopOut = struct('short', [], 'long', []);
     bb = complex(single(I), single(Q));
 
     % 4-9) Processing chain, separately for the short and the long sub-pulse
@@ -194,6 +200,7 @@ for k = 1:sched.nPulses
     for i = 1:2
         p  = names{i};
         wv = sys.wave.(p);
+        if ~wv.enable, continue; end                    % sub-pulse switched off (cfg.wave.<pulse>.enable)
         seg = ddc_segment(bb, wv);                      % DDC samples of this sub-pulse
         tb = tic;
         if sys.dbf.enabled
@@ -207,6 +214,7 @@ for k = 1:sched.nPulses
         rp = matched_filter(bm, wv);                    % [nBeams x nRange]
         blockUs(2) = blockUs(2) + 1e6*toc(tb);
         if strcmp(want.raw, 'mf'), prof{i} = rp(min(want.beam, size(rp, 1)), :); end
+        if saveMf, mfOut.(p) = rp; end
         if k == cfg.display.rangeProfilePulse
             plot_range_profile(rp, wv, cfg.display.rangeProfileAxis);
         end
@@ -215,11 +223,12 @@ for k = 1:sched.nPulses
         buf.(p) = cpi_buffer_push(buf.(p), rp, sched.staggerIdx(k), az, t);
         if buf.(p).count == sys.cpi.length && mod(buf.(p).nPushed, cfg.proc.updateEvery) == 0
             [cpi, info] = cpi_buffer_read(buf.(p));
-            y  = mti_filter(cpi, sys.mtiCoeffs, info.staggerIdx);
+            y  = mti_filter(cpi, sys.mtiCoeffs, info.staggerIdx, wv.mtiCells, sys.mtiBypass);
             blockUs(3) = blockUs(3) + 1e6*toc(tb);
             tb = tic;
-            rd = doppler_process(y, sys);               % [nBeams x nRange x nfft]
+            rd = doppler_process(y, sys, wv.mtiCells);  % [nBeams x nRange x nfft]
             blockUs(4) = blockUs(4) + 1e6*toc(tb);
+            if saveDop, dopOut.(p) = single(rd); end
             tb = tic;
             [isDet, noise] = cfar_detect(rd, sys, wv);
             dets = prune_peaks(isDet, rd, noise, sys, wv);
@@ -249,6 +258,18 @@ for k = 1:sched.nPulses
         else
             blockUs(3) = blockUs(3) + 1e6*toc(tb);
         end
+    end
+    if saveMf                                           % recordings of the block outputs
+        mfOut.shortRange_m = sys.wave.short.range_m;  mfOut.longRange_m = sys.wave.long.range_m;
+        save_block_file(cfg.io.mfFolder, 'mf', cfg.io.matFormat, hdr, mfOut);
+    end
+    if saveDop && (~isempty(dopOut.short) || ~isempty(dopOut.long))
+        dopOut.shortRange_m = sys.wave.short.range_m;  dopOut.longRange_m = sys.wave.long.range_m;
+        dopOut.f_Hz = sys.dop.f_Hz;  dopOut.v_mps = sys.dop.v_mps;
+        dopOut.shortV_mps = -sys.dop.f_Hz * sys.wave.short.lambda_m / 2;
+        dopOut.longV_mps  = -sys.dop.f_Hz * sys.wave.long.lambda_m / 2;
+        dopOut.azCenter_deg = info.azCenter_deg;  dopOut.tCenter_s = info.tCenter_s;
+        save_block_file(cfg.io.dopplerFolder, 'doppler', cfg.io.matFormat, hdr, dopOut);
     end
     if any(strcmp(want.raw, {'dbf', 'mf'}))             % DBF / MF output of the selected beam (display time)
         tb = tic;
@@ -379,8 +400,12 @@ end
 names = {'short', 'long'};
 for i = 1:2
     wv = sys.wave.(names{i});
-    fprintf('%-5s pulse: %s %3.0f us at t = %3.0f us, range %.2f ... %.2f km (%d cells)\n', wv.name, wv.type, ...
-        wv.width_s*1e6, wv.tTx_s*1e6, wv.range_m([1 end])/1e3, wv.nRange);
+    if ~wv.enable
+        fprintf('%-5s pulse: off (cfg.wave.%s.enable = false)\n', wv.name, wv.name);
+        continue
+    end
+    fprintf('%-5s pulse: %s %3.0f us at t = %3.0f us on %.3f MHz (IF %.3f MHz), range %.2f ... %.2f km (%d cells)\n', ...
+        wv.name, wv.type, wv.width_s*1e6, wv.tTx_s*1e6, wv.fc_Hz/1e6, wv.fIF_Hz/1e6, wv.range_m([1 end])/1e3, wv.nRange);
 end
 fprintf('CPI: %.1f ms in the beam -> %d pulses = %d row(s) x %d samples, FFT %d, Doppler bin %.2f m/s, unambiguous +-%.1f m/s\n', ...
     sys.cpi.time_s*1e3, sys.cpi.length, sys.cpi.nRows, sys.cpi.rowLen, sys.dop.nfft, abs(diff(sys.dop.v_mps(1:2))), ...
@@ -394,7 +419,7 @@ function print_tracks(tracker)
 % List the tracks at the end of the run.
 tk = tracker.tracks;
 if isfield(tracker, 'T')
-    label = sprintf('%d-D PMBM, IMM-UKF %s, %d global hypotheses', tracker.p.dim, ...
+    label = sprintf('%d-D %s, IMM-UKF %s, %d global hypotheses', tracker.p.dim, upper(tracker.p.method), ...
                     upper(strjoin(tracker.p.pmbm.models, '/')), size(tracker.G, 1));
 else
     label = sprintf('%d-D EKF, %s model, GNN', tracker.p.dim, upper(tracker.p.model));

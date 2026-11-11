@@ -10,9 +10,9 @@ function rep = track_report(tracker)
 %   'CV 0.90 CA 0.04 CT 0.06'; EKF: '').
 tk = tracker.tracks;
 d = tracker.p.dim;
-isPmbm = isfield(tracker, 'T');
+isPmbm = isfield(tracker, 'T');                    % PMBM or TOMHT (both IMM-UKF)
 method = 'EKF';
-if isPmbm, method = 'PMBM'; end
+if isPmbm, method = upper(tracker.p.method); end
 rep = struct('id', {}, 'confirmed', {}, 't_s', {}, 'pos_m', {}, 'vel_mps', {}, 'acc_mps2', {}, 'alt_m', {}, ...
              'vr_mps', {}, 'hits', {}, 'misses', {}, 'dim', {}, 'method', {}, 'existence', {}, 'modeProb', {});
 for i = 1:numel(tk)

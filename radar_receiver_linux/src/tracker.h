@@ -3,6 +3,7 @@
  * cfg.track.method, as track_update.m of the MATLAB simulator:
  *   TRACK_METHOD_EKF   tracker_ekf.c   extended Kalman filter, GNN association
  *   TRACK_METHOD_PMBM  tracker_pmbm.c  PMBM multi-target filter, IMM-UKF
+ *   TRACK_METHOD_TOMHT tracker_tomht.c track-oriented MHT (k-best, N-scan), IMM-UKF
  */
 #ifndef TRACKER_H
 #define TRACKER_H
@@ -10,11 +11,13 @@
 #include "tracker_common.h"
 #include "tracker_ekf.h"
 #include "tracker_pmbm.h"
+#include "tracker_tomht.h"
 
 typedef struct {
     int         method;     /* TRACK_METHOD_EKF or TRACK_METHOD_PMBM            */
     EkfTracker  ekf;
     PmbmTracker pmbm;
+    TomhtTracker tomht;
 } Tracker;
 
 void tracker_init(Tracker *t, const RadarConfig *cfg);

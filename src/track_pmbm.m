@@ -82,7 +82,7 @@ for k = 1:numel(plots)
     tr.nPlots = tr.nPlots + 1;
     if isempty(tr.pending), tr.pendingFirst = t_s; end
     tr.pending(end+1, :) = [plots(k).time_s, plots(k).az_deg, plots(k).range_m, plots(k).el_deg, tr.nPlots, ...
-                            plots(k).vr_mps];
+                            plots(k).vr_mps, plot_vr_span(p, plots(k))];
     tr.pendingLast = t_s;
 end
 if flush && ~isempty(tr.pending)
@@ -103,7 +103,7 @@ function tr = associate(tr)
 % PMBM update with the plots of the batch.
 p = tr.p;  m = p.pmbm;
 B = tr.pending;
-tr.pending = zeros(0, 6);
+tr.pending = zeros(0, 7);
 tr.batch = tr.batch + 1;
 mAll = size(B, 1);
 Z = zeros(p.dim, mAll);  Zvr = nan(1, mAll);  usable = false(1, mAll);
@@ -141,7 +141,7 @@ for i = 1:nTr
             tp = B(j, 1);
             if tp < sth.tOpp + T/2, continue; end     % this pass already had its plot (or its miss)
             if ~coarse_gate(xm, Pm, sth.t, Z(:, j), tp, p), continue; end
-            [ok, logl, hn] = imm_ukf_update(sth, Z(:, j), Zvr(j), tp, p, hasVr(j));
+            [ok, logl, hn] = imm_ukf_update(sth, Z(:, j), Zvr(j), tp, plot_params(p, B(j, :)), hasVr(j));
             if ~ok, continue; end
             rp = sth.r * m.ps^((tp - sth.tOpp) / T);
             L{i}(h, j) = log(rp) + log(m.pd) + logl;

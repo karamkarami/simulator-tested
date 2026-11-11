@@ -286,6 +286,20 @@ static double gauss(void)
     return sqrt(-2 * log(u1)) * cos(2 * PI * u2);
 }
 
+/* The receive intervals of the PRI header ([0 0] for a sub-pulse that is off) and the test pulse:
+ * the long one, or the short one without it. */
+static void set_header_intervals(const RadarConfig *cfg, PriData *pri)
+{
+    uint32_t *idx[N_PULSES] = { pri->shortIdx, pri->longIdx };
+    for (int i = 0; i < N_PULSES; i++) {
+        const PulseConfig *pc = &cfg->pulse[i];
+        idx[i][0] = pc->enable ? (uint32_t)pc->rxFirst + 1 : 0;
+        idx[i][1] = pc->enable ? (uint32_t)(pc->rxFirst + pc->rxCount) : 0;
+    }
+}
+
+static int test_pulse(const RadarConfig *cfg) { return cfg->pulse[PULSE_LONG].enable ? PULSE_LONG : PULSE_SHORT; }
+
 static int16_t sat16(double v)
 {
     v = floor(v + 0.5);
@@ -309,17 +323,19 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
     cfg.mfMethod = mfDirect ? MF_DIRECT : MF_AUTO;
     cfg.snrNoise = snrNoise;
     CHECK(cfg.nCh >= 1 && cfg.nDdc > 0 && cfg.cpiLength > 0, "configuration sizes");
-    CHECK(cfg.pulse[PULSE_SHORT].ddcFirst < cfg.pulse[PULSE_LONG].ddcFirst, "short pulse before the long one");
+    CHECK(!cfg.pulse[PULSE_SHORT].enable || !cfg.pulse[PULSE_LONG].enable ||
+          cfg.pulse[PULSE_SHORT].ddcFirst < cfg.pulse[PULSE_LONG].ddcFirst, "short pulse before the long one");
+    const int TP = test_pulse(&cfg);
     printf("config: %d channels, %d beams, %d DDC samples, CPI %d, nfft %d, %s PRF, %s matched filter\n",
            cfg.nCh, cfg.nBeams, cfg.nDdc, cfg.cpiLength, cfg.nfft, cfg.staggered ? "staggered" : "fixed",
            mfDirect ? "direct" : "automatic");
     for (int i = 0; i < N_PULSES; i++)
-        printf("  %s pulse: %s, %s filter, %d taps, %d range cells\n", i == PULSE_SHORT ? "short" : "long",
+        if (cfg.pulse[i].enable) printf("  %s pulse: %s, %s filter, %d taps, %d range cells\n", i == PULSE_SHORT ? "short" : "long",
                cfg.pulse[i].waveform == WAVE_PHASE_CODE ? "phase code" : "LFM",
                cfg.pulse[i].compression == COMPRESSION_MISMATCH ? "mismatch" : "matched", cfg.pulse[i].nTaps,
                cfg.pulse[i].nRange);
 
-    const PulseConfig *pc = &cfg.pulse[PULSE_LONG];
+    const PulseConfig *pc = &cfg.pulse[TP];
     const int beam = cfg.nBeams > 4 ? cfg.nBeams / 3 : 0;
     const int r0 = pc->nRange / 2;                      /* range cell of the target */
     const int nEcho = pc->nPulse ? pc->nPulse : pc->nTaps;
@@ -338,10 +354,7 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
     pri.nCh = cfg.nCh;
     pri.nSamples = cfg.nDdc;
     pri.ddcFs_Hz = (float)cfg.fsOut_Hz;
-    pri.shortIdx[0] = (uint32_t)cfg.pulse[PULSE_SHORT].rxFirst + 1;
-    pri.shortIdx[1] = (uint32_t)(cfg.pulse[PULSE_SHORT].rxFirst + cfg.pulse[PULSE_SHORT].rxCount);
-    pri.longIdx[0] = (uint32_t)cfg.pulse[PULSE_LONG].rxFirst + 1;
-    pri.longIdx[1] = (uint32_t)(cfg.pulse[PULSE_LONG].rxFirst + cfg.pulse[PULSE_LONG].rxCount);
+    set_header_intervals(&cfg, &pri);
     pri.iq = malloc(sizeof(int16_t) * 2 * (size_t)cfg.nCh * cfg.nDdc);
     double *steerRe = malloc(sizeof(double) * cfg.nCh), *steerIm = malloc(sizeof(double) * cfg.nCh);
     for (int ch = 0; ch < cfg.nCh; ch++) {               /* matched to the beam weights */
@@ -412,8 +425,9 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
     printf("end to end: %d PRIs in %.1f ms (%.2f ms per PRI), %d/%d CPI updates, %d/%d detections, %d plots\n",
            nPulses, tProc * 1e3, tProc * 1e3 / nPulses, sink.updates[0], sink.updates[1],
            sink.dets[0], sink.dets[1], sink.plots.n);
-    CHECK(sink.updates[PULSE_LONG] == nPulses - cfg.cpiLength + 1 || cfg.updateEvery > 1,
-          "CPI updates %d", sink.updates[PULSE_LONG]);
+    CHECK(sink.updates[TP] == nPulses - cfg.cpiLength + 1 || cfg.updateEvery > 1,
+          "CPI updates %d", sink.updates[TP]);
+    CHECK(cfg.pulse[1 - TP].enable || sink.updates[1 - TP] == 0, "updates of a sub-pulse that is off");
     if (!isnan(threshold_dB)) {          /* a threshold above the target peak: nothing is detected */
         CHECK(sink.dets[0] + sink.dets[1] == 0 && sink.plots.n == 0,
               "CFAR threshold %.1f dB: %d detections, %d plots (expected none)", threshold_dB,
@@ -431,13 +445,13 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
         printf("  plot: %s, range %.1f m (cell %d), vr %.2f m/s, beam %d, el %.2f deg, SNR %.1f dB, hits %d\n",
                p->pulse == PULSE_LONG ? "long" : "short", p->range_m, p->rIdx, p->vr_mps, p->beam,
                p->el_deg, p->snr_dB, p->hits);
-        if (p->pulse == PULSE_LONG && abs(p->rIdx - r0) <= 1 && fabs(p->vr_mps - vr) < 0.75 * dv &&
+        if (p->pulse == TP && abs(p->rIdx - r0) <= 1 && fabs(p->vr_mps - vr) < 0.75 * dv &&
             abs(p->beam - beam) <= 1) {
             found++;
             *plotOut = *p;
         }
     }
-    CHECK(found == 1, "expected the target as one long-pulse plot at cell %d, %.1f m/s, beam %d", r0, vr, beam);
+    CHECK(found == 1, "expected the target as one test-pulse plot at cell %d, %.1f m/s, beam %d", r0, vr, beam);
     if (taps) {                          /* the display taps of the target's beam */
         const int tb = (int)floor(pc->range_m[r0] / sink.dR);
         const int dExp = (int)lround(cfg.nfft / 2 - vr / dv);   /* Doppler bin of vr (after fftshift) */
@@ -466,6 +480,109 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
     free(pri.iq);
     radar_config_free(&cfg);
     return found == 1;
+}
+
+/* cfg.mti.maxRange_m: the clutter filter only up to a range. Two stationary echoes (zero
+ * Doppler) of the long pulse, one before and one beyond the limit, in noise: the first is
+ * cancelled by the MTI, the second stays at zero Doppler; the noise floor away from zero
+ * Doppler is the same on both sides of the limit (the noise gain of the unfiltered cells). */
+static void on_rdmap_keep(void *user, const RdMap *m)
+{
+    RdMap *dst = user;
+    free((void *)dst->power);
+    float *pw = malloc(sizeof(float) * (size_t)m->nfft * m->nBins);
+    memcpy(pw, m->power, sizeof(float) * (size_t)m->nfft * m->nBins);
+    *dst = *m;
+    dst->power = pw;
+    dst->dets = NULL;
+}
+
+static void test_mti_range(const char *configPath)
+{
+    RadarConfig cfg;
+    char err[256];
+    if (radar_config_load(configPath, &cfg, err, sizeof err) != 0) { CHECK(0, "configuration: %s", err); return; }
+    if (cfg.staggered) { printf("MTI range limit: fixed PRF only, skipped\n"); radar_config_free(&cfg); return; }
+    PulseConfig *pc = &cfg.pulse[test_pulse(&cfg)];
+    const int r1 = pc->nRange / 4, r2 = 3 * pc->nRange / 4;
+    cfg.mtiMaxRange_m = pc->range_m[pc->nRange / 2];
+    for (int p = 0; p < N_PULSES; p++) {
+        cfg.pulse[p].mtiCells = 0;
+        for (int k = 0; k < cfg.pulse[p].nRange; k++) if (cfg.pulse[p].range_m[k] <= cfg.mtiMaxRange_m) cfg.pulse[p].mtiCells = k + 1;
+    }
+    for (int d = 0; d < cfg.nfft; d++) cfg.noiseGainBypass[d] = 1.0f;   /* fixed PRF: unit-energy window, no filter */
+    const int beam = cfg.nBeams > 4 ? cfg.nBeams / 3 : 0;
+    const int nEcho = pc->nPulse ? pc->nPulse : pc->nTaps;
+    double pulseNorm = 0.0;
+    for (int m = 0; m < pc->nPulse; m++) pulseNorm += pc->pulseRe[m] * pc->pulseRe[m] + pc->pulseIm[m] * pc->pulseIm[m];
+    pulseNorm = pulseNorm > 0.0 ? sqrt(pulseNorm) : 1.0;
+    PriData pri;
+    memset(&pri, 0, sizeof pri);
+    pri.nCh = cfg.nCh;
+    pri.nSamples = cfg.nDdc;
+    pri.ddcFs_Hz = (float)cfg.fsOut_Hz;
+    set_header_intervals(&cfg, &pri);
+    pri.iq = malloc(sizeof(int16_t) * 2 * (size_t)cfg.nCh * cfg.nDdc);
+    Processor *proc = processor_create(&cfg, 0);
+    RdMap map;
+    memset(&map, 0, sizeof map);
+    ProcessorCallbacks cb;
+    memset(&cb, 0, sizeof cb);
+    cb.user = &map;
+    cb.rdmap = on_rdmap_keep;
+    processor_set_rdmap(proc, 1, beam, 0.0);
+    srand(7);
+    for (int k = 0; k < cfg.cpiLength + 5; k++) {
+        pri.pulseNumber = 1 + k;
+        pri.scanNumber = 1;
+        pri.az_deg = 0.0f;                                /* no scan modulation: a stationary echo */
+        pri.time_s = k * 1e-3;
+        pri.staggerIndex = 1;
+        for (size_t i = 0; i < 2 * (size_t)cfg.nCh * cfg.nDdc; i++) pri.iq[i] = sat16(16.0 * gauss());
+        for (int e = 0; e < 2; e++) {
+            const int first = pc->ddcFirst + (e ? r2 : r1) + pc->mfShift;
+            for (int ch = 0; ch < cfg.nCh; ch++) {
+                double sr0 = 1, si0 = 0;
+                if (cfg.dbfEnabled) {
+                    const double wr = cfg.wRe[beam * cfg.nCh + ch], wi = cfg.wIm[beam * cfg.nCh + ch], m = hypot(wr, wi);
+                    if (m > 0) { sr0 = wr / m; si0 = -wi / m; }
+                }
+                for (int m = 0; m < nEcho; m++) {
+                    const double sr = pc->nPulse ? pc->pulseRe[m] / pulseNorm : pc->tapsRe[pc->nTaps - 1 - m];
+                    const double si = pc->nPulse ? pc->pulseIm[m] / pulseNorm : -pc->tapsIm[pc->nTaps - 1 - m];
+                    int16_t *v = pri.iq + 2 * ((size_t)ch * cfg.nDdc + first + m);
+                    v[0] = sat16(v[0] + 200.0 * (sr0 * sr - si0 * si));
+                    v[1] = sat16(v[1] + 200.0 * (sr0 * si + si0 * sr));
+                }
+            }
+        }
+        processor_process(proc, &pri, &cb);
+    }
+    CHECK(map.power != NULL, "MTI range limit: no range-Doppler map");
+    if (map.power) {
+        const int z = map.nfft / 2;
+        const int b1 = (int)floor(pc->range_m[r1] / map.dR_m), b2 = (int)floor(pc->range_m[r2] / map.dR_m);
+        const int bLo = (int)floor(pc->range_m[pc->nRange / 2 - 20] / map.dR_m), bHi = (int)floor(pc->range_m[pc->nRange / 2 + 20] / map.dR_m);
+        double n1 = 0, n2 = 0;
+        int c1 = 0, c2 = 0;
+        for (int d = 0; d < map.nfft; d++) {
+            if (abs(d - z) <= map.notchBins + 4) continue;
+            for (int b = bLo - 100; b < bLo; b++) { n1 += map.power[(size_t)d * map.nBins + b]; c1++; }
+            for (int b = bHi; b < bHi + 100; b++) { n2 += map.power[(size_t)d * map.nBins + b]; c2++; }
+        }
+        n1 /= c1;  n2 /= c2;
+        const double p1 = map.power[(size_t)z * map.nBins + b1], p2 = map.power[(size_t)z * map.nBins + b2];
+        printf("MTI up to %.1f km: stationary echo before it %.1f dB, beyond it %.1f dB over the noise; noise floor "
+               "beyond / before %.2f dB\n", cfg.mtiMaxRange_m / 1e3, 10 * log10(p1 / n1), 10 * log10(p2 / n2),
+               10 * log10(n2 / n1));
+        CHECK(10 * log10(p2 / n2) > 30 && 10 * log10(p1 / n1) < 10, "MTI range limit: echo before %.1f dB, beyond %.1f dB",
+              10 * log10(p1 / n1), 10 * log10(p2 / n2));
+        CHECK(fabs(10 * log10(n2 / n1)) < 0.5, "MTI range limit: noise floor differs by %.2f dB", 10 * log10(n2 / n1));
+        free((void *)map.power);
+    }
+    processor_destroy(proc);
+    free(pri.iq);
+    radar_config_free(&cfg);
 }
 
 /* False alarm probability of the CFAR threshold (the inverse of cfar_alpha.m):
@@ -535,6 +652,14 @@ static void test_video(const char *configPath)
     VideoLayout v;
     CHECK(video_layout_init(&v, &cfg, cfg.maxRange_m) == 0, "video layout");
     const PulseConfig *ps = &cfg.pulse[PULSE_SHORT], *pl = &cfg.pulse[PULSE_LONG];
+    if (!ps->enable || !pl->enable) {                   /* one sub-pulse: its samples only, no handover */
+        const PulseConfig *on = ps->enable ? ps : pl;
+        CHECK(v.nSamples > 0 && v.nSamples <= on->rxCount, "video of one sub-pulse: %d samples", v.nSamples);
+        printf("video: %d samples of the %s pulse only\n", v.nSamples, ps->enable ? "short" : "long");
+        video_layout_free(&v);
+        radar_config_free(&cfg);
+        return;
+    }
     PriData pri;
     memset(&pri, 0, sizeof pri);
     pri.nCh = cfg.nCh;
@@ -597,6 +722,7 @@ int main(int argc, char **argv)
         }
         test_cfar_pfa(argv[1]);
         test_video(argv[1]);
+        test_mti_range(argv[1]);
     } else {
         printf("no configuration file given: end-to-end test skipped\n");
     }

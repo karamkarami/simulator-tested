@@ -41,6 +41,9 @@ tests(end+1, :) = {'Configuration edge cases (sectors, invalid settings, handove
 tests(end+1, :) = {'CFAR detectors (CA, GO, SO, OS) x windows (2-D, range, Doppler), edges, range interval', @test_cfar};
 tests(end+1, :) = {'EKF tracker 3-D and 2-D (and the C tracker when built)', @test_tracker};
 tests(end+1, :) = {'PMBM tracker with IMM-UKF 3-D and 2-D: maneuvers, acceleration, clutter, close targets', @test_tracker_pmbm};
+tests(end+1, :) = {'TOMHT tracker (k-best, N-scan) with IMM-UKF: the PMBM cases (and the C tracker)', @test_tracker_tomht};
+tests(end+1, :) = {'Options: sub-pulses on/off and carriers, CPI mode, MTI range, MF/Doppler recordings, video floor', ...
+                   @test_new_options};
 tests(end+1, :) = {'Peak interpolation of the detections (Doppler, elevation)', @test_peak_interpolation};
 tests(end+1, :) = {'Clutter filter option: canceller or FIR filter from a .mat file', @test_mti_fir};
 tests(end+1, :) = {'Interactive PPI (data tips, zoom, pan, filters)', @test_ppi_interactive};
@@ -72,7 +75,7 @@ if isunix && exist(receiverBin, 'file')
     end
     % other CFAR detectors and the PMBM tracker in both programs
     combos = {'fixed', '2d', 'os', 'pmbm'; 'fixed', 'range', 'go', 'pmbm'; 'fixed', 'doppler', 'so', 'ekf'; ...
-              'staggered', '2d', 'ca', 'pmbm'};
+              'staggered', '2d', 'ca', 'pmbm'; 'fixed', '2d', 'ca', 'tomht'};
     for i = 1:size(combos, 1)
         c = combos(i, :);
         tests(end+1, :) = {sprintf('C receiver vs MATLAB (%s PRF, CFAR %s %s, %s tracker)', c{1}, upper(c{3}), c{2}, ...
@@ -80,6 +83,8 @@ if isunix && exist(receiverBin, 'file')
     end
     tests(end+1, :) = {'Three scans through the C receiver: tracks on the targets only (fixed PRF)', ...
                        @() test_multi_scan('fixed', 3)};
+    tests(end+1, :) = {'C DDC file generator radar_generate_ddc against generate_ddc_files (and the C receiver)', ...
+                       @test_generate_ddc_c};
 else
     fprintf('C receiver not built (%s): test_c_receiver skipped\n', receiverBin);
 end

@@ -33,9 +33,11 @@ int video_layout_init(VideoLayout *v, const RadarConfig *cfg, double maxRange_m)
         video_layout_free(v);
         return -1;
     }
-    const double handover_m = pl->range_m[0];
+    const double handover_m = cfg->handover_m;       /* (Inf without the long pulse) */
+    (void)pl;
     for (int p = 0; p < N_PULSES; p++) {
         const PulseConfig *pc = &cfg->pulse[p];
+        if (!pc->enable) continue;
         for (int k = 0; k < pc->rxCount; k++) {
             const double r = pc->range_m[0] + k * v->dR_m;
             if (p == PULSE_SHORT && !(r < handover_m)) break;

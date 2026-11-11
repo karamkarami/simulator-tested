@@ -431,6 +431,50 @@ int main(int argc, char **argv)
         check(ppi_video_wanted() == 0, "back to the plots: no video wanted");
     }
 
+    /* video noise floor over a mountain sector: 48 elements (mean of 48 exponential powers), the
+     * rows of 180 ... 225 deg have clutter 30 dB above the noise in 95% of their bins (near
+     * clutter, long-pulse smear and the mountain range); the noise floor and so the colour of the
+     * noise must not move while the antenna crosses it */
+    {
+        win.modeBox()->setCurrentIndex(3);
+        const double dR = 74.948;
+        const int nBins = (int)std::ceil(80e3 / dR);
+        std::vector<float> row(nBins);
+        uint32_t seed = 7;
+        std::vector<float> pool(65536);                       /* means of 48 exponential powers of mean 500 */
+        for (float &x : pool) {
+            double sum = 0.0;
+            for (int k = 0; k < 48; k++) {
+                seed = seed * 1664525u + 1013904223u;
+                sum += -500.0 * std::log(((seed >> 8) + 0.5) / 16777216.0);
+            }
+            x = (float)(sum / 48.0);
+        }
+        auto noise48 = [&seed, &pool]() {
+            seed = seed * 1664525u + 1013904223u;
+            return pool[seed >> 16];
+        };
+        double lo = 1e9, hi = -1e9, before = NAN;
+        int n = 0;
+        for (double az = 60.0; az < 300.0; az += 0.036) {   /* 1 ms PRI at 6 rpm */
+            const bool mountain = az > 180.0 && az < 225.0;
+            for (int i = 0; i < nBins; i++)
+                row[i] = i < 55 ? 0.0f : noise48() * (mountain && i < 55 + (int)(0.95 * (nBins - 55)) ? 1000.0f : 1.0f);
+            ppi_post_video(row.data(), nBins, 48, dR, az, 100.0 + az / 36.0);
+            if (++n % 50) continue;
+            win.refresh();
+            const double v = pw.videoNoise_dB();
+            if (az > 150.0 && az < 170.0) before = v;
+            if (az > 150.0) { lo = std::min(lo, v); hi = std::max(hi, v); }
+        }
+        char what[200];
+        std::snprintf(what, sizeof what, "video noise floor over a mountain sector (95%% clutter in 45 deg): %.1f dB, "
+                      "%.2f dB of variation", before, hi - lo);
+        check(std::fabs(before - 10.0 * std::log10(500.0)) < 0.5 && hi - lo < 0.5, what);
+        pw.clearPlots();
+        win.modeBox()->setCurrentIndex(0);
+    }
+
     /* DBF out / MF out of the selected beam */
     {
         check(win.beamBox()->count() == 3 && win.beamBox()->itemText(1).contains("4.0"), "beam selector: 3 beams with elevations");
@@ -624,6 +668,24 @@ int main(int argc, char **argv)
               "screenshot (button, key S): the whole window with the panel");
         const QIcon icon = ppi_icon();
         check(!icon.isNull() && icon.pixmap(64, 64).width() == 64, "the program icon is in the resources");
+        check(QGuiApplication::desktopFileName().isEmpty() || QGuiApplication::desktopFileName() == "radar_receiver",
+              "application id");
+#if !defined(_WIN32) && !defined(__APPLE__)
+        {                                                /* desktop entry and icon file (Linux desktops) */
+            const QString home = QString::fromStdString(folder + "/desktop_home");
+            QDir(home).removeRecursively();
+            QString written;
+            const bool okEntry = ppi_install_desktop_entry(home, &written);
+            QFile e(home + "/applications/radar_receiver.desktop");
+            const bool hasText = e.open(QIODevice::ReadOnly) && e.readAll().contains("Icon=" + home.toUtf8() +
+                                                                                    "/icons/hicolor/256x256/apps/radar_receiver.png");
+            const QImage img(home + "/icons/hicolor/256x256/apps/radar_receiver.png");
+            QString again;
+            ppi_install_desktop_entry(home, &again);
+            check(okEntry && hasText && img.width() == 256 && !written.isEmpty() && again.isEmpty(),
+                  "desktop entry radar_receiver.desktop with the icon file (written once)");
+        }
+#endif
         QCoreApplication::processEvents();               /* layout after the text changes */
         win.grab().save(QString::fromStdString(folder + "/ppi_window.png"));
     }

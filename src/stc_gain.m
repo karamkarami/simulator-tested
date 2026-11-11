@@ -23,8 +23,9 @@ ws = sys.wave.short;  wl = sys.wave.long;
 curveLong = stc.curve;
 if isfield(stc, 'curveLong') && ~isempty(stc.curveLong), curveLong = stc.curveLong; end
 A = zeros(size(t)) + stc.curve(1, 2);                          % while transmitting
-inShort = t >= ws.tTx_s + ws.width_s & t < wl.tTx_s;          % receive windows
-inLong  = t >= wl.tTx_s + wl.width_s;
+shortEnd = inf;  if wl.enable, shortEnd = wl.tTx_s; end      % receive windows of the sub-pulses on
+inShort = ws.enable & t >= ws.tTx_s + ws.width_s & t < shortEnd;
+inLong  = wl.enable & t >= wl.tTx_s + wl.width_s;
 A(inShort) = attenuation(stc.curve, c * (t(inShort) - ws.tTx_s - ws.width_s) / 2);
 A(inLong)  = attenuation(curveLong, c * (t(inLong) - wl.tTx_s - wl.width_s) / 2);
 g = 10.^(-A/20);

@@ -26,6 +26,7 @@ typedef struct {
     double   sigmaV0, sigmaA0, gate, scanTime_s, height_m;
     int      useVr, vrUnambiguous;       /* radial velocity measurement (as track_ekf.m) */
     double   Rvr, vrSpan, gateVr;
+    double   vrSpanPulse[N_PULSES];      /* the span on the carrier of each sub-pulse */
     double   batchGap_s, batchMax_s;     /* GNN batch                               */
     int      confirmHits, maxMissTentative, maxMiss;
     double   minSpeed;                   /* delete tracks slower than this [m/s], 0 = off */

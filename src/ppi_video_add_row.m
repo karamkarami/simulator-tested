@@ -29,5 +29,20 @@ if isfield(V, 'kind') && any(strcmp(V.kind, {'dbf', 'mf'}))
 else                                                           % its 10th percentile is 9.77 dB below the mean;
     m = m + V.p10Video_dB;                                     % video: the mean over the elements (48: 0.86 dB)
 end
-if isnan(V.noise_dB), V.noise_dB = m; else, V.noise_dB = 0.98*V.noise_dB + 0.02*m; end
+% The 10th percentile of a row is the noise only while 10% of its bins hold no echo: over the
+% mountains the clutter covers more than 90% of a row, and a running mean of the rows raised the
+% colour scale while the antenna crossed them (the noise floor changed colour for a moment).
+% The noise does not depend on the azimuth: the 20th percentile of the newest estimate of every
+% azimuth bin (a clutter sector smaller than 80% of the circle cannot move it); the running
+% mean until 8 azimuth bins have data.
+if ~isfield(V, 'azNoise') || numel(V.azNoise) ~= V.nAz, V.azNoise = nan(V.nAz, 1); end
+V.azNoise(b) = m;
+e = sort(V.azNoise(isfinite(V.azNoise)));
+if numel(e) >= 8
+    V.noise_dB = e(floor((numel(e) - 1) / 5) + 1);
+elseif isnan(V.noise_dB)
+    V.noise_dB = m;
+else
+    V.noise_dB = 0.98*V.noise_dB + 0.02*min(m, V.noise_dB + 0.05);
+end
 end

@@ -28,17 +28,19 @@ for i = 1:numel(targets)
     if abs(azRel) > sys.ant.azSpan_deg
         continue                                   % far outside the azimuth beam
     end
-    [v, u] = steering_vector(sys, azRel, el);
+    [~, u] = steering_vector(sys, azRel, el);
     elRel  = asind(u);
     % Two-way pattern factor: product of the one-way power patterns
     gain = pattern_gain(sys.ant.az_deg, sys.ant.azGain_dB, azRel)^2 ...
          * pattern_gain(sys.ant.elRel_deg, sys.ant.txElGain_dB, elRel) ...
          * pattern_gain(sys.ant.elRel_deg, sys.ant.elElemGain_dB, elRel);
     rcs   = target_rcs(targets(i), target_look(sys, az, t_s));        % Swerling 1: one value per pass
-    power = sys.radarConst * rcs / R^4 * gain;                         % per element [W]
-    amp   = sqrt(2*power);                                                % [sqrt(W)]
     for p = 1:2
         wv   = sys.wave.(names{p});
+        if ~wv.enable, continue; end                % sub-pulse switched off
+        v     = steering_vector(sys, azRel, el, wv.lambda_m);   % element phases on its carrier
+        power = wv.radarConst * rcs / R^4 * gain;                      % per element [W]
+        amp   = sqrt(2*power);                                            % [sqrt(W)]
         tau0 = 2*R/c;
         % ADC samples that contain the echo
         first = max(1, ceil((wv.tTx_s + tau0 - sys.rxStart_s)*fs) + 1);
@@ -47,25 +49,33 @@ for i = 1:numel(targets)
         n  = (first:last)';
         t  = sys.tAdc(n);                           % time inside the PRI
         tau = 2*(R + vr*t)/c;                       % delay of every sample (intra-pulse Doppler)
-        % RF echo mixed down by the LO: IF carrier plus the carrier phase -2*pi*fLO*tau
+        % RF echo (carrier wv.fc_Hz) mixed down by the LO: the IF of the sub-pulse plus the
+        % carrier phase -2*pi*fLO*tau (its Doppler comes from tau: fc_Hz = fLO + fIF_Hz)
         echo = amp * waveform_envelope(wv, t - wv.tTx_s - tau0) ...
-             .* exp(1j*2*pi*(sys.fIF*(t - wv.tTx_s - tau) - sys.fLO*tau));
+             .* exp(1j*2*pi*(wv.fIF_Hz*(t - wv.tTx_s - tau) - sys.fLO*tau));
         x(n, :) = x(n, :) + real(single(echo) * single(v).');
     end
 end
 
 %% 2) Clutter (per elevation group the same echo on all elements, different phase)
 if ~isempty(clutterIf)
-    x = x + real(single(clutterIf) * single(sys.clutterSteer).');
+    if size(clutterIf, 3) == 1
+        x = x + real(single(clutterIf) * single(sys.wave.short.clutterSteer).');
+    else                                           % sub-pulses on different carriers
+        for p = 1:2
+            x = x + real(single(clutterIf(:, :, p)) * single(sys.wave.(names{p}).clutterSteer).');
+        end
+    end
 end
 
 %% 3) Transmitter leakage into every receive channel while a pulse is transmitted
 if sys.cfg.rx.addLeakage
     for p = 1:2
         wv = sys.wave.(names{p});
+        if ~wv.enable, continue; end
         n  = find(sys.tAdc >= wv.tTx_s & sys.tAdc < wv.tTx_s + wv.width_s);
         t  = sys.tAdc(n) - wv.tTx_s;
-        leak = sys.rx.leakAmp * real(waveform_envelope(wv, t) .* exp(1j*2*pi*sys.fIF*t));
+        leak = sys.rx.leakAmp * real(waveform_envelope(wv, t) .* exp(1j*2*pi*wv.fIF_Hz*t));
         x(n, :) = x(n, :) + single(leak);
     end
 end

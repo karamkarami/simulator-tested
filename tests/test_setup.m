@@ -46,9 +46,11 @@ end
 
 %% 2) settings that cannot work
 bad = {'cfar.notchWidth', 100, 'notch';  'proc.cpiLength', 3, 'too short';  'cfar.method', 'xyz', 'cfar.method';
-       'ddc.outputRate_Hz', 3e6, 'outputRate';  'prf.mode', 'random', 'PRF mode'};
+       'ddc.outputRate_Hz', 3e6, 'outputRate';  'prf.mode', 'random', 'PRF mode';
+       'proc.cpiMode', 'xyz', 'cpiMode';  'proc.cpiLength', 2.5, 'whole number'};
 for k = 1:size(bad, 1)
     c = cfg;
+    c.proc.cpiMode = 'manual';                         % (the CPI length cases; 114 = the auto value)
     parts = strsplit(bad{k, 1}, '.');
     c = setfield(c, parts{:}, bad{k, 2});
     msg = '';
@@ -70,7 +72,9 @@ oR = s.cfar.guardRange + s.cfar.trainRange;
 nTested = ws.testIdx(2) - ws.testIdx(1) + 1;
 P = single(-log(rand(s.nBeams, ws.nRange, s.dop.nfft)));
 [~, noise] = cfar_detect(P, s, ws);
-good = ws.nRange >= 2*oR + 1 && nTested >= 1 && ws.testIdx(2) <= oR && all(noise(:, ws.testIdx(1), :) > 0);
+zeroBin = floor(s.dop.nfft/2) + 1;                     % (the MTI notch bins are not tested: noise 0)
+outside = abs((1:s.dop.nfft) - zeroBin) > s.dop.notchBins;
+good = ws.nRange >= 2*oR + 1 && nTested >= 1 && ws.testIdx(2) <= oR && all(all(noise(:, ws.testIdx(1), outside) > 0));
 ok = report(sprintf('30 us long pulse: short pulse %d range cells (CFAR window %d), cells %d ... %d tested', ...
                     ws.nRange, 2*oR + 1, ws.testIdx), good) && ok;
 fc = [tempname() '.bin'];

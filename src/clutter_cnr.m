@@ -18,7 +18,8 @@ function cnr = clutter_cnr(sys, sigma0, R_m, el_deg)
 %   and the noise the same gain, so this is the CNR of the range cell.
 c  = sys.cfg.const.c;
 fs = sys.fs;
-wv = sys.wave.short;
+wv = sys.wave.short;                                  % (the long pulse when the short one is off)
+if ~wv.enable, wv = sys.wave.long; end
 [~, u] = steering_vector(sys, 0, el_deg);
 gEl = pattern_gain(sys.ant.elRel_deg, sys.ant.txElGain_dB, asind(u)) ...
     * pattern_gain(sys.ant.elRel_deg, sys.ant.elElemGain_dB, asind(u));
@@ -40,5 +41,5 @@ for shift = 0:D-1
     y = fir_decimate_valid(fir_decimate_valid(s, sys.ddc.h1real, sys.ddc.decim(1)), sys.ddc.h2real, sys.ddc.decim(2));
     S = S + sum(abs(conv(y, wv.mfTaps.')).^2);
 end
-cnr = sys.radarConst * sigma0 * gEl / R_m^3 * azInt * c/(2*fs) * S / (sys.N0ddc * noiseGain * fs);
+cnr = wv.radarConst * sigma0 * gEl / R_m^3 * azInt * c/(2*fs) * S / (sys.N0ddc * noiseGain * fs);
 end

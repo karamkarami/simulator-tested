@@ -32,7 +32,7 @@ b.rcs_m2  = tgt.rcs_m2;
 b.range_m = R;
 b.el_deg  = el;
 b.vr_mps  = vr;
-if R < sys.handover_m
+if R < sys.handover_m && sys.wave.short.enable
     b.pulse = 'short';                     % the short pulse is tested up to the handover range
 else
     b.pulse = 'long';
@@ -40,10 +40,10 @@ end
 wv = sys.wave.(b.pulse);
 
 %% Fast time: received power with the beam pointing at the target
-[v, u] = steering_vector(sys, 0, el);
+[v, u] = steering_vector(sys, 0, el, wv.lambda_m);
 gEl = pattern_gain(sys.ant.elRel_deg, sys.ant.txElGain_dB, asind(u)) ...
     * pattern_gain(sys.ant.elRel_deg, sys.ant.elElemGain_dB, asind(u));
-Pr  = sys.radarConst * tgt.rcs_m2 / R^4 * gEl;                     % per element [W]
+Pr  = wv.radarConst * tgt.rcs_m2 / R^4 * gEl;                     % per element [W]
 % STC: attenuation of the echo (not of the noise) over its middle half, as the samples are measured
 tau = 2*R/sys.cfg.const.c;
 gStc = stc_gain(sys, wv.tTx_s + tau + wv.width_s*(0.25:0.01:0.75));

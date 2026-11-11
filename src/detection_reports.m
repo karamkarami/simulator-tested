@@ -26,7 +26,9 @@ else
     noise = noiseFloor(b);
 end
 n = numel(b);
-u = sys.dbf.beamU(b);  u = u(:);                           % beam centres (NaN without DBF)
+bu = sys.dbf.beamU;                                        % beam centres (NaN without DBF),
+if isfield(wv, 'beamU'), bu = wv.beamU; end                % on the carrier of the sub-pulse
+u = bu(b);  u = u(:);
 snr = 10*log10(max(double(dets.power(:) ./ noise) - 1, eps));
 rep = struct('time_s', info.tCenter_s, 'az_deg', info.azCenter_deg, ...
              'range_m', num2cell(reshape(wv.range_m(rI), 1, [])), ...

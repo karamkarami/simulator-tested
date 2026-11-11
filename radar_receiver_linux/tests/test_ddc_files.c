@@ -400,8 +400,41 @@ static void test_errors(void)
     ddc_free(&p);
 }
 
-int main(void)
+/* The files of radar_generate_ddc (ctest generate_ddc): every file of the
+ * folder loads, consecutive pulse numbers, the layout of the configuration
+ * (channels, samples), the receive intervals in the header, signal present. */
+static int check_generated(const char *folder, int nCh)
 {
+    char **paths = NULL, err[256];
+    const int n = ddc_list_files(folder, &paths, err, sizeof err);
+    CHECK(n > 0);
+    DdcPri p;
+    memset(&p, 0, sizeof p);
+    uint32_t prev = 0;
+    for (int i = 0; i < n; i++) {
+        CHECK(ddc_load(paths[i], &p, err, sizeof err) == 0);
+        CHECK(p.nCh == nCh && p.nSamples > 0);
+        CHECK(i == 0 || p.pulseNumber == prev + 1);
+        prev = p.pulseNumber;
+        CHECK(p.shortIdx[0] >= 1 && p.shortIdx[1] > p.shortIdx[0] && p.longIdx[0] > p.shortIdx[1] &&
+              p.longIdx[1] <= (uint32_t)p.nSamples);
+        double e = 0.0;
+        for (size_t k = 0; k < 2 * (size_t)p.nSamples * p.nCh; k++) e += (double)p.iq[k] * p.iq[k];
+        CHECK(e > 0.0);
+    }
+    printf("generated DDC files: %d in %s, %d channels, %d samples\n", n, folder, p.nCh, p.nSamples);
+    ddc_free(&p);
+    ddc_free_list(paths, n > 0 ? n : 0);
+    return n;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc > 2) {                                      /* test_ddc_files FOLDER NCH */
+        check_generated(argv[1], atoi(argv[2]));
+        printf("%s\n", g_failures ? "FAIL" : "PASS");
+        return g_failures ? 1 : 0;
+    }
     test_files();
     test_errors();
     printf("%s\n", g_failures ? "FAIL" : "PASS");

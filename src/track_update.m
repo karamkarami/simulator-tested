@@ -10,7 +10,8 @@ function tr = track_update(tr, plots, t_s, flush)
 %   row per track update: [time id confirmed x y z vx vy vz hits plotIndex]).
 if nargin < 4, flush = false; end
 switch tr.p.method
-    case 'pmbm', tr = track_pmbm(tr, plots, t_s, flush);
+    case 'pmbm',  tr = track_pmbm(tr, plots, t_s, flush);
+    case 'tomht', tr = track_tomht(tr, plots, t_s, flush);
     otherwise,   tr = track_ekf(tr, plots, t_s, flush);
 end
 end

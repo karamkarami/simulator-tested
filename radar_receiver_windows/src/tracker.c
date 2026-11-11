@@ -14,12 +14,14 @@ void tracker_init(Tracker *t, const RadarConfig *cfg)
     memset(t, 0, sizeof *t);
     t->method = cfg->trackMethod;
     if (t->method == TRACK_METHOD_PMBM) pmbm_tracker_init(&t->pmbm, cfg);
+    else if (t->method == TRACK_METHOD_TOMHT) tomht_tracker_init(&t->tomht, cfg);
     else ekf_tracker_init(&t->ekf, cfg);
 }
 
 void tracker_free(Tracker *t)
 {
     if (t->method == TRACK_METHOD_PMBM) pmbm_tracker_free(&t->pmbm);
+    else if (t->method == TRACK_METHOD_TOMHT) tomht_tracker_free(&t->tomht);
     else ekf_tracker_free(&t->ekf);
 }
 
@@ -27,30 +29,34 @@ void tracker_update(Tracker *t, const Detection *plots, int n, double t_s, int f
                     TrackerCallback callback, void *user)
 {
     if (t->method == TRACK_METHOD_PMBM) pmbm_tracker_update(&t->pmbm, plots, n, t_s, flush, callback, user);
+    else if (t->method == TRACK_METHOD_TOMHT) tomht_tracker_update(&t->tomht, plots, n, t_s, flush, callback, user);
     else ekf_tracker_update(&t->ekf, plots, n, t_s, flush, callback, user);
 }
 
 int tracker_count(const Tracker *t)
 {
-    return t->method == TRACK_METHOD_PMBM ? t->pmbm.nShown : t->ekf.nTracks;
+    return t->method == TRACK_METHOD_PMBM ? t->pmbm.nShown : t->method == TRACK_METHOD_TOMHT ? t->tomht.nShown
+                                                                                       : t->ekf.nTracks;
 }
 
 void tracker_report(const Tracker *t, int index, Track *out)
 {
     if (t->method == TRACK_METHOD_PMBM) pmbm_tracker_report(&t->pmbm, index, out);
+    else if (t->method == TRACK_METHOD_TOMHT) tomht_tracker_report(&t->tomht, index, out);
     else ekf_tracker_report(&t->ekf, index, out);
 }
 
 void tracker_name(const RadarConfig *cfg, char *buf, size_t len)
 {
-    if (cfg->trackMethod == TRACK_METHOD_PMBM) {
+    if (cfg->trackMethod == TRACK_METHOD_PMBM || cfg->trackMethod == TRACK_METHOD_TOMHT) {
         static const char *names[3] = { "CV", "CA", "CT" };
         char models[16] = "";
         for (int j = 0; j < cfg->pmbmNModels; j++) {
             if (j) strcat(models, "/");
             strcat(models, names[cfg->pmbmModels[j]]);
         }
-        snprintf(buf, len, "PMBM %d-D IMM %s", cfg->trackDim, models);
+        snprintf(buf, len, "%s %d-D IMM %s", cfg->trackMethod == TRACK_METHOD_TOMHT ? "TOMHT" : "PMBM", cfg->trackDim,
+                 models);
     } else {
         snprintf(buf, len, "EKF %d-D %s", cfg->trackDim, cfg->trackModel == TRACK_CA ? "CA" : "CV");
     }

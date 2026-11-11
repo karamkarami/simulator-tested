@@ -57,6 +57,7 @@ add_library(radar_core STATIC
     src/tracker.c
     src/tracker_ekf.c
     src/tracker_pmbm.c
+    src/tracker_tomht.c
     src/processor.c
     src/udp_input.c
     src/serial_out.c
@@ -176,6 +177,25 @@ if(NOT WIN32)
     target_link_libraries(radar_export_config PRIVATE m)
 endif()
 
+# The DDC files of the simulator without MATLAB (as generate_ddc_files.m): a run
+# configuration "radar_generate_ddc" in CLion. It reads ../radar_config.m (and its
+# input files), simulates every active PRI up to the DDC output (targets, terrain
+# clutter, leakage, STC, noise, ADC, fixed-point DDC; PRIs in parallel with OpenMP)
+# and writes ddc_<n>.mat (and pulse_<n>.mat) as MATLAB does; see --help.
+add_executable(radar_generate_ddc tools/generate_ddc.c tools/mfile.c tools/mat_write.c)
+target_link_libraries(radar_generate_ddc PRIVATE radar_ddc_files)
+target_compile_definitions(radar_generate_ddc PRIVATE RADAR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+if(ZLIB_FOUND)
+    target_compile_definitions(radar_generate_ddc PRIVATE RADAR_HAVE_ZLIB)   # -v7: compressed MAT-files
+    target_link_libraries(radar_generate_ddc PRIVATE ZLIB::ZLIB)
+endif()
+if(RADAR_OPENMP AND OpenMP_C_FOUND)
+    target_link_libraries(radar_generate_ddc PRIVATE OpenMP::OpenMP_C)
+endif()
+if(NOT WIN32)
+    target_link_libraries(radar_generate_ddc PRIVATE m)
+endif()
+
 # Processing time per block on synthetic PRIs (no network, display or console):
 # radar_bench --config FILE [--threads N] [--thresholds DB,DB,...]
 add_executable(radar_bench tools/bench_processor.c)
@@ -215,7 +235,7 @@ if(RADAR_BUILD_TESTS)
 
     # the CFAR against direct sums (white-box: the test includes processor.c)
     add_executable(test_cfar tests/test_cfar.c src/config.c src/fft.c src/cfar.c src/extractor.c src/tracker.c src/tracker_ekf.c
-                             src/tracker_pmbm.c src/platform.c)
+                             src/tracker_pmbm.c src/tracker_tomht.c src/platform.c)
     target_include_directories(test_cfar PRIVATE src)
     target_link_libraries(test_cfar PRIVATE Threads::Threads)
     if(OpenMP_C_FOUND)
@@ -266,6 +286,33 @@ if(RADAR_BUILD_TESTS)
     add_test(NAME core_exported COMMAND test_core ${CMAKE_CURRENT_BINARY_DIR}/radar_config_exported.bin)
     set_tests_properties(export_config PROPERTIES FIXTURES_SETUP exported_config)
     set_tests_properties(core_exported PROPERTIES FIXTURES_REQUIRED exported_config)
+    # options of radar_config.m exported and processed: one sub-pulse off, the sub-pulses on their
+    # own carriers with the clutter filter up to 50 km and a CPI of 96 pulses, the TOMHT tracker
+    foreach(variant IN ITEMS short_off long_off carriers tomht)
+        if(variant STREQUAL "short_off")
+            set(stmt "cfg.wave.short.enable = false;")
+        elseif(variant STREQUAL "long_off")
+            set(stmt "cfg.wave.long.enable = false;")
+        elseif(variant STREQUAL "carriers")
+            set(stmt "cfg.wave.short.fc_Hz = 165e6; cfg.wave.long.fc_Hz = 175e6; cfg.mti.maxRange_m = 50e3; cfg.proc.cpiMode = 'manual'; cfg.proc.cpiLength = 96;")
+        else()
+            set(stmt "cfg.track.method = 'tomht';")
+        endif()
+        add_test(NAME export_${variant} COMMAND radar_export_config --quiet --set "${stmt}"
+                 --out ${CMAKE_CURRENT_BINARY_DIR}/radar_config_${variant}.bin)
+        add_test(NAME core_${variant} COMMAND test_core ${CMAKE_CURRENT_BINARY_DIR}/radar_config_${variant}.bin)
+        set_tests_properties(export_${variant} PROPERTIES FIXTURES_SETUP exported_${variant})
+        set_tests_properties(core_${variant} PROPERTIES FIXTURES_REQUIRED exported_${variant})
+    endforeach()
+    add_test(NAME tracker_tomht COMMAND test_tracker ${CMAKE_CURRENT_BINARY_DIR}/radar_config_tomht.bin)
+    set_tests_properties(tracker_tomht PROPERTIES FIXTURES_REQUIRED exported_tomht)
+    # radar_generate_ddc: a few PRIs of the default configuration (targets, terrain clutter,
+    # noise), read back as DDC files
+    add_test(NAME generate_ddc COMMAND radar_generate_ddc --quiet --no-raw --max-pulses 4
+             --out ${CMAKE_CURRENT_BINARY_DIR}/generated_ddc --set "cfg.sim.sectors_deg = [42 43];")
+    add_test(NAME generated_ddc_files COMMAND test_ddc_files ${CMAKE_CURRENT_BINARY_DIR}/generated_ddc 48)
+    set_tests_properties(generate_ddc PROPERTIES FIXTURES_SETUP generated_ddc)
+    set_tests_properties(generated_ddc_files PROPERTIES FIXTURES_REQUIRED generated_ddc)
 
     add_executable(test_udp_input tests/test_udp_input.c)
     target_link_libraries(test_udp_input PRIVATE radar_core)

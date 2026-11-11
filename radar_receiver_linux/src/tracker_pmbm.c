@@ -70,6 +70,12 @@ void pmbm_tracker_init(PmbmTracker *t, const RadarConfig *cfg)
     }
     t->Rvr = cfg->trackSigmaVr * cfg->trackSigmaVr;
     t->vrSpan = cfg->trackVrSpan;
+    for (int p = 0; p < N_PULSES; p++) {
+        Detection d;
+        memset(&d, 0, sizeof d);
+        d.pulse = p;
+        t->vrSpanPulse[p] = tracker_plot_vr_span(cfg, &d);
+    }
     t->sigmaV0 = cfg->trackSigmaV0;
     t->sigmaA0 = cfg->trackSigmaA0;
     t->gate = cfg->trackGate;
@@ -387,7 +393,7 @@ static void ukf_measure(const PmbmTracker *t, const double *x, const double *P, 
 /* IMM-UKF update of s with the plot z (radial velocity zvr) of time tp (track_pmbm.m
  * imm_ukf_update): returns 1 inside the gate of a model, *logl the log likelihood,
  * *out the updated STH (r = 1). */
-static int imm_ukf_update(const PmbmTracker *t, const PmbmSth *s, const double *z, double zvr, double tp, int hasVr,
+static int imm_ukf_update(const PmbmTracker *t, const PmbmSth *s, const double *z, double zvr, double span, double tp, int hasVr,
                           double *logl, PmbmSth *out)
 {
     const int M = t->M, d = t->dim, n = t->n;
@@ -440,11 +446,11 @@ static int imm_ukf_update(const PmbmTracker *t, const PmbmSth *s, const double *
                 if (sd > sdMax) sdMax = sd;
                 hv += Zh[j][d] * c[j];
             }
-            useVr = sdMax < t->vrSpan / 6.0;
-            k = round((hv - zvr) / t->vrSpan);
+            useVr = sdMax < span / 6.0;
+            k = round((hv - zvr) / span);
         }
         if (useVr) {
-            zz[d] = zvr + k * t->vrSpan;
+            zz[d] = zvr + k * span;
         } else {                                       /* drop the radial velocity row and column */
             nz = d;
             for (int j = 0; j < M; j++) {
@@ -1034,7 +1040,7 @@ static void associate(PmbmTracker *t)
                 if (!coarse_gate(t, xm, Pm, s->t, Z + 3 * j, tp)) continue;
                 PmbmSth hn;
                 double logl;
-                if (!imm_ukf_update(t, s, Z + 3 * j, Zvr[j], tp, hasVr[j], &logl, &hn)) continue;
+                if (!imm_ukf_update(t, s, Z + 3 * j, Zvr[j], B[j].vrSpan, tp, hasVr[j], &logl, &hn)) continue;
                 const double rp = s->r * pow(t->ps, (tp - s->tOpp) / T);
                 L[i][h * nPl + j] = log(rp) + log(t->pd) + logl;
                 hn.plot = B[j].plotIndex;
@@ -1330,6 +1336,7 @@ void pmbm_tracker_update(PmbmTracker *t, const Detection *plots, int n, double t
         b->range_m = plots[k].range_m;
         b->el_deg = plots[k].el_deg;
         b->vr_mps = plots[k].vr_mps;
+        b->vrSpan = plots[k].pulse >= 0 && plots[k].pulse < N_PULSES ? t->vrSpanPulse[plots[k].pulse] : t->vrSpan;
         b->plotIndex = ++t->nPlots;
         t->pendingLast = t_s;
     }

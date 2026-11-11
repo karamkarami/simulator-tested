@@ -67,6 +67,11 @@
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QGuiApplication>
+#include <QStandardPaths>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QResizeEvent>
@@ -624,6 +629,8 @@ private:
     std::vector<float>    videoTmp_;
     int                   videoN_ = 0, videoAzBin_ = -1;
     double                videoNoise_dB_ = NAN, videoLo_dB_ = NAN;   /* colour scale from videoLo_dB_ */
+    std::vector<float>    videoAzNoise_;      /* noise estimate of the newest row of every azimuth bin [dB] */
+    std::vector<float>    videoNoiseTmp_;
     QImage                videoImage_;
     bool                  videoImageDirty_ = true;
     std::vector<int32_t>  lutCell_;       /* per pixel: az * bins + first range bin, -1 outside */
@@ -1162,7 +1169,7 @@ QString track_text(const Track &t)
     QStringList rows;
     const double R = std::sqrt(t.pos_m[0] * t.pos_m[0] + t.pos_m[1] * t.pos_m[1] + t.pos_m[2] * t.pos_m[2]);
     rows << QStringLiteral("<b>Track %1 (%2, %3-D %4)</b>").arg(t.id).arg(t.confirmed ? "confirmed" : "tentative").arg(t.dim)
-                .arg(t.method == TRACK_METHOD_PMBM ? "PMBM" : "EKF")
+                .arg(t.method == TRACK_METHOD_PMBM ? "PMBM" : t.method == TRACK_METHOD_TOMHT ? "TOMHT" : "EKF")
          << QStringLiteral("Range: %1 km").arg(R / 1e3, 0, 'f', 3)
          << QStringLiteral("Azimuth: %1").arg(deg_text(wrap360(std::atan2(t.pos_m[0], t.pos_m[1]) / kDeg), 2));
     if (t.dim == 3)
@@ -1172,7 +1179,7 @@ QString track_text(const Track &t)
          << QStringLiteral("Heading: %1").arg(deg_text(wrap360(std::atan2(t.vel_mps[0], t.vel_mps[1]) / kDeg), 1));
     const double acc = std::hypot(t.acc_mps2[0], t.acc_mps2[1]);
     if (acc > 0.0) rows << QStringLiteral("Acceleration: %1 m/s\u00b2").arg(acc, 0, 'f', 2);   /* CA model */
-    if (t.method == TRACK_METHOD_PMBM) {                     /* existence, IMM model probabilities */
+    if (t.method == TRACK_METHOD_PMBM || t.method == TRACK_METHOD_TOMHT) {   /* existence, IMM model probabilities */
         static const char *names[3] = { "CV", "CA", "CT" };
         QStringList modes;
         for (int j = 0; j < t.nModes; j++)
@@ -1244,6 +1251,7 @@ void PpiWidget::clearVideo()
     std::fill(videoIdx_.begin(), videoIdx_.end(), (uint8_t)0);
     videoN_ = 0;
     videoAzBin_ = -1;
+    std::fill(videoAzNoise_.begin(), videoAzNoise_.end(), NAN);   /* (other data: new estimates) */
     videoImageDirty_ = true;
 }
 
@@ -1275,8 +1283,10 @@ void PpiWidget::addVideoRow(const VideoRow &row)
         videoN_ = 0;
         videoAzBin_ = -1;
         videoNoise_dB_ = videoLo_dB_ = NAN;
+        videoAzNoise_.assign(kVideoAz, NAN);
         lutBins_ = 0;                                     /* rebuild the pixel lookup */
     }
+    const int b = std::min(kVideoAz - 1, (int)std::floor(wrap360(row.az_deg) / (360.0 / kVideoAz)));
     /* noise floor: running 10th percentile of the video in dB (the raw video is
      * mostly clutter: the long pulse smears near clutter over its length) */
     videoTmp_.clear();
@@ -1288,15 +1298,27 @@ void PpiWidget::addVideoRow(const VideoRow &row)
          * sample per bin (exponential power: 9.77 dB), the video the mean over the elements
          * (one element: also 9.77 dB, 48 elements: 0.86 dB) */
         const double m = 10.0 * std::log10((double)*mid) + p10_offset_dB(row.kind == 0 ? row.nAvg : 1);
-        if (!std::isfinite(videoNoise_dB_)) {
+        /* The 10th percentile of one row is the noise only while at least 10% of its range bins
+         * hold no echo. Over the mountains (42 - 62 km in the North-East) the near clutter, its
+         * long-pulse smear and the mountain together cover more than 90% of the bins, so the
+         * rows of that sector give estimates several dB too high, for the second or so the
+         * antenna needs to cross it: a running mean of the rows then raised the colour scale
+         * (the whole map requantised, the noise floor changed colour) and lowered it again
+         * after the sector. The receiver noise does not depend on the azimuth: the estimate is
+         * the 20th percentile of the newest estimates of all azimuth bins seen (one per 0.25
+         * deg), which a clutter sector smaller than 80% of the circle cannot move. Until 8
+         * azimuth bins have data: the running mean as before. */
+        videoAzNoise_[b] = (float)m;
+        videoNoiseTmp_.clear();
+        for (float v : videoAzNoise_) if (std::isfinite(v)) videoNoiseTmp_.push_back(v);
+        if (videoNoiseTmp_.size() >= 8) {
+            auto q = videoNoiseTmp_.begin() + (videoNoiseTmp_.size() - 1) / 5;
+            std::nth_element(videoNoiseTmp_.begin(), q, videoNoiseTmp_.end());
+            videoNoise_dB_ = *q;
+        } else if (!std::isfinite(videoNoise_dB_)) {
             videoNoise_dB_ = m;
         } else {
-            /* A short mountain-clutter burst can raise this row's 10th percentile
-             * even though the receiver noise is unchanged. Limit upward movement
-             * of the measurement to 0.05 dB per PRI before smoothing: a transient
-             * cannot shift the global video colour scale and requantise the map. */
-            const double bounded = std::min(m, videoNoise_dB_ + 0.05);
-            videoNoise_dB_ = 0.98 * videoNoise_dB_ + 0.02 * bounded;
+            videoNoise_dB_ = 0.98 * videoNoise_dB_ + 0.02 * std::min(m, videoNoise_dB_ + 0.05);
         }
     }
     bool requantise = false;
@@ -1304,7 +1326,6 @@ void PpiWidget::addVideoRow(const VideoRow &row)
         videoLo_dB_ = videoNoise_dB_ - 3.0;               /* the scale moved: all bins again */
         requantise = true;
     }
-    const int b = std::min(kVideoAz - 1, (int)std::floor(wrap360(row.az_deg) / (360.0 / kVideoAz)));
     if (b == videoAzBin_) {
         for (int i = 0; i < nB; i++) videoSum_[i] += row.v[i];
         videoN_++;
@@ -2880,6 +2901,61 @@ QIcon ppi_icon()
     return QIcon(QStringLiteral(":/radar_icon.png"));
 }
 
+/* Linux desktops take the icon of the taskbar, the dock and the window switcher from the
+ * desktop entry whose name is the application id (Wayland: setWindowIcon is ignored;
+ * GNOME also on X11), not from the window. The entry radar_receiver.desktop (Exec: this
+ * program, Icon: the icon file) and the icon are written to the user's data folder
+ * (~/.local/share/applications, ~/.local/share/icons/hicolor/256x256/apps) when missing or
+ * when they name another program file. Not with the offscreen platform (tests, snapshots)
+ * or when the environment variable RADAR_NO_DESKTOP_ENTRY is set. Returns the text of the
+ * entry (for the tests). */
+QString ppi_desktop_entry_text(const QString &exe, const QString &iconFile)
+{
+    return QStringLiteral("[Desktop Entry]\nType=Application\nName=Radar receiver\n"
+                          "Comment=Radar receiver with PPI display (radar_receiver_linux)\n"
+                          "Exec=\"%1\" --ppi\nIcon=%2\nTerminal=true\nCategories=Science;Utility;\n"
+                          "StartupWMClass=radar_receiver\n").arg(exe, iconFile);
+}
+
+bool ppi_install_desktop_entry(const QString &dataHome, QString *message)
+{
+#if defined(__linux__) || defined(__unix__)
+#  if !defined(__APPLE__)
+    if (dataHome.isEmpty()) return false;
+    const QString iconDir = dataHome + QStringLiteral("/icons/hicolor/256x256/apps");
+    const QString appDir = dataHome + QStringLiteral("/applications");
+    const QString iconFile = iconDir + QStringLiteral("/radar_receiver.png");
+    const QString entryFile = appDir + QStringLiteral("/radar_receiver.desktop");
+    QDir().mkpath(iconDir);
+    QDir().mkpath(appDir);
+    bool wrote = false;
+    QFile res(QStringLiteral(":/radar_icon.png"));
+    ppi_icon();                                            /* registers the resources */
+    if (res.open(QIODevice::ReadOnly)) {
+        const QByteArray png = res.readAll();
+        QFile f(iconFile);
+        QByteArray old;
+        if (f.open(QIODevice::ReadOnly)) { old = f.readAll(); f.close(); }
+        if (old != png && f.open(QIODevice::WriteOnly)) { f.write(png); f.close(); wrote = true; }
+    }
+    const QByteArray text = ppi_desktop_entry_text(QCoreApplication::applicationFilePath(), iconFile).toUtf8();
+    QFile e(entryFile);
+    QByteArray old;
+    if (e.open(QIODevice::ReadOnly)) { old = e.readAll(); e.close(); }
+    if (old != text) {
+        if (!e.open(QIODevice::WriteOnly)) return false;
+        e.write(text);
+        e.close();
+        wrote = true;
+    }
+    if (message && wrote) *message = entryFile;
+    return true;
+#  endif
+#endif
+    (void)dataHome; (void)message;
+    return false;
+}
+
 extern "C" int ppi_run(int argc, char **argv, double maxRange_m, int (*worker)(void *), void *arg,
                        volatile sig_atomic_t *stopFlag, const char *snapshotPath)
 {
@@ -2894,7 +2970,18 @@ extern "C" int ppi_run(int argc, char **argv, double maxRange_m, int (*worker)(v
 
     reset_shared();
     use_offscreen_without_display(snapshotPath);
+    QGuiApplication::setDesktopFileName(QStringLiteral("radar_receiver"));   /* application id (Wayland) */
     QApplication app(qtArgc, qtArgv);
+    QApplication::setApplicationName(QStringLiteral("radar_receiver"));
+    const QString platform = QGuiApplication::platformName();
+    if (platform != QStringLiteral("offscreen") && platform != QStringLiteral("minimal") && !snapshotPath &&
+        !qEnvironmentVariableIsSet("RADAR_NO_DESKTOP_ENTRY")) {
+        QString written;
+        if (ppi_install_desktop_entry(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation), &written) &&
+            !written.isEmpty())
+            std::fprintf(stderr, "PPI: program icon for the desktop: %s (RADAR_NO_DESKTOP_ENTRY=1: none)\n",
+                         written.toLocal8Bit().constData());
+    }
 
     PpiWindow window(maxRange_m, stopFlag);
     PpiWidget &widget = window.ppi();

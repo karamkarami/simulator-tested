@@ -1027,6 +1027,8 @@ if ~p.enable
     s = 'Track (off)';
 elseif isfield(p, 'method') && strcmp(p.method, 'pmbm')
     s = sprintf('Track %dD PMBM', p.dim);
+elseif isfield(p, 'method') && strcmp(p.method, 'tomht')
+    s = sprintf('Track %dD MHT', p.dim);
 else
     s = sprintf('Track %dD %s', p.dim, upper(p.model));
 end

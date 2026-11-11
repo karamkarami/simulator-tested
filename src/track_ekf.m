@@ -66,7 +66,7 @@ for k = 1:numel(plots)
     tr.nPlots = tr.nPlots + 1;
     if isempty(tr.pending), tr.pendingFirst = t_s; end
     tr.pending(end+1, :) = [plots(k).time_s, plots(k).az_deg, plots(k).range_m, plots(k).el_deg, tr.nPlots, ...
-                            plots(k).vr_mps];
+                            plots(k).vr_mps, plot_vr_span(p, plots(k))];
     tr.pendingLast = t_s;
 end
 if flush && ~isempty(tr.pending)
@@ -97,7 +97,7 @@ function tr = associate(tr)
 % GNN association of the plots of the batch, then the updates and new tracks.
 p = tr.p;
 B = tr.pending;
-tr.pending = zeros(0, 6);
+tr.pending = zeros(0, 7);
 m = size(B, 1);
 nT = numel(tr.tracks);
 Z = zeros(p.dim, m);
@@ -109,7 +109,7 @@ end
 cost = inf(nT, m);                                  % d^2 + ln|S| of the gated pairs
 for j = 1:nT
     for i = find(usable)
-        [~, ~, nu, ~, S] = predict_measure(tr.tracks(j), Z(:, i), Zvr(i), B(i, 1), p);
+        [~, ~, nu, ~, S] = predict_measure(tr.tracks(j), Z(:, i), Zvr(i), B(i, 1), plot_params(p, B(i, :)));
         d2 = nu' * (S \ nu);
         gate = p.gate;
         if numel(nu) > p.dim, gate = p.gateVr; end  % with the radial velocity
@@ -127,7 +127,7 @@ for i = 1:m
     j = trackOf(i);
     if j > 0                                        % EKF update (Joseph form)
         tk = tr.tracks(j);
-        [x, P, nu, H, S, Rm] = predict_measure(tk, Z(:, i), Zvr(i), tp, p);
+        [x, P, nu, H, S, Rm] = predict_measure(tk, Z(:, i), Zvr(i), tp, plot_params(p, B(i, :)));
         K = P * H' / S;
         I_KH = eye(n) - K*H;
         tk.x = x + K*nu;

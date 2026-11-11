@@ -9,6 +9,9 @@ function xc = clutter_signal(clut, sys, az_deg, t_s)
 %   rotates with its internal-motion Doppler (plus a stationary part with
 %   the exponential spectrum model, see clutter_init.m). Element i receives
 %   real(xc * sys.clutterSteer(i, :).') (generate_rx_signal.m).
+%   With the sub-pulses on different carriers (cfg.wave.<pulse>.fc_Hz) xc is
+%   [nAdc x G x 2]: page p the echo of sub-pulse p (its IF, internal-motion
+%   Doppler and power), for the steering vectors sys.wave.<pulse>.clutterSteer.
 
 nAz = numel(clut.az_deg);
 azRel = wrap180(clut.az_deg - az_deg);
@@ -25,27 +28,38 @@ end
 idx = vertcat(idx{:});
 G = clut.nGroups;
 nR = numel(clut.range_m);
-xc = zeros(sys.nAdc, G);
+same = ~isfield(clut, 'sameCarrier') || clut.sameCarrier;
+nPages = 1 + ~same;
+xc = zeros(sys.nAdc, G, nPages);
 if isempty(idx), return; end
-w = gRow(clut.cellRow(idx)) .* clut.rho(idx) .* exp(1j*2*pi*clut.fd_Hz(idx)*t_s);
-if ~isempty(clut.dc)                                     % stationary part (exponential model)
-    w = w + gRow(clut.cellRow(idx)) .* clut.dc(idx);
-end
-refl = full(sparse(clut.cellRange(idx), clut.cellGroup(idx), w, nR, G));   % [nRange x G]
-
 names = {'short', 'long'};
+refl = cell(1, 2);
+for i = 1:2
+    p = clut.(names{i});
+    fdScale = 1;  ampScale = 1;
+    if isfield(p, 'fdScale'), fdScale = p.fdScale;  ampScale = p.ampScale; end
+    if i == 2 && same && fdScale == clut.short.fdScale, refl{2} = refl{1}; continue; end
+    w = gRow(clut.cellRow(idx)) .* clut.rho(idx) .* exp(1j*2*pi*fdScale*clut.fd_Hz(idx)*t_s);
+    if ~isempty(clut.dc)                                 % stationary part (exponential model)
+        w = w + gRow(clut.cellRow(idx)) .* clut.dc(idx);
+    end
+    refl{i} = ampScale * full(sparse(clut.cellRange(idx), clut.cellGroup(idx), w, nR, G));   % [nRange x G]
+end
+
 for g = 1:G
-    if ~any(refl(:, g)), continue; end
     for i = 1:2
         p = clut.(names{i});
+        if isfield(p, 'enable') && ~p.enable, continue; end
+        if ~any(refl{i}(:, g)), continue; end
         % Echo of each range cell starts at ADC sample n0 (0-based, may be negative)
         n0  = p.start0 + clut.delaySamples;
         use = n0 > -p.nTx & n0 < sys.nAdc;
         % Impulses shifted by nTx-1 so that partially received echoes are kept
         imp = zeros(p.nFft, 1);
-        imp(n0(use) + p.nTx) = refl(use, g);
+        imp(n0(use) + p.nTx) = refl{i}(use, g);
         y = ifft(fft(imp) .* p.txFft);                     % convolution with the IF pulse
-        xc(:, g) = xc(:, g) + y(p.nTx : p.nTx + sys.nAdc - 1);
+        pg = min(i, nPages);
+        xc(:, g, pg) = xc(:, g, pg) + y(p.nTx : p.nTx + sys.nAdc - 1);
     end
 end
 end

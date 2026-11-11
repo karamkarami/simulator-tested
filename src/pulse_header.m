@@ -15,6 +15,14 @@ hdr.shortTx_s      = [sys.wave.short.tTx_s, sys.wave.short.width_s];   % [start 
 hdr.longTx_s       = [sys.wave.long.tTx_s,  sys.wave.long.width_s];
 hdr.ddcFs_Hz       = sys.fsOut;                  % DDC output: signed 16-bit I/Q
 hdr.ddcT0_s        = sys.tDdc(1);                    % time of the first DDC sample in the PRI
-hdr.shortDdcIdx    = sys.wave.short.rxIdx([1 end]);  % receive interval of the short pulse [first last]
-hdr.longDdcIdx     = sys.wave.long.rxIdx([1 end]);   % (DDC samples, independent of CFAR and filters)
+hdr.shortDdcIdx    = interval(sys.wave.short);       % receive interval of the short pulse [first last]
+hdr.longDdcIdx     = interval(sys.wave.long);        % (DDC samples, independent of CFAR and filters;
+                                                     %  [0 0]: the sub-pulse is switched off)
+hdr.shortFc_Hz     = sys.wave.short.fc_Hz;           % carriers of the sub-pulses (cfg.wave.<pulse>.fc_Hz)
+hdr.longFc_Hz      = sys.wave.long.fc_Hz;
+end
+
+function iv = interval(wv)
+iv = [0 0];
+if wv.enable && ~isempty(wv.rxIdx), iv = wv.rxIdx([1 end]); end
 end

@@ -1,4 +1,4 @@
-function [P, Y] = doppler_process(y, sys)
+function [P, Y] = doppler_process(y, sys, nFiltered)
 %DOPPLER_PROCESS  Doppler filter bank with non-coherent integration of rows.
 %   P = DOPPLER_PROCESS(y, sys) turns the MTI output y [nBeams x nRange x nOut]
 %   (oldest first) into range-Doppler power maps P [nBeams x nRange x nfft]
@@ -13,6 +13,9 @@ function [P, Y] = doppler_process(y, sys)
 %   Finally every Doppler bin is divided by its noise gain (sys.dop.noiseGain)
 %   so that white noise at the MTI input gives a flat noise floor.
 %   Y [nBeams x nRange x nfft x nRows] holds the complex spectra of the rows.
+%   P = DOPPLER_PROCESS(y, sys, nFiltered): only the range cells 1 ... nFiltered
+%   passed the clutter filter (cfg.mti.maxRange_m, wv.mtiCells); the others are
+%   divided by the noise gain of the unfiltered pulses (sys.dop.noiseGainBypass).
 
 nRows  = sys.cpi.nRows;
 rowLen = sys.cpi.rowLen;
@@ -26,5 +29,12 @@ else
 end
 w = reshape(sys.dop.window, 1, 1, rowLen);
 Y = fftshift(fft(y .* w, sys.dop.nfft, 3), 3);
-P = mean(abs(Y).^2, 4) ./ sys.dop.noiseGain;
+P = mean(abs(Y).^2, 4);
+if nargin >= 3 && ~isempty(nFiltered) && nFiltered < nR
+    nF = max(nFiltered, 0);
+    P(:, 1:nF, :) = P(:, 1:nF, :) ./ reshape(sys.dop.noiseGain, 1, 1, []);
+    P(:, nF+1:end, :) = P(:, nF+1:end, :) ./ reshape(sys.dop.noiseGainBypass, 1, 1, []);
+else
+    P = P ./ sys.dop.noiseGain;
+end
 end

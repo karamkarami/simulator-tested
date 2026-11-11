@@ -17,7 +17,9 @@ for p = 1:2
     L = V.mf{p};
     rd.P(L.bin, :) = double(slices{p}(L.idx, :));
 end
-rd.vel_mps = -sys.dop.f_Hz * sys.lambda / 2;
+wv = sys.wave.long;                                          % velocity axis: on the carrier of the long
+if ~wv.enable, wv = sys.wave.short; end                      % pulse (of the short one without it)
+rd.vel_mps = -sys.dop.f_Hz * wv.lambda_m / 2;
 c = rd.P(~isnan(rd.P));
 if isempty(c), rd.noise = NaN; else, rd.noise = median(c); end
 rd.dets = dets;

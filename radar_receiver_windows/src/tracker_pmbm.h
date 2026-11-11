@@ -37,6 +37,7 @@ typedef struct {
     /* parameters (track_setup.m, export_receiver_config.m) */
     int    dim, n, M, models[PMBM_M];
     double R[3], Rvr, vrSpan, sigmaV0, sigmaA0, gate, gateVr;
+    double vrSpanPulse[N_PULSES];        /* the span on the carrier of each sub-pulse */
     int    useVr, vrUnambiguous;
     double scanTime_s, height_m, az0_deg, rate_dps, batchGap_s, batchMax_s;
     int    confirmHits, maxMissTentative, maxMiss, minSpeedHits;

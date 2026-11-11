@@ -102,6 +102,16 @@ cfg.adc.overloadWarn     = 0.01;   % warn when more than this fraction of the re
 % small SNR loss). The mismatch filter may have any length (not shorter than
 % the code): it sees zeros outside the receive interval, so the range cells,
 % the receive window and the DDC output are the same as with the matched filter.
+% Each sub-pulse can be switched off (enable = false: not transmitted, not processed; with the
+% long pulse off the short-pulse receive window lasts to cfg.rx.maxRange_m) and can have its own
+% carrier (fc_Hz, [] = cfg.fc). The receiver LO stays at cfg.fc - cfg.adc.fIF_Hz: a sub-pulse on
+% fc_Hz is on the IF cfg.adc.fIF_Hz + (fc_Hz - cfg.fc) (inside 0 ... 60 MHz with its bandwidth),
+% the DDC mixes its receive window with that IF, and its wavelength sets its radial velocity
+% axis, received power (~ lambda^2), element phases (beam directions) and clutter Doppler. Carriers
+% more than the pulse bandwidth apart also keep the short-pulse echo of far targets out of the
+% long window (the DDC filters reject it).
+cfg.wave.short.enable       = true;     % short sub-pulse on/off
+cfg.wave.short.fc_Hz        = [];       % its carrier [Hz] ([] = cfg.fc)
 cfg.wave.short.type         = 'lfm';    % 'lfm' or 'phasecode' (code from cfg.files.phaseCode)
 cfg.wave.short.width_s      = 25e-6;    % pulse width [s]
 cfg.wave.short.bandwidth_Hz = 1e6;      % LFM sweep bandwidth [Hz]
@@ -111,6 +121,8 @@ cfg.wave.short.mismatchLength = [];     % coefficients (one per chip) of the mis
                                         % phase-code file, e.g. 3*25 ([] = chips + 10, at most 2x the chips)
 cfg.wave.short.tTx_s        = 0;        % transmit time inside the PRI [s]
 
+cfg.wave.long.enable        = true;     % long sub-pulse on/off
+cfg.wave.long.fc_Hz         = [];       % its carrier [Hz] ([] = cfg.fc)
 cfg.wave.long.type          = 'lfm';
 cfg.wave.long.width_s       = 150e-6;
 cfg.wave.long.bandwidth_Hz  = 1e6;
@@ -137,8 +149,12 @@ cfg.ddc.fixedPoint = true;     % false only for SNR measurements (no rounding / 
 %% Matched filter and Doppler processing
 cfg.proc.taylorNbar   = 4;     % Taylor window (LFM only): number of nearly constant sidelobes
 cfg.proc.taylorSll_dB = -35;   % Taylor window peak sidelobe level [dB]
-cfg.proc.cpiLength    = [];    % pulses per CPI buffer ([] = pulses arriving while a target is in the
-                               % 3 dB azimuth beam: round(beamwidth / (rotation rate * PRI)) = 114)
+cfg.proc.cpiMode      = 'auto'; % pulses per CPI buffer: 'auto' from the radar parameters (the pulses
+                               % arriving while a target is in the 3 dB azimuth beam:
+                               % round(beamwidth / (rotation rate * PRI)) = 114), or 'manual':
+                               % cfg.proc.cpiLength below
+cfg.proc.cpiLength    = 114;   % pulses per CPI buffer with cpiMode = 'manual' (ignored with 'auto'; with a
+                               % staggered PRF rounded down to whole stagger periods)
 cfg.proc.nfft         = [];    % Doppler FFT length ([] = next power of 2: of the pulses in the buffer
                                % with a fixed PRF (114 -> 128), of the samples per row when staggered (28 -> 32))
 cfg.proc.updateEvery  = 1;     % run MTI/Doppler/CFAR every N new pulses (1 = every pulse)
@@ -156,6 +172,11 @@ cfg.proc.updateEvery  = 1;     % run MTI/Doppler/CFAR every N new pulses (1 = ev
 %             CPI loses L - 1 pulses to the filter; the noise gain of every Doppler bin
 %             and the CFAR looks follow from the coefficients.
 cfg.mti.type = 'canceller';    % 'canceller' or 'fir'
+cfg.mti.maxRange_m = Inf;      % the clutter filter is applied to the range cells up to this range [m]
+                               % (both sub-pulses); the cells beyond it go to the Doppler FFT unfiltered
+                               % (the newest L pulses' last one, so every cell has the same CPI), with
+                               % their own noise-gain equalisation. Inf = every range cell (as before).
+                               % Use cfg.cfar.notchMaxRange_m to test the zero-Doppler bins beyond it.
 
 %% Detection: CFAR on every range-Doppler map
 % type (detector; the noise statistic of the training cells of the window):
@@ -260,10 +281,15 @@ cfg.extract.maxMiss = 2;       % CPIs without a detection before a plot is close
 %           settings in cfg.track.pmbm (next section) and the common ones here
 %           (dim, measurement errors, radial velocity, maxSpeed, maxAccel, batch,
 %           gateProb, confirmHits, maxMiss*, speed gate)
+%   'tomht' track-oriented multiple hypothesis tracker (TOMHT): track trees scored
+%           by their log-likelihood ratio, global hypotheses by the k-best
+%           assignments (Murty) and N-scan pruning, IMM-UKF filter of every track
+%           hypothesis (as the PMBM); settings in cfg.track.tomht (section after
+%           the PMBM) and the common ones here
 % Both work in 2-D (one element: range and azimuth, as the 2-D EKF) and in
 % 3-D (DBF: range, azimuth and elevation), cfg.track.dim. The C receiver
 % runs the same trackers (tracker_ekf.c, tracker_pmbm.c).
-cfg.track.method          = 'ekf';   % 'ekf' or 'pmbm'
+cfg.track.method          = 'ekf';   % 'ekf', 'pmbm' or 'tomht'
 
 % EKF: extended Kalman filter on the plots
 % State relative to the antenna (x = East, y = North, z = up): position and
@@ -365,6 +391,47 @@ cfg.track.pmbm.ukf.alpha = 1;              % unscented transform: spread of the 
 cfg.track.pmbm.ukf.beta  = 2;              % prior knowledge (2: Gaussian) and
 cfg.track.pmbm.ukf.kappa = 0;              % secondary scaling
 
+%% Target tracking with cfg.track.method = 'tomht': track-oriented MHT, IMM-UKF filter
+% Every track is a tree of track hypotheses (the plot or the miss of every antenna
+% look); its score is the log-likelihood ratio (LLR) target / false plots:
+% log(pd*lambdaU/lambdaC) for a new track, + log(pd*l(z)/lambdaC) per plot (l the
+% IMM-UKF likelihood), + log(1 - pd) per missed look (lambdaC, lambdaU: false plots
+% and new targets per scan and unit measurement volume). The plots of a GNN batch
+% (gnnSector_deg / gnnMaxSector_deg) update every global hypothesis (a compatible
+% set of track hypotheses, score = the sum of theirs) with its k best assignments
+% (Murty: plot to track, new track or false plot). Hypothesis management:
+% k-best (at most maxHypotheses global hypotheses, none below hypPrune of the best
+% one), N-scan pruning (the decisions older than nScan looks are those of the best
+% global hypothesis: the other branches of each tree are cut), deletion of a track
+% hypothesis whose score fell deleteScore below its maximum (or after maxMiss /
+% maxMissTentative missed scans) and of a tree whose probability is below pDelete.
+% A track is confirmed when its hypothesis in the best global hypothesis has a
+% score of at least confirmScore and confirmHits plots. The tracks shown are those
+% of the best global hypothesis. Filter: the IMM-UKF of the PMBM (imm, ukf below).
+cfg.track.tomht.pd                = 0.9;   % detection probability of a target in the beam (per scan)
+cfg.track.tomht.falsePlotsPerScan = 2;     % expected false plots per scan (uniform in the measurement space)
+cfg.track.tomht.undetectedTargets = 1;     % expected new targets per scan in the coverage (track initiation)
+cfg.track.tomht.maxClimb_mps      = 100;   % 3-D: vertical velocity uncertainty of a new track (std maxClimb/sqrt(3))
+cfg.track.tomht.maxHypotheses     = 25;    % k-best: global hypotheses kept
+cfg.track.tomht.kBest             = 10;    % k-best: at most this many assignments (Murty) per global hypothesis
+cfg.track.tomht.hypPrune          = 1e-4;  % global hypotheses below this likelihood ratio to the best one are dropped
+cfg.track.tomht.nScan             = 3;     % N-scan pruning: decisions older than this many scans (looks) are fixed
+cfg.track.tomht.confirmScore      = 10;    % LLR that confirms a track (with confirmHits plots; 3 plots on a
+                                           % target: 15 - 30, 3 false plots that fit a track: rarely above 5)
+cfg.track.tomht.deleteScore       = 10;    % a track hypothesis whose LLR fell this much below its maximum is deleted
+cfg.track.tomht.pDelete           = 1e-3;  % a track whose probability over the global hypotheses is below is deleted
+cfg.track.tomht.imm.models        = {'cv', 'ca', 'ct'};   % IMM-UKF filter of every track hypothesis (as the PMBM)
+cfg.track.tomht.imm.mu0           = [0.8 0.1 0.1];
+cfg.track.tomht.imm.switchProb    = 0.05;
+cfg.track.tomht.imm.sigmaAccelCv_mps2 = 2;
+cfg.track.tomht.imm.sigmaJerkCa_mps3  = 1;
+cfg.track.tomht.imm.sigmaAccelCt_mps2 = 2;
+cfg.track.tomht.imm.sigmaTurn_dps     = 0.5;
+cfg.track.tomht.imm.maxTurn_dps       = 6;
+cfg.track.tomht.ukf.alpha = 1;
+cfg.track.tomht.ukf.beta  = 2;
+cfg.track.tomht.ukf.kappa = 0;
+
 %% Ground clutter
 cfg.clutter.enable           = true;
 % Clutter power: CNR (clutter-to-noise ratio) of land at the reference range:
@@ -453,13 +520,23 @@ cfg.scenario.random.maxEl_deg = 40;        % at most this elevation at t = 0 (li
 cfg.scenario.random.speed_mps = [30 300];  % horizontal speed [min max] [m/s], heading uniform 0 - 360 deg
 cfg.targets = target_scenario(cfg);
 
-%% Recording of the raw ADC data and of the DDC output, streaming of the DDC output
+%% Recording of the raw ADC data, the DDC, matched filter and Doppler outputs; streaming of the DDC output
+% Every recording has its own switch (saveRaw, saveDdc, saveMf, saveDoppler) and folder. The matched
+% filter and Doppler files are large (Doppler, 48 elements: about 12 MB per PRI and sub-pulse).
 cfg.io.outFolder = fullfile(root, 'output');
 cfg.io.saveRaw   = true;                                    % raw ADC data: one .mat file per PRI
 cfg.io.rawFolder = fullfile(root, 'output', 'raw_pulses');  % -> pulse_<n>.mat (adcData, hdr)
 cfg.io.saveDdc   = false;                                   % DDC output: one .mat file per PRI
 cfg.io.ddcFolder = fullfile(root, 'output', 'ddc_pulses');  % -> ddc_<n>.mat (I, Q, hdr); replay_ddc_udp.m
                                                             %    sends these files with the PRI timing
+cfg.io.saveMf    = false;                                   % matched filter output: one .mat file per PRI
+cfg.io.mfFolder  = fullfile(root, 'output', 'mf_pulses');   % -> mf_<n>.mat (short, long: complex single
+                                                            %    [nBeams x nRange], their range axes, hdr)
+cfg.io.saveDoppler = false;                                 % Doppler processing output: one .mat file per PRI
+cfg.io.dopplerFolder = fullfile(root, 'output', 'doppler_pulses');  % with a CPI update -> doppler_<n>.mat
+                                                            %    (short, long: power single [nBeams x nRange x
+                                                            %    nfft] after the noise-gain equalisation, [] for a
+                                                            %    sub-pulse without an update; axes, hdr)
 cfg.io.matFormat = '-v6';                                   % '-v6' fast/uncompressed, '-v7' compressed
 
 cfg.udp.enable       = false;        % stream the DDC output of every PRI over Ethernet/UDP

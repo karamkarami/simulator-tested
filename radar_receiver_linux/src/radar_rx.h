@@ -31,7 +31,7 @@ enum { MF_AUTO = 0, MF_DIRECT = 1, MF_FFT = 2 };
 enum { CFAR_2D = 0, CFAR_RANGE = 1, CFAR_DOPPLER = 2 };        /* window (cfg.cfar.method)  */
 enum { CFAR_CA = 0, CFAR_GO = 1, CFAR_SO = 2, CFAR_OS = 3 };     /* detector (cfg.cfar.type)  */
 enum { TRACK_CV = 0, TRACK_CA = 1 };                          /* EKF motion model          */
-enum { TRACK_METHOD_EKF = 0, TRACK_METHOD_PMBM = 1 };         /* tracker (cfg.track.method) */
+enum { TRACK_METHOD_EKF = 0, TRACK_METHOD_PMBM = 1, TRACK_METHOD_TOMHT = 2 };   /* tracker (cfg.track.method) */
 enum { PMBM_CV = 0, PMBM_CA = 1, PMBM_CT = 2 };               /* IMM models of the PMBM     */
 enum { WAVE_LFM = 0, WAVE_PHASE_CODE = 1 };
 enum { COMPRESSION_MATCHED = 0, COMPRESSION_MISMATCH = 1 };
@@ -41,6 +41,12 @@ const char *cfar_method_name(int method);   /* "2-D", "1-D range", "1-D Doppler"
 const char *cfar_type_name(int type);       /* "CA", "GO", "SO", "OS" */
 
 typedef struct {
+    int     enable;        /* the sub-pulse is transmitted and processed (cfg.wave.<pulse>.enable;
+                              optional in the file: 1). A sub-pulse that is off has no cells
+                              (nRange = rxCount = 0) and is skipped by the processing      */
+    double  fc_Hz;         /* its carrier (cfg.wave.<pulse>.fc_Hz; optional: 0 = not given) */
+    double *beamU;         /* [nBeams] beam directions on its carrier (optional: cfg->beamU) */
+    double  vrSpan_mps;    /* span of its Doppler axis lambda_m / (2 row PRI) (tracker)   */
     int     rxFirst;       /* receive interval of this sub-pulse: DDC samples rxFirst ... */
     int     rxCount;       /* rxFirst+rxCount-1 (0-based; the PRI header holds it 1-based) */
     int     ddcFirst;      /* first DDC sample of the pulse compression input (0-based); the
@@ -62,6 +68,8 @@ typedef struct {
     int     compression;   /* COMPRESSION_MATCHED or COMPRESSION_MISMATCH (information)  */
     int     nChips;        /* phase code: chips (0 for LFM)                           */
     int     mfShift;       /* samples by which the mismatch filter peaks earlier (0; < 0: later) */
+    int     mtiCells;      /* range cells 0 ... mtiCells-1 get the clutter filter (range_m <=
+                              mtiMaxRange_m); the others pass it unfiltered (newest pulse) */
     int     nPulse;        /* the transmitted pulse at the DDC rate (for the tests)    */
     float  *pulseRe, *pulseIm;
 } PulseConfig;
@@ -78,6 +86,8 @@ typedef struct {
     double  rate_dps;      /* antenna rotation rate [deg/s]                           */
     double  azBeamwidth_deg;
     double  maxRange_m;    /* instrumented range (for the display)                    */
+    double  handover_m;    /* the short pulse is used nearer than this range (the first long-pulse
+                              cell; Inf without the long pulse)                       */
 
     /* DDC output */
     int     nDdc;          /* DDC samples per PRI and channel                         */
@@ -97,6 +107,8 @@ typedef struct {
     int     nfft;          /* Doppler FFT length (power of 2)                         */
     float  *dopWindow;     /* [rowLen] Hamming window, unit energy                    */
     float  *noiseGain;     /* [nfft] noise gain of every Doppler bin (after fftshift) */
+    double  mtiMaxRange_m; /* clutter filter only up to this range (optional in the file: Inf) */
+    float  *noiseGainBypass; /* [nfft] noise gain of the cells beyond it (no clutter filter) */
     double *dopFreq_Hz;    /* [nfft] Doppler axis (after fftshift)                    */
     int     notchBins;     /* bins on each side of zero Doppler that are not tested   */
     double  notchMaxRange_m; /* apply the MTI notch only at range_m <= this limit      */
@@ -167,6 +179,10 @@ typedef struct {
     double  pmbmUkfScale, pmbmWm0, pmbmWc0, pmbmWi;  /* unscented transform              */
     double  pmbmLatency_s, pmbmMaintStep_s; /* plots in the tracker this long after the look;
                                                missed looks checked every               */
+    /* TOMHT tracker (track_tomht.m, tracker_tomht.c): the IMM-UKF, densities and timing
+     * above (pmbm...), and its hypothesis management */
+    double  tomhtPd, tomhtLogHypPrune, tomhtConfirmScore, tomhtDeleteScore, tomhtPDelete;
+    int     tomhtMaxHyp, tomhtKBest, tomhtNScan;
 
     /* run-time option (not in the file): matched filter method,
      * MF_AUTO (the faster one for the thread count), MF_DIRECT or MF_FFT */
@@ -266,7 +282,7 @@ typedef struct {
     double   alt_m;        /* height above ground (3-D), NaN in 2-D                  */
     int      hits;         /* updates                                                 */
     int      misses;       /* scans without a plot since the last update             */
-    int      method;       /* TRACK_METHOD_EKF or TRACK_METHOD_PMBM                  */
+    int      method;       /* TRACK_METHOD_EKF, TRACK_METHOD_PMBM or TRACK_METHOD_TOMHT */
     double   existence;    /* PMBM: probability that a target made its newest plot (NaN: EKF) */
     int      nModes;       /* PMBM: IMM models (0: EKF)                              */
     int      modes[3];     /* PMBM: PMBM_CV, PMBM_CA, PMBM_CT                        */

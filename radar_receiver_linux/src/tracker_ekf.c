@@ -60,6 +60,12 @@ void ekf_tracker_init(EkfTracker *t, const RadarConfig *cfg)
     t->vrUnambiguous = cfg->trackVrUnambiguous;
     t->Rvr = cfg->trackSigmaVr * cfg->trackSigmaVr;
     t->vrSpan = cfg->trackVrSpan;
+    for (int p = 0; p < N_PULSES; p++) {
+        Detection d;
+        memset(&d, 0, sizeof d);
+        d.pulse = p;
+        t->vrSpanPulse[p] = tracker_plot_vr_span(cfg, &d);
+    }
     t->gateVr = cfg->trackGateVr;
     t->scanTime_s = cfg->scanTime_s;
     t->batchGap_s = cfg->trackBatchGap_s;
@@ -231,8 +237,8 @@ static void radial_velocity(const EkfTracker *t, const double *x, double *hv, do
 /* Track predicted to time tp, innovation, Jacobian, S^-1, the measurement
  * dimension *md and noise Rm: with the radial velocity zvr when it can be used
  * (unambiguous, or unfolded with the predicted range rate). Returns 0 if S is singular. */
-static int predict_measure(const EkfTracker *t, const TrackState *s, const double *z, double zvr, double tp, double *x,
-                           double *P, double *nu, double *H, double *Si, double *det, int *md, double *Rm)
+static int predict_measure(const EkfTracker *t, const TrackState *s, const double *z, double zvr, double span, double tp,
+                           double *x, double *P, double *nu, double *H, double *Si, double *det, int *md, double *Rm)
 {
     const int d = t->dim, n = t->n;
     double HP[4 * NMAX], S[16];
@@ -248,11 +254,11 @@ static int predict_measure(const EkfTracker *t, const TrackState *s, const doubl
         if (!t->vrUnambiguous) {
             mul(Hv, P, HvP, 1, n, n);
             for (int i = 0; i < n; i++) sv2 += HvP[i] * Hv[i];
-            use = sqrt(sv2 + t->Rvr) < t->vrSpan / 6.0;
-            k = round((hv - zvr) / t->vrSpan);
+            use = sqrt(sv2 + t->Rvr) < span / 6.0;
+            k = round((hv - zvr) / span);
         }
         if (use) {
-            nu[d] = zvr + k * t->vrSpan - hv;
+            nu[d] = zvr + k * span - hv;
             memcpy(H + (size_t)d * n, Hv, sizeof(double) * n);
             Rm[d] = t->Rvr;
             m = d + 1;
@@ -441,7 +447,8 @@ static void associate(EkfTracker *t, TrackerCallback callback, void *user)
             double x[NMAX], P[NMAX * NMAX], nu[4], H[4 * NMAX], Si[16], det, Sinu[4], Rm[4], d2 = 0.0;
             int md;
             cost[(size_t)j * m + i] = INFINITY;
-            if (!usable[i] || !predict_measure(t, &t->tracks[j], Z + 3 * i, Zvr[i], t->pending[i].time_s, x, P, nu, H,
+            if (!usable[i] || !predict_measure(t, &t->tracks[j], Z + 3 * i, Zvr[i], t->pending[i].vrSpan,
+                                               t->pending[i].time_s, x, P, nu, H,
                                                Si, &det, &md, Rm))
                 continue;
             mul(Si, nu, Sinu, md, md, 1);
@@ -456,7 +463,7 @@ static void associate(EkfTracker *t, TrackerCallback callback, void *user)
         if (j >= 0) {                                      /* EKF update */
             double x[NMAX], P[NMAX * NMAX], nu[4], H[4 * NMAX], Si[16], det, Rm[4];
             int md;
-            predict_measure(t, &t->tracks[j], Z + 3 * i, Zvr[i], tp, x, P, nu, H, Si, &det, &md, Rm);
+            predict_measure(t, &t->tracks[j], Z + 3 * i, Zvr[i], t->pending[i].vrSpan, tp, x, P, nu, H, Si, &det, &md, Rm);
             ekf_update(t, &t->tracks[j], x, P, nu, H, Si, md, Rm, tp);
         } else {
             j = new_track(t, Z + 3 * i, Zvr[i], tp);
@@ -490,6 +497,7 @@ void ekf_tracker_update(EkfTracker *t, const Detection *plots, int n, double t_s
         b->range_m = plots[k].range_m;
         b->el_deg = plots[k].el_deg;
         b->vr_mps = plots[k].vr_mps;
+        b->vrSpan = plots[k].pulse >= 0 && plots[k].pulse < N_PULSES ? t->vrSpanPulse[plots[k].pulse] : t->vrSpan;
         b->plotIndex = ++t->nPlots;
         t->pendingLast = t_s;
     }

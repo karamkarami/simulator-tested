@@ -434,6 +434,8 @@ static int worker(void *arg)
     if (app->cfg.trackEnable) {       /* short: the timing panel has 15 characters for a label */
         if (app->cfg.trackMethod == TRACK_METHOD_PMBM)
             snprintf(trackName, sizeof trackName, "Track PMBM %dD", app->cfg.trackDim);
+        else if (app->cfg.trackMethod == TRACK_METHOD_TOMHT)
+            snprintf(trackName, sizeof trackName, "Track MHT %dD", app->cfg.trackDim);
         else
             snprintf(trackName, sizeof trackName, "Track EKF %dD %s", app->cfg.trackDim, app->cfg.trackModel == TRACK_CA ? "CA" : "CV");
     } else {
@@ -621,6 +623,13 @@ int main(int argc, char **argv)
             app.cfg.nfft, app.cfg.nRows, app.cfg.updateEvery, app.cfg.minHits);
     for (int i = 0; i < N_PULSES; i++) {
         const PulseConfig *pc = &app.cfg.pulse[i];
+        if (!pc->enable) {
+            fprintf(stderr, "%s pulse: off\n", pulse_name(i));
+            continue;
+        }
+        if (pc->fc_Hz > 0)
+            fprintf(stderr, "%s pulse: carrier %.3f MHz, Doppler span %.1f m/s\n", pulse_name(i), pc->fc_Hz / 1e6,
+                    pc->vrSpan_mps);
         if (pc->waveform == WAVE_PHASE_CODE)
             fprintf(stderr, "%s pulse: phase code of %d chips, %s filter of %d taps (%.2f ... %.2f km)\n", pulse_name(i),
                     pc->nChips, pc->compression == COMPRESSION_MISMATCH ? "mismatch" : "matched", pc->nTaps,
@@ -638,6 +647,9 @@ int main(int argc, char **argv)
     if (app.cfg.trackEnable && app.cfg.trackMethod == TRACK_METHOD_PMBM)
         fprintf(stderr, "tracking: PMBM %d-D, IMM-UKF of %d models, %d global hypotheses\n", app.cfg.trackDim,
                 app.cfg.pmbmNModels, app.cfg.pmbmMaxHyp);
+    if (app.cfg.trackEnable && app.cfg.trackMethod == TRACK_METHOD_TOMHT)
+        fprintf(stderr, "tracking: TOMHT %d-D, IMM-UKF of %d models, %d global hypotheses (k-best %d), %d-scan pruning\n",
+                app.cfg.trackDim, app.cfg.pmbmNModels, app.cfg.tomhtMaxHyp, app.cfg.tomhtKBest, app.cfg.tomhtNScan);
     else if (app.cfg.trackEnable)
         fprintf(stderr, "tracking: EKF %d-D, %s model, GNN association\n", app.cfg.trackDim,
                 app.cfg.trackModel == TRACK_CA ? "constant-acceleration" : "constant-velocity");

@@ -203,6 +203,20 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         for (int p = 0; p < N_PULSES; p++) {
             PulseConfig *pc = &cfg->pulse[p];
             char key[48];
+            snprintf(key, sizeof key, "%s_enable", names[p]);    /* optional: on in older files */
+            const Record *en = find_optional(&rs, key);
+            pc->enable = en ? en->rows * en->cols >= 1 && en->data[0] != 0 : 1;
+            snprintf(key, sizeof key, "%s_fc_Hz", names[p]);
+            const Record *fc = find_optional(&rs, key);
+            pc->fc_Hz = fc && fc->rows * fc->cols >= 1 ? fc->data[0] : 0.0;
+            snprintf(key, sizeof key, "%s_lambda_m", names[p]); pc->lambda_m = get_scalar(&rs, key);
+            if (!pc->enable) continue;                    /* off: no cells, nothing else in the file */
+            snprintf(key, sizeof key, "%s_beamU", names[p]);
+            if (find_optional(&rs, key)) pc->beamU = get_doubles(&rs, key, cfg->nBeams, NULL);
+            else if (cfg->beamU) {
+                pc->beamU = malloc(sizeof(double) * (size_t)cfg->nBeams);
+                if (pc->beamU) memcpy(pc->beamU, cfg->beamU, sizeof(double) * (size_t)cfg->nBeams);
+            }
             snprintf(key, sizeof key, "%s_ddcFirst", names[p]);  pc->ddcFirst = get_int(&rs, key);
             snprintf(key, sizeof key, "%s_ddcCount", names[p]);  pc->ddcCount = get_int(&rs, key);
             snprintf(key, sizeof key, "%s_nTaps", names[p]);     pc->nTaps    = get_int(&rs, key);
@@ -211,7 +225,6 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             get_complex(&rs, key, 1, pc->nTaps, 0, &pc->tapsRe, &pc->tapsIm);
             snprintf(key, sizeof key, "%s_range_m", names[p]);  pc->range_m = get_doubles(&rs, key, pc->nRange, NULL);
             snprintf(key, sizeof key, "%s_delay_s", names[p]);  pc->delay_s = get_doubles(&rs, key, pc->nRange, NULL);
-            snprintf(key, sizeof key, "%s_lambda_m", names[p]); pc->lambda_m = get_scalar(&rs, key);
             snprintf(key, sizeof key, "%s_testFirst", names[p]); pc->testFirst = get_int(&rs, key);
             snprintf(key, sizeof key, "%s_testCount", names[p]);
             pc->testCount = get_int(&rs, key);
@@ -240,6 +253,10 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
                                pc->ddcFirst >= pc->rxFirst + pc->rxCount))
                 set_error(&rs, "inconsistent DDC segment of the %s pulse", names[p]);
         }
+        if (!rs.failed && !cfg->pulse[PULSE_SHORT].enable && !cfg->pulse[PULSE_LONG].enable)
+            set_error(&rs, "both sub-pulses are switched off");
+        cfg->handover_m = cfg->pulse[PULSE_LONG].enable && cfg->pulse[PULSE_LONG].range_m
+                        ? cfg->pulse[PULSE_LONG].range_m[0] : INFINITY;
 
         cfg->cpiLength  = get_int(&rs, "cpiLength");
         cfg->nStagger   = get_int(&rs, "nStagger");
@@ -261,6 +278,24 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         cfg->nfft         = get_int(&rs, "nfft");
         cfg->dopWindow    = get_floats(&rs, "dopWindow", cfg->rowLen);
         cfg->noiseGain    = get_floats(&rs, "noiseGain", cfg->nfft);
+        {                                              /* optional: the clutter filter on every cell */
+            const Record *r = find_optional(&rs, "mtiMaxRange_m");
+            cfg->mtiMaxRange_m = INFINITY;
+            if (r && (r->isComplex || r->rows * r->cols != 1))
+                set_error(&rs, "configuration value 'mtiMaxRange_m' must be a real scalar");
+            else if (r) cfg->mtiMaxRange_m = r->data[0];
+            if (find_optional(&rs, "noiseGainBypass")) {
+                cfg->noiseGainBypass = get_floats(&rs, "noiseGainBypass", cfg->nfft);
+            } else if (cfg->noiseGain && cfg->nfft > 0) {
+                cfg->noiseGainBypass = malloc(sizeof(float) * (size_t)cfg->nfft);
+                if (cfg->noiseGainBypass) memcpy(cfg->noiseGainBypass, cfg->noiseGain, sizeof(float) * (size_t)cfg->nfft);
+            }
+            for (int p = 0; p < N_PULSES; p++) {
+                PulseConfig *pc = &cfg->pulse[p];
+                pc->mtiCells = 0;
+                for (int k = 0; pc->range_m && k < pc->nRange; k++) if (pc->range_m[k] <= cfg->mtiMaxRange_m) pc->mtiCells = k + 1;
+            }
+        }
         cfg->dopFreq_Hz   = get_doubles(&rs, "dopFreq_Hz", cfg->nfft, NULL);
         cfg->notchBins    = get_int(&rs, "notchBins");
         {                                              /* optional: preserve the old all-range notch in older files */
@@ -331,6 +366,11 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             cfg->trackVrUnambiguous = get_int(&rs, "trackVrUnambiguous");
             cfg->trackSigmaVr = get_scalar(&rs, "trackSigmaVr");
             cfg->trackVrSpan = get_scalar(&rs, "trackVrSpan");
+            {                                      /* optional: one carrier in older files */
+                const Record *r = find_optional(&rs, "trackVrSpanPulse");
+                for (int p = 0; p < N_PULSES; p++)
+                    cfg->pulse[p].vrSpan_mps = r && r->rows * r->cols == N_PULSES ? r->data[p] : cfg->trackVrSpan;
+            }
             cfg->trackGateVr = get_scalar(&rs, "trackGateVr");
             cfg->trackConfirmHits = get_int(&rs, "trackConfirmHits");
             cfg->trackMaxMissTentative = get_int(&rs, "trackMaxMissTentative");
@@ -346,7 +386,7 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
                 r = find_optional(&rs, "trackAz0_deg");
                 cfg->trackAz0_deg = (r && r->rows * r->cols >= 1) ? r->data[0] : 0.0;
             }
-            if (cfg->trackMethod == TRACK_METHOD_PMBM) {
+            if (cfg->trackMethod == TRACK_METHOD_PMBM || cfg->trackMethod == TRACK_METHOD_TOMHT) {
                 cfg->pmbmPd = get_scalar(&rs, "pmbmPd");
                 cfg->pmbmPs = get_scalar(&rs, "pmbmPs");
                 double *l = get_doubles(&rs, "pmbmLogLambda", 3, NULL);
@@ -386,11 +426,25 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
                                    cfg->pmbmMaxHyp < 1 || badModel || !(cfg->pmbmUkfScale > 0)))
                     set_error(&rs, "invalid PMBM tracker settings in the configuration");
             }
+            if (cfg->trackMethod == TRACK_METHOD_TOMHT) {  /* the IMM-UKF above, and the MHT settings */
+                double *v = get_doubles(&rs, "tomhtParams", 8, NULL);
+                if (v) {
+                    cfg->tomhtPd = v[0];  cfg->tomhtMaxHyp = (int)lround(v[1]);  cfg->tomhtKBest = (int)lround(v[2]);
+                    cfg->tomhtLogHypPrune = v[3];  cfg->tomhtNScan = (int)lround(v[4]);  cfg->tomhtConfirmScore = v[5];
+                    cfg->tomhtDeleteScore = v[6];  cfg->tomhtPDelete = v[7];
+                }
+                free(v);
+                if (!rs.failed && (!(cfg->tomhtPd > 0 && cfg->tomhtPd < 1) || cfg->tomhtMaxHyp < 1 || cfg->tomhtKBest < 1 ||
+                                   cfg->tomhtNScan < 1 || cfg->tomhtNScan > 16 || !(cfg->tomhtDeleteScore > 0) ||
+                                   !(cfg->tomhtPDelete > 0 && cfg->tomhtPDelete < 1)))
+                    set_error(&rs, "invalid TOMHT tracker settings in the configuration (nScan 1 ... 16)");
+            }
             if (!rs.failed && ((cfg->trackDim != 2 && cfg->trackDim != 3) || !(cfg->trackGate > 0) ||
                                !(cfg->scanTime_s > 0) || (cfg->trackModel != TRACK_CV && cfg->trackModel != TRACK_CA) ||
                                !(cfg->trackBatchGap_s >= 0) || !(cfg->trackBatchMax_s >= 0) ||
                                !(cfg->trackMinSpeed >= 0) ||
-                               (cfg->trackMethod != TRACK_METHOD_EKF && cfg->trackMethod != TRACK_METHOD_PMBM)))
+                               (cfg->trackMethod != TRACK_METHOD_EKF && cfg->trackMethod != TRACK_METHOD_PMBM &&
+                                cfg->trackMethod != TRACK_METHOD_TOMHT)))
                 set_error(&rs, "invalid tracker settings in the configuration");
         }
 
@@ -401,6 +455,7 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             set_error(&rs, "invalid sizes in the configuration");
         for (int p = 0; p < N_PULSES && !rs.failed; p++) {
             const PulseConfig *pc = &cfg->pulse[p];
+            if (!pc->enable) continue;
             if (pc->nTaps < 1 || pc->nRange < 1)
                 set_error(&rs, "invalid matched filter or range axis in the configuration");
             else if (pc->testFirst < 0 || pc->testCount < 0 || pc->testFirst + pc->testCount > pc->nRange)
@@ -417,7 +472,7 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             const int gD = cfg->guardDoppler, oD = gD + cfg->trainDoppler;
             const int nTrain = (2 * oR + 1) * (2 * oD + 1) - (2 * gR + 1) * (2 * gD + 1);
             int tooShort = 0;                              /* the shifted range window must fit */
-            for (int p = 0; p < N_PULSES; p++) tooShort |= 2 * oR + 1 > cfg->pulse[p].nRange;
+            for (int p = 0; p < N_PULSES; p++) tooShort |= cfg->pulse[p].enable && 2 * oR + 1 > cfg->pulse[p].nRange;
             if (gR < 0 || gD < 0 || cfg->trainRange < 0 || cfg->trainDoppler < 0 || nTrain < 1 ||
                 nTrain != cfg->nTrain || 2 * oD + 1 > cfg->nfft || 2 * oR + 1 >= 64 || tooShort)
                 set_error(&rs, "invalid CFAR window in the configuration");
@@ -441,9 +496,10 @@ void radar_config_free(RadarConfig *cfg)
     for (int p = 0; p < N_PULSES; p++) {
         PulseConfig *pc = &cfg->pulse[p];
         free(pc->tapsRe);  free(pc->tapsIm);  free(pc->range_m);  free(pc->delay_s);
-        free(pc->pulseRe);  free(pc->pulseIm);
+        free(pc->pulseRe);  free(pc->pulseIm);  free(pc->beamU);
     }
     free(cfg->mtiCoeffs);  free(cfg->dopWindow);  free(cfg->noiseGain);  free(cfg->dopFreq_Hz);
+    free(cfg->noiseGainBypass);
     memset(cfg, 0, sizeof(*cfg));
 }
 

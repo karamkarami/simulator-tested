@@ -1,4 +1,4 @@
-function ok = test_tracker_pmbm()
+function ok = test_tracker_pmbm(method)
 %TEST_TRACKER_PMBM  PMBM tracker with IMM-UKF (cfg.track.method = 'pmbm') on synthetic plots.
 %   Every case runs in 3-D (DBF: range, azimuth, elevation) and in 2-D (one
 %   element: range and azimuth, slant range), unless noted. The plots come
@@ -47,8 +47,13 @@ function ok = test_tracker_pmbm()
 %   every track update must match MATLAB (plot, track number, confirmation,
 %   updates, state).
 
+%   TEST_TRACKER_PMBM('tomht') runs the same cases with the TOMHT tracker
+%   (cfg.track.method = 'tomht', IMM-UKF, k-best and N-scan; tracker_tomht.c in C).
+
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
+if nargin < 1 || isempty(method), method = 'pmbm'; end
+bayes_method(method);
 ok = true;
 c_compare('reset');
 for dim = [3 2]
@@ -71,18 +76,18 @@ for dim = [3 2]
 end
 [nC, nBad] = c_compare('get');
 if nC > 0
-    fprintf('  C tracker (tracker_pmbm.c) on the same calls: %d runs compared, %d different from MATLAB: %s\n', nC, nBad, ...
+    fprintf('  C tracker (tracker_%s.c) on the same calls: %d runs compared, %d different from MATLAB: %s\n', method, nC, nBad, ...
             ternary(nBad == 0, 'ok', 'FAIL'));
     ok = ok && nBad == 0;
 else
     fprintf('  C tracker not built: comparison skipped\n');
 end
-fprintf('PMBM tracker (IMM-UKF): %s\n', ternary(ok, 'PASS', 'FAIL'));
+fprintf('%s tracker (IMM-UKF): %s\n', upper(method), ternary(ok, 'PASS', 'FAIL'));
 end
 
 %% ------------------------------------------------------------------ cases
 function ok = six_case(dim, prf)
-[cfg, sys] = make_cfg(dim, 'pmbm', prf, struct('falsePlotsPerScan', 8));
+[cfg, sys] = make_cfg(dim, bayes_method(), prf, struct('falsePlotsPerScan', 8));
 tgts = six_targets_scenario();
 nScans = 5;                                          % (T1 passes over the radar after 50 s)
 pl = make_plots(cfg, sys, tgts, nScans, struct('nFalse', 8, 'seed', 7));
@@ -102,7 +107,7 @@ nScans = 12;
 okE = e.pmbm.pos < e.ekf.pos;
 okM = e.modeDuring(3) > max(e.modeDuring(1:2));              % CT dominates during the turn
 ok = good && okE && okM;
-fprintf(['  Turn 4 deg/s (1.8 g), %d-D: %s; position error (rms over the updates) PMBM %.0f m, EKF %.0f m ' ...
+fprintf(['  Turn 4 deg/s (1.8 g), %d-D: %s; position error (rms over the updates) IMM-UKF %.0f m, EKF %.0f m ' ...
          '(EKF tracks: %d); model probabilities in the turn CV %.2f CA %.2f CT %.2f: %s\n'], dim, txt, ...
         e.pmbm.pos, e.ekf.pos, e.ekf.nTracks, e.modeDuring, ternary(ok, 'ok', 'FAIL'));
 end
@@ -115,7 +120,7 @@ nScans = 10;
 okA = e.modeDuring(2) > max(e.modeDuring([1 3])) && e.pmbm.velEnd < 15 && e.pmbm.accEnd < 2.5;
 okE = e.pmbm.vel < e.ekf.vel;
 ok = good && okA && okE;
-fprintf(['  Constant acceleration 6 m/s^2, %d-D: %s; velocity error (rms) PMBM %.1f m/s, EKF %.1f m/s; at the ' ...
+fprintf(['  Constant acceleration 6 m/s^2, %d-D: %s; velocity error (rms) IMM-UKF %.1f m/s, EKF %.1f m/s; at the ' ...
          'end %.1f m/s, acceleration error %.2f m/s^2; model probabilities CV %.2f CA %.2f CT %.2f: %s\n'], dim, ...
         txt, e.pmbm.vel, e.ekf.vel, e.pmbm.velEnd, e.pmbm.accEnd, e.modeDuring, ternary(ok, 'ok', 'FAIL'));
 end
@@ -125,7 +130,7 @@ function [ok, e, txt] = single_target_case(dim, tg, nScans, tMan)
 % updates and the model probabilities while it maneuvers (tMan).
 e = struct();
 T = [];
-for method = {'pmbm', 'ekf'}
+for method = {bayes_method(), 'ekf'}
     [cfg, sys] = make_cfg(dim, method{1}, 'fixed');
     T = sys.track.scanTime_s;
     pl = make_plots(cfg, sys, tg, nScans, struct('nFalse', 0, 'seed', 3));
@@ -153,8 +158,8 @@ for method = {'pmbm', 'ekf'}
             s.accEnd = norm(rep(1).acc_mps2(1:2) - at(1:2));
         end
     end
-    e.(method{1}) = s;
-    if strcmp(method{1}, 'pmbm')
+    if strcmp(method{1}, 'ekf'), e.ekf = s; else, e.pmbm = s; end   % (e.pmbm: the PMBM or the TOMHT)
+    if ~strcmp(method{1}, 'ekf')
         nPlots = numel(pl);
         inMan = modes(:, 1) >= tMan(1) + T & modes(:, 1) <= tMan(2) + T;   % updates after the start
         e.modeDuring = mean(modes(inMan, 2:4), 1);
@@ -170,7 +175,7 @@ end
 
 function ok = clutter_case(dim)
 % Pd 0.7, 30 false plots per scan, 10 scans.
-[cfg, sys] = make_cfg(dim, 'pmbm', 'fixed', struct('pd', 0.7, 'falsePlotsPerScan', 30));
+[cfg, sys] = make_cfg(dim, bayes_method(), 'fixed', struct('pd', 0.7, 'falsePlotsPerScan', 30));
 tgts = six_targets_scenario();
 tgts(1).vel_mps = -tgts(1).vel_mps;                  % T1 recedes (inbound it passes over the radar after 50 s)
 nScans = 10;
@@ -186,7 +191,7 @@ nF = false_tracks(cfg, tr, tgts);
 nFE = false_tracks(cfgE, trE, tgts);
 ok = all(has | ~need) && nF <= 1;
 fprintf(['  Pd 0.7, 30 false plots per scan, %d-D, 10 scans: detections per target %s, %d detected in the ' ...
-         'last 3 scans; confirmed tracks on targets PMBM %d (%s), EKF %d (%s); false confirmed tracks PMBM %d, ' ...
+         'last 3 scans; confirmed tracks on targets IMM-UKF %d (%s), EKF %d (%s); false confirmed tracks IMM-UKF %d, ' ...
          'EKF %d; %d global hypotheses, %d Bernoulli components at the end: %s\n'], dim, mat2str(sum(detected, 2).'), ...
         sum(need), sum(has), strjoin({tgts(has).name}, ' '), sum(hasE), strjoin({tgts(hasE).name}, ' '), nF, nFE, ...
         size(tr.G, 1), numel(tr.T), ternary(ok, 'ok', 'FAIL'));
@@ -194,7 +199,7 @@ end
 
 function ok = close_case()
 % Two targets 200 m apart in range, same azimuth, receding at 100 m/s (2-D).
-[cfg, sys] = make_cfg(2, 'pmbm', 'fixed');
+[cfg, sys] = make_cfg(2, bayes_method(), 'fixed');
 tg(1) = make_target('A', 2, 20e3, 30, 0, 100, 0);
 tg(2) = make_target('B', 2, 20.2e3, 30, 0, 100, 0);
 nScans = 6;
@@ -210,7 +215,7 @@ function ok = crossing_case()
 % Two targets crossing each other at 90 deg at 25 km (3-D, other altitudes; 2-D).
 ok = true;
 for dim = [3 2]
-    [cfg, sys] = make_cfg(dim, 'pmbm', 'fixed');
+    [cfg, sys] = make_cfg(dim, bayes_method(), 'fixed');
     T = sys.track.scanTime_s;
     tc = 4.5 * T;                                    % they cross between two looks
     c = [25e3*sind(80), 25e3*cosd(80)];
@@ -245,7 +250,7 @@ end
 
 function ok = termination_case()
 % A target seen for 4 scans, then gone (3-D): its track must be deleted.
-[cfg, sys] = make_cfg(3, 'pmbm', 'fixed');
+[cfg, sys] = make_cfg(3, bayes_method(), 'fixed');
 T = sys.track.scanTime_s;
 tg = make_target('G', 2, 30e3, 100, 5000, -200, 0);
 pl = make_plots(cfg, sys, tg, 4, struct('nFalse', 0, 'seed', 8));
@@ -267,7 +272,7 @@ function ok = min_speed_case()
 % Speed gate 5 m/s: a 3 m/s and a 100 m/s target (2-D, plots without errors).
 ok = true;
 for gate = [false true]
-    [cfg, sys] = make_cfg(2, 'pmbm', 'fixed', struct(), gate);
+    [cfg, sys] = make_cfg(2, bayes_method(), 'fixed', struct(), gate);
     tg(1) = make_target('S', 2, 20e3, 30, 0, 3, 0);
     tg(2) = make_target('F', 2, 20e3, 120, 0, 100, 0);
     nScans = 4;
@@ -285,7 +290,7 @@ end
 
 function ok = challenge_case(dim)
 % The challenge scenario, detections from the SNR budget.
-[cfg, sys] = make_cfg(dim, 'pmbm', 'fixed', struct('falsePlotsPerScan', 10));
+[cfg, sys] = make_cfg(dim, bayes_method(), 'fixed', struct('falsePlotsPerScan', 10));
 cfg.scenario.type = 'challenge';
 tgts = target_scenario(cfg);
 nScans = 6;
@@ -314,7 +319,7 @@ nHas = sum(arrayfun(@(k) on_target(cfg, tr, tgts(k), tEnd, dim), 1:numel(tgts)))
 nHasE = sum(arrayfun(@(k) on_target(cfgE, trE, tgts(k), tEnd, dim), 1:numel(tgts)));
 ok = ok && nF == 0;
 fprintf(['  Challenge scenario (13 targets), %d-D, 6 scans: detected in the last 3 scans %d, confirmed tracks on ' ...
-         'targets PMBM %d, EKF %d; false confirmed PMBM %d, EKF %d; confirmed track PMBM/EKF: %s: %s\n'], dim, ...
+         'targets IMM-UKF %d, EKF %d; false confirmed IMM-UKF %d, EKF %d; confirmed track IMM-UKF/EKF: %s: %s\n'], dim, ...
         nNeed, nHas, nHasE, nF, nFE, strjoin(names, ', '), ternary(ok, 'ok', 'FAIL'));
 end
 
@@ -326,9 +331,9 @@ cfg.track.method = method;
 cfg.track.dim = sprintf('%dd', dim);
 cfg.prf.mode = prf;
 if dim == 2, cfg.ant.nElements = 1; end              % no elevation
-if nargin > 3
+if nargin > 3 && any(strcmp(method, {'pmbm', 'tomht'}))
     f = fieldnames(pmbm);
-    for i = 1:numel(f), cfg.track.pmbm.(f{i}) = pmbm.(f{i}); end
+    for i = 1:numel(f), cfg.track.(method).(f{i}) = pmbm.(f{i}); end
 end
 if nargin > 4 && minSpeed
     cfg.track.minSpeedEnable = true;
@@ -366,7 +371,8 @@ saved = rng;
 rng(o.seed);
 pl = struct('time_s', {}, 'az_deg', {}, 'range_m', {}, 'el_deg', {}, 'vr_mps', {});
 detected = false(numel(tgts), nScans);
-rCover = [sys.wave.short.range_m(1), sys.wave.long.range_m(end)];
+rAll = [sys.wave.short.range_m(:); sys.wave.long.range_m(:)];
+rCover = [min(rAll), max(rAll)];
 looks = cell(1, numel(tgts));
 for i = 1:numel(tgts), looks{i} = look_times(tgts(i), cfg, rate, nScans * T); end
 for s = 0:nScans-1
@@ -428,7 +434,7 @@ function [tr, modes] = run_tracker(p, pl, tEnd, cfg)
 % The tracker on the plots; with cfg (PMBM) also the C tracker on the same calls (when built).
 tr = track_init(p);
 [tr, modes, calls] = feed(tr, pl, tEnd);
-if nargin > 3 && strcmp(p.method, 'pmbm')
+if nargin > 3 && any(strcmp(p.method, {'pmbm', 'tomht'}))
     c_compare('add', compare_with_c(cfg, calls, tr.log));
 end
 end
@@ -486,6 +492,14 @@ ok = status == 0;
 if ~ok, fprintf('    C tracker: %s', regexprep(out, '\n(?=.)', '\n    ')); end
 c_compare('text', out);
 delete(fp);  delete(fl);  delete(fc);  rmdir(folder);
+end
+
+function m = bayes_method(m)
+% The tracker under test: 'pmbm' or 'tomht' (set once by the main function).
+persistent name
+if nargin > 0, name = m; end
+if isempty(name), name = 'pmbm'; end
+m = name;
 end
 
 function varargout = c_compare(action, v)

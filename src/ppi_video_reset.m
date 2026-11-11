@@ -10,4 +10,5 @@ V.map(:) = 0;
 V.time(:) = -Inf;
 V.sum = zeros(1, V.nR);  V.n = 0;  V.azBin = 0;
 V.noise_dB = NaN;
+V.azNoise = nan(V.nAz, 1);                                    % noise estimate of every azimuth bin
 end

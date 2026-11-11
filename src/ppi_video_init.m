@@ -20,9 +20,10 @@ function V = ppi_video_init(sys, rMax_m)
 c = sys.cfg.const.c;
 dR = c / (2 * sys.fsOut);                                     % range per DDC sample [m]
 ws = sys.wave.short;  wl = sys.wave.long;
-rS = ws.range_m(1) + (0:numel(ws.rxIdx)-1) * dR;
-keepS = rS < wl.range_m(1);
-rL = wl.range_m(1) + (0:numel(wl.rxIdx)-1) * dR;
+handover = sys.handover_m;                                    % (Inf without the long pulse)
+rS = first_range(ws) + (0:numel(ws.rxIdx)-1) * dR;
+keepS = rS < handover;
+rL = first_range(wl) + (0:numel(wl.rxIdx)-1) * dR;
 idx = [ws.rxIdx(keepS), wl.rxIdx];                            % DDC samples of the joined video
 r   = [rS(keepS), rL];
 V.dR_m = dR;
@@ -34,14 +35,19 @@ V.beam = 1;                                                   % beam of 'dbf' / 
 waves = {ws, wl};                                             % (own variable names: r, ok follow below)
 for p = 1:2
     wv = waves{p};
+    if ~wv.enable                                             % sub-pulse switched off: nothing
+        V.dbf{p} = struct('idx', zeros(1, 0), 'bin', zeros(1, 0));
+        V.mf{p} = V.dbf{p};
+        continue
+    end
     jj = find(ismember(wv.ddcIdx, wv.rxIdx));                 % segment samples in the receive interval
     rr = wv.range_m(1) + (wv.ddcIdx(jj) - wv.rxIdx(1)) * dR;
-    keep = rr < wl.range_m(1) | p == 2;
+    keep = rr < handover | p == 2;
     bb = floor(rr(keep) / dR) + 1;  inside = bb >= 1 & bb <= V.nR;
     jj = jj(keep);
     V.dbf{p} = struct('idx', jj(inside), 'bin', bb(inside));
     rr = wv.range_m(:).';
-    keep = rr < wl.range_m(1) | p == 2;
+    keep = rr < handover | p == 2;
     bb = floor(rr(keep) / dR) + 1;  inside = bb >= 1 & bb <= V.nR;
     kk = find(keep);
     V.mf{p} = struct('idx', kk(inside), 'bin', bb(inside));
@@ -57,6 +63,7 @@ V.map = zeros(V.nAz, V.nR, 'single');                         % mean power [LSB^
 V.time = -Inf(V.nAz, 1);                                      % time of the newest PRI in every bin
 V.sum = zeros(1, V.nR);  V.n = 0;  V.azBin = 0;                % PRIs of the current azimuth bin
 V.noise_dB = NaN;                                             % noise floor (running 10th percentile of the video)
+V.azNoise = nan(V.nAz, 1);                                    % its estimate in every azimuth bin (ppi_video_add_row.m)
 x = gammaincinv(0.1, sys.nCh);                                % its offset: the 10th percentile of the mean of
 V.p10Video_dB = 10*log10(sys.nCh / x);                        % nCh exponential powers is below the mean (1: 9.77
 V.p10Sample_dB = 10*log10(1 / gammaincinv(0.1, 1));           % dB, 48: 0.86 dB); one sample (DBF, MF out): 9.77 dB
@@ -78,4 +85,10 @@ V.pixInside = R <= rMax_m & iR <= V.nRPix;
 V.pixAz = iAz(V.pixInside);
 V.pixLin = iAz(V.pixInside) + V.nAz * (iR(V.pixInside) - 1);  % linear index into the reduced map
 V.cmap = ppi_video_colormap(256);
+end
+
+function r = first_range(wv)
+% Range of the first receive sample of a sub-pulse (none when it is switched off).
+r = 0;
+if ~isempty(wv.range_m), r = wv.range_m(1); end
 end

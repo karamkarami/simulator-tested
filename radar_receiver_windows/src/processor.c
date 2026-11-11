@@ -265,6 +265,12 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
     for (int i = 0; i < N_PULSES; i++) {
         const PulseConfig *pc = &cfg->pulse[i];
         PulseState *s = &p->ps[i];
+        if (!pc->enable) {                         /* sub-pulse switched off: no buffers */
+            extractor_init(&s->ext, cfg->nfft, cfg->minHits, cfg->maxMiss);
+            s->ext.nBeams = cfg->nBeams;
+            reset_buffers(s);
+            continue;
+        }
         s->nR = pc->nRange;
         if (s->nR > maxNR) maxNR = s->nR;
         s->nCells = cfg->nBeams * s->nR;
@@ -601,7 +607,7 @@ static float *mti_row(const PulseState *s, float *ring, int blk, int slot)
 }
 
 /* MTI output of the newest L pulses: sum_l c[stagger of the oldest][l] * x[oldest + l]. */
-static void mti_newest(const RadarConfig *cfg, PulseState *s)
+static void mti_newest(const RadarConfig *cfg, const PulseConfig *pc, PulseState *s)
 {
     const int L = cfg->nMtiTaps, N = s->nSlots;
     const int first = (s->last - (L - 1) + N) % N;               /* oldest pulse of the output */
@@ -625,6 +631,13 @@ static void mti_newest(const RadarConfig *cfg, PulseState *s)
                 yi[k] += w * xi[k];
             }
         }
+        if (pc->mtiCells < s->nR) {              /* beyond cfg.mti.maxRange_m: the newest pulse, unfiltered */
+            const int slot = (firstMf + L - 1) % L;
+            const float *xr = s->cpiRe + (size_t)slot * s->nCells + c0;
+            const float *xi = s->cpiIm + (size_t)slot * s->nCells + c0;
+            for (int k = 0; k < nc; k++)
+                if ((c0 + k) % s->nR >= pc->mtiCells) { yr[k] = xr[k]; yi[k] = xi[k]; }
+        }
     }
     if (s->mtiCount < s->nMtiOut) s->mtiCount++;
 }
@@ -633,7 +646,7 @@ static void mti_newest(const RadarConfig *cfg, PulseState *s)
  * rows (fixed PRF: one row of consecutive outputs; staggered: de-interleaved by
  * stagger position), Hamming window, FFT, |X|^2 averaged over the rows, fftshift
  * and division by the noise gain of every bin. */
-static void doppler(const Processor *p, PulseState *s)
+static void doppler(const Processor *p, const PulseConfig *pc, PulseState *s)
 {
     const RadarConfig *cfg = p->cfg;
     const FftPlan *plan = &p->fft;
@@ -690,6 +703,14 @@ static void doppler(const Processor *p, PulseState *s)
                 const float g = scale / cfg->noiseGain[d];
                 float *restrict pd = s->P + (size_t)d * s->nCells + c0;
                 for (int c = 0; c < nc; c++) pd[c] *= g;
+            }
+            if (pc->mtiCells < s->nR) {           /* unfiltered cells: their own noise gain */
+                for (int d = 0; d < nfft; d++) {
+                    const float g = cfg->noiseGain[d] / cfg->noiseGainBypass[d];
+                    float *restrict pd = s->P + (size_t)d * s->nCells + c0;
+                    for (int c = 0; c < nc; c++)
+                        if ((c0 + c) % s->nR >= pc->mtiCells) pd[c] *= g;
+                }
             }
         }
     }
@@ -1110,7 +1131,7 @@ static void prune_and_report(const Processor *p, int pulse, PulseState *s)
         d.az_deg = azCenter;
         d.range_m = pc->range_m[c->r];
         d.vr_mps = -cfg->dopFreq_Hz[c->d] * pc->lambda_m / 2;
-        d.el_deg = cfg->dbfEnabled ? cfg->tilt_deg + asin(cfg->beamU[c->b]) * 180 / PI : NAN;   /* beam centre */
+        d.el_deg = cfg->dbfEnabled ? cfg->tilt_deg + asin(pc->beamU[c->b]) * 180 / PI : NAN;   /* beam centre (on its carrier) */
         const double noise = s->noise ? s->noise[(size_t)c->d * s->nCells + (size_t)c->b * nR + c->r] : floors[c->b];
         double ratioSnr = c->pw / noise - 1;
         d.snr_dB = 10 * log10(ratioSnr > DBL_EPSILON ? ratioSnr : DBL_EPSILON);
@@ -1150,6 +1171,7 @@ static void peak_interpolation(const Processor *p, int pulse, PulseState *s)
     if (!doDop && !doEl) return;
     const double df = cfg->dopFreq_Hz[1] - cfg->dopFreq_Hz[0];      /* Doppler bin width [Hz] */
     const double lambda = cfg->pulse[pulse].lambda_m;
+    const double *beamU = cfg->pulse[pulse].beamU ? cfg->pulse[pulse].beamU : cfg->beamU;
     for (int i = 0; i < s->nReports; i++) {
         Detection *d = &s->reports[i];
         const int b = d->beam, r = d->rIdx, k = d->dIdx;
@@ -1162,7 +1184,7 @@ static void peak_interpolation(const Processor *p, int pulse, PulseState *s)
             const double pos = b + delta;                              /* fractional beam index */
             const int i0 = (int)floor(pos);
             const double f = pos - i0;
-            const double u = (i0 + 1 < nB) ? cfg->beamU[i0] * (1 - f) + cfg->beamU[i0 + 1] * f : cfg->beamU[i0];
+            const double u = (i0 + 1 < nB) ? beamU[i0] * (1 - f) + beamU[i0 + 1] * f : beamU[i0];
             d->el_deg = cfg->tilt_deg + asin(u) * 180 / PI;
         }
     }
@@ -1185,7 +1207,8 @@ static void taps_alloc(Processor *p)
     p->rd = xcalloc((size_t)p->nBins * cfg->nfft, sizeof(float));
     p->rdVel = xcalloc((size_t)cfg->nfft, sizeof(double));
     p->rdWork = xcalloc((size_t)p->nBins * cfg->nfft + 1, sizeof(float));
-    for (int d = 0; d < cfg->nfft; d++) p->rdVel[d] = -cfg->dopFreq_Hz[d] * cfg->pulse[PULSE_LONG].lambda_m / 2;
+    const int vp = cfg->pulse[PULSE_LONG].enable ? PULSE_LONG : PULSE_SHORT;   /* velocity on its carrier */
+    for (int d = 0; d < cfg->nfft; d++) p->rdVel[d] = -cfg->dopFreq_Hz[d] * cfg->pulse[vp].lambda_m / 2;
 }
 
 void processor_set_profile(Processor *p, int kind, int beam)
@@ -1223,7 +1246,7 @@ static void profile_add(Processor *p, int pulse, const PulseState *s)
 {
     const RadarConfig *cfg = p->cfg;
     const PulseConfig *pc = &cfg->pulse[pulse];
-    const double handover = cfg->pulse[PULSE_LONG].range_m[0];
+    const double handover = cfg->handover_m;
     const int b = p->profileBeam;
     if (p->profileKind == PROFILE_DBF) {
         const int n = pc->ddcCount;
@@ -1255,7 +1278,7 @@ static void rdmap_add(Processor *p, int pulse, const PulseState *s)
 {
     const RadarConfig *cfg = p->cfg;
     const PulseConfig *pc = &cfg->pulse[pulse];
-    const double handover = cfg->pulse[PULSE_LONG].range_m[0];
+    const double handover = cfg->handover_m;
     const int b = p->rdBeam, nfft = cfg->nfft;
     for (int r = 0; r < s->nR; r++) {
         if (pulse == PULSE_SHORT && !(pc->range_m[r] < handover)) break;
@@ -1378,6 +1401,7 @@ static int pri_matches_config(const RadarConfig *cfg, const PriData *pri)
     const uint32_t *idx[N_PULSES] = { pri->shortIdx, pri->longIdx };
     for (int i = 0; i < N_PULSES; i++) {
         const PulseConfig *pc = &cfg->pulse[i];
+        if (!pc->enable) continue;                          /* (its header interval is [0 0]) */
         if (idx[i][0] != (uint32_t)pc->rxFirst + 1 || idx[i][1] != (uint32_t)(pc->rxFirst + pc->rxCount))
             return 0;
     }
@@ -1420,9 +1444,11 @@ void processor_process(Processor *p, const PriData *pri, const ProcessorCallback
     }
     if (p->rdEnabled && pri->time_s < p->rdLast) p->rdLast = -1e300;   /* a new run */
     if (rdOn) { p->nRdDets = 0; p->rdUpdated = 0; }
+    const int firstOn = cfg->pulse[PULSE_SHORT].enable ? PULSE_SHORT : PULSE_LONG;   /* counts the updates */
     for (int i = 0; i < N_PULSES; i++) {
         const PulseConfig *pc = &cfg->pulse[i];
         PulseState *s = &p->ps[i];
+        if (!pc->enable) continue;                          /* sub-pulse switched off */
         double t0 = now_seconds();
 
         /* fast time into the next CPI slot */
@@ -1444,19 +1470,19 @@ void processor_process(Processor *p, const PriData *pri, const ProcessorCallback
         p->timing.mf_ms += elapsed_ms(&t0);
 
         /* slow time */
-        if (s->count >= cfg->nMtiTaps) mti_newest(cfg, s);
+        if (s->count >= cfg->nMtiTaps) mti_newest(cfg, pc, s);
         if (s->count == s->nSlots) s->sinceUpdate++;
         p->timing.mti_ms += elapsed_ms(&t0);
         if (s->count < s->nSlots || s->nPushed != 0) continue;
         if (!p->slowTime) {                                 /* overload: this update is skipped */
-            if (i == 0) p->timing.skipped++;
+            if (i == firstOn) p->timing.skipped++;
             continue;
         }
         /* a plot needs detections over the same azimuth extent also when
          * updates were skipped: an update counts for the pulses it covers */
         s->ext.weight = s->sinceUpdate / cfg->updateEvery > 1 ? s->sinceUpdate / cfg->updateEvery : 1;
         s->sinceUpdate = 0;
-        doppler(p, s);
+        doppler(p, pc, s);
         p->timing.doppler_ms += elapsed_ms(&t0);
         cfar(p, s, pc);
         prune_and_report(p, i, s);
@@ -1469,7 +1495,7 @@ void processor_process(Processor *p, const PriData *pri, const ProcessorCallback
         extractor_update(&s->ext, s->reports, s->nReports, 0, plot_callback, p);
         p->timing.extract_ms += elapsed_ms(&t0);
         plots_out(p, cb);
-        if (i == 0) p->timing.updates++;
+        if (i == firstOn) p->timing.updates++;
     }
     if (profileKind) {                                     /* mean of the samples in every bin */
         for (int b = 0; b < p->nBins; b++) p->profile[b] = p->profileCnt[b] ? p->profile[b] / p->profileCnt[b] : 0.0f;

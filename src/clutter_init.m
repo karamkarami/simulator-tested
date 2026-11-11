@@ -95,14 +95,19 @@ for i = 1:2
     wv = sys.wave.(names{i});
     nTx = round(wv.width_s * fs);
     t   = (0:nTx-1)' / fs;
-    tx  = waveform_envelope(wv, t) .* exp(1j*2*pi*sys.fIF*t);
+    tx  = waveform_envelope(wv, t) .* exp(1j*2*pi*wv.fIF_Hz*t);   % on the IF of the sub-pulse
     nFft = 2^nextpow2(sys.nAdc + nTx - 1);
     clut.(names{i}).nTx    = nTx;
     clut.(names{i}).nFft   = nFft;
     clut.(names{i}).txFft  = fft(tx, nFft);
     % ADC sample (0-based, relative to the window start) where an echo of zero delay starts
     clut.(names{i}).start0 = round((wv.tTx_s - sys.rxStart_s) * fs);
+    clut.(names{i}).enable = wv.enable;
+    clut.(names{i}).fdScale  = wv.fc_Hz / sys.cfg.fc;        % internal motion Doppler on its carrier
+    clut.(names{i}).ampScale = wv.lambda_m / sys.lambda;     % power ~ lambda^2
 end
+% one clutter signal for both sub-pulses (the same steering vectors) unless their carriers differ
+clut.sameCarrier = sys.wave.short.fc_Hz == sys.wave.long.fc_Hz;
 end
 
 function [beta, r] = billingsley(cc, fc)

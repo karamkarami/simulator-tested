@@ -50,6 +50,11 @@ r{end+1} = {'fsOut_Hz', sys.fsOut};
 names = {'short', 'long'};
 for i = 1:2
     wv = sys.wave.(names{i});
+    r{end+1} = {[names{i} '_enable'], double(wv.enable)};     % sub-pulse on (cfg.wave.<pulse>.enable)
+    r{end+1} = {[names{i} '_fc_Hz'], wv.fc_Hz};               % its carrier (cfg.wave.<pulse>.fc_Hz)
+    r{end+1} = {[names{i} '_lambda_m'], wv.lambda_m};
+    if ~wv.enable, continue; end                              % (a sub-pulse that is off: nothing else)
+    r{end+1} = {[names{i} '_beamU'], wv.beamU};               % beam directions on its carrier
     r{end+1} = {[names{i} '_rxFirst'], wv.rxIdx(1) - 1};        % receive interval (PRI header), 0-based
     r{end+1} = {[names{i} '_rxCount'], numel(wv.rxIdx)};
     r{end+1} = {[names{i} '_ddcFirst'], wv.ddcIdx(1) - 1};      % pulse compression input, 0-based (its
@@ -59,7 +64,6 @@ for i = 1:2
     r{end+1} = {[names{i} '_taps'], complex(wv.mfTaps)};
     r{end+1} = {[names{i} '_range_m'], wv.range_m};
     r{end+1} = {[names{i} '_delay_s'], wv.delay_s};
-    r{end+1} = {[names{i} '_lambda_m'], wv.lambda_m};
     r{end+1} = {[names{i} '_testFirst'], wv.testIdx(1) - 1};    % CFAR-tested range cells (0-based)
     r{end+1} = {[names{i} '_testCount'], max(0, wv.testIdx(2) - wv.testIdx(1) + 1)};
     isCode = strcmpi(wv.type, 'phasecode');                   % pulse compression (the taps above are
@@ -80,6 +84,8 @@ r{end+1} = {'rowLen', sys.cpi.rowLen};
 r{end+1} = {'nfft', sys.dop.nfft};
 r{end+1} = {'dopWindow', sys.dop.window};
 r{end+1} = {'noiseGain', reshape(sys.dop.noiseGain, 1, [])};
+r{end+1} = {'mtiMaxRange_m', sys.mti.maxRange_m};    % clutter filter only up to this range (Inf = all cells)
+r{end+1} = {'noiseGainBypass', reshape(sys.dop.noiseGainBypass, 1, [])};   % noise gain of the unfiltered cells
 r{end+1} = {'dopFreq_Hz', sys.dop.f_Hz};
 r{end+1} = {'notchBins', sys.dop.notchBins};
 r{end+1} = {'notchMaxRange_m', sys.cfar.notchMaxRange_m};
@@ -125,15 +131,17 @@ r{end+1} = {'trackUseVr', double(tk.useVr)};                              % radi
 r{end+1} = {'trackVrUnambiguous', double(tk.vrUnambiguous)};
 r{end+1} = {'trackSigmaVr', sqrt(tk.Rvr)};
 r{end+1} = {'trackVrSpan', tk.vrSpan};
+r{end+1} = {'trackVrSpanPulse', [tk.vrSpanPulse.short, tk.vrSpanPulse.long]};   % on the carrier of each sub-pulse
 r{end+1} = {'trackGateVr', tk.gateVr};
 r{end+1} = {'trackConfirmHits', tk.confirmHits};
 r{end+1} = {'trackMaxMissTentative', tk.maxMissTentative};
 r{end+1} = {'trackMaxMiss', tk.maxMiss};
 r{end+1} = {'trackMinSpeed', tk.minSpeed_mps};                          % delete slower tracks [m/s] (0 = off)
 r{end+1} = {'scanTime_s', tk.scanTime_s};
-r{end+1} = {'trackMethod', double(strcmp(tk.method, 'pmbm'))};           % 0 EKF (tracker_ekf.c), 1 PMBM (tracker_pmbm.c)
+r{end+1} = {'trackMethod', find(strcmp(tk.method, {'ekf', 'pmbm', 'tomht'})) - 1};   % 0 EKF (tracker_ekf.c), 1 PMBM
+                                                                         % (tracker_pmbm.c), 2 TOMHT (tracker_tomht.c)
 r{end+1} = {'trackAz0_deg', tk.az0_deg};                                 % antenna azimuth at t = 0 (PMBM looks)
-if strcmp(tk.method, 'pmbm')                                             % PMBM with IMM-UKF (track_setup.m)
+if any(strcmp(tk.method, {'pmbm', 'tomht'}))                            % PMBM / TOMHT with IMM-UKF (track_setup.m)
     m = tk.pmbm;
     r{end+1} = {'pmbmPd', m.pd};
     r{end+1} = {'pmbmPs', m.ps};
@@ -150,6 +158,10 @@ if strcmp(tk.method, 'pmbm')                                             % PMBM 
     r{end+1} = {'pmbmUnused', [m.varUnusedA, m.varUnusedW]};
     r{end+1} = {'pmbmUkf', [m.ukfScale, m.Wm(1), m.Wc(1), m.Wm(2)]};      % scale, weights of the centre and the others
     r{end+1} = {'pmbmTiming', [m.latency_s, m.maintStep_s]};
+end
+if strcmp(tk.method, 'tomht')                                            % TOMHT: its hypothesis management
+    q = tk.tomht;
+    r{end+1} = {'tomhtParams', [q.pd, q.maxHyp, q.kBest, q.logHypPrune, q.nScan, q.confirmScore, q.deleteScore, q.pDelete]};
 end
 
 for kFile = 1:numel(fileNames)

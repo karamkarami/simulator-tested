@@ -516,6 +516,9 @@ static const MatVar *mat_var(const MatFile *m, const char *name, const char *key
 
 typedef struct {
     const char *name;
+    int    enable;                /* cfg.wave.<pulse>.enable                   */
+    double fc_Hz, lambda_m;       /* its carrier (cfg.wave.<pulse>.fc_Hz)      */
+    double *beamU;                /* beam directions on its carrier            */
     int    phaseCode, mismatch;
     double width_s, bandwidth_Hz, chip_s, tTx_s;
     int    nCode;
@@ -988,6 +991,19 @@ static void export_config(void)
         snprintf(p, sizeof p, "wave.%s.bandwidth_Hz", names[i]);  w->bandwidth_Hz = num_or(p, 0);
         snprintf(p, sizeof p, "wave.%s.chip_s", names[i]);        w->chip_s = num_or(p, 1e-6);
         snprintf(p, sizeof p, "wave.%s.tTx_s", names[i]);         w->tTx_s = num(p);
+        snprintf(p, sizeof p, "wave.%s.enable", names[i]);       w->enable = num_or(p, 1) != 0;
+        snprintf(p, sizeof p, "wave.%s.fc_Hz", names[i]);        w->fc_Hz = num_or(p, num("fc"));
+        if (!(w->fc_Hz > 0) || !isfinite(w->fc_Hz))
+            fail("cfg.wave.%s.fc_Hz must be a positive carrier frequency [Hz] (or [] = cfg.fc).", names[i]);
+        w->lambda_m = c / w->fc_Hz;
+        {
+            const double fIFp = num("adc.fIF_Hz") + (w->fc_Hz - num("fc"));
+            const double bwHalf = 0.5 * (w->phaseCode ? 1.0 / w->chip_s : w->bandwidth_Hz);
+            if (w->enable && (fIFp - bwHalf <= 0 || fIFp + bwHalf >= fs / 2))
+                fail("cfg.wave.%s.fc_Hz = %.3f MHz puts the sub-pulse on the IF %.3f MHz: it must lie inside "
+                     "(0, %.1f MHz) with its bandwidth (LO = cfg.fc - cfg.adc.fIF_Hz = %.3f MHz).", names[i],
+                     w->fc_Hz / 1e6, fIFp / 1e6, fs / 2e6, (num("fc") - num("adc.fIF_Hz")) / 1e6);
+        }
         snprintf(p, sizeof p, "wave.%s.compression", names[i]);
         const char *comp = has(p) ? str(p) : "matched";
         if (same_text(comp, "mismatch")) w->mismatch = 1;
@@ -1034,12 +1050,15 @@ static void export_config(void)
     for (int i = 0; i < 2; i++) compression_filter(&wv[i], &ddc, taylorNbar, taylorSll);
     if (haveCodes) mat_free(&codes);
     Wave *ws = &wv[0], *wl = &wv[1];
-    if (wl->tTx_s < ws->tTx_s + ws->width_s) fail("The long pulse must start after the end of the short pulse.");
+    if (!ws->enable && !wl->enable) fail("Both sub-pulses are switched off (cfg.wave.short.enable, cfg.wave.long.enable).");
+    if (ws->enable && wl->enable && wl->tTx_s < ws->tTx_s + ws->width_s)
+        fail("The long pulse must start after the end of the short pulse.");
 
     /* PRI timeline, DDC sample times */
     const double maxRange = num("rx.maxRange_m");
     const double filterSpan = (ddc.L1 - 1) / fs + (ddc.L2 - 1) / fs1;
-    const double rxEnd = wl->tTx_s + wl->width_s + 2 * maxRange / c + filterSpan + 2 / fsOut;
+    const Wave *wLast = wl->enable ? wl : ws;             /* the last transmitted sub-pulse ends the record */
+    const double rxEnd = wLast->tTx_s + wLast->width_s + 2 * maxRange / c + filterSpan + 2 / fsOut;
     if (rxEnd > minPri)
         fail("Receive window (%.1f us) does not fit in the shortest PRI (%.1f us): reduce cfg.rx.maxRange_m or "
              "start the long pulse earlier.", rxEnd * 1e6, minPri * 1e6);
@@ -1055,8 +1074,9 @@ static void export_config(void)
     /* CFAR window size check of the receive intervals */
     for (int i = 0; i < 2; i++) {
         Wave *w = &wv[i];
+        if (!w->enable) continue;                         /* switched off: no receive interval, no cells */
         const double iv0 = i == 0 ? ws->tTx_s + ws->width_s : wl->tTx_s + wl->width_s;
-        const double iv1 = i == 0 ? wl->tTx_s : INFINITY;
+        const double iv1 = i == 0 && wl->enable ? wl->tTx_s : INFINITY;
         int first = -1, count = 0;
         for (int k = 0; k < nDdc; k++) {
             const double tFirst = (double)((long)k * ddc.D2 * ddc.D1) / fs;
@@ -1085,21 +1105,22 @@ static void export_config(void)
     }
     /* handover */
     const int oR = guardR + trainR;
-    const double handover = wl->range_m[0];
-    if (ws->range_m[ws->nRange - 1] + fabs(ws->range_m[1] - ws->range_m[0]) < handover)
+    const double handover = wl->enable ? wl->range_m[0] : INFINITY;
+    if (ws->enable && wl->enable && ws->range_m[ws->nRange - 1] + fabs(ws->range_m[1] - ws->range_m[0]) < handover)
         warn("Gap in the range coverage: short pulse up to %.1f km, long pulse from %.1f km.",
              ws->range_m[ws->nRange - 1] / 1e3, handover / 1e3);
     {
         int last = 0;                                     /* 1-based, 0 = none */
         for (int k = 0; k < ws->nRange; k++) if (ws->range_m[k] < handover) last = k + 1;
         int nKeep = last + oR > 2 * oR + 1 ? last + oR : 2 * oR + 1;
-        if (nKeep < ws->nRange) {
+        if (ws->enable && wl->enable && nKeep < ws->nRange) {
             ws->nRange = nKeep;
             ws->ddcCount = nKeep + ws->nTaps - 1;
         }
     }
     for (int i = 0; i < 2; i++) {                        /* CFAR-tested cells */
         Wave *w = &wv[i];
+        if (!w->enable) continue;
         snprintf(p, sizeof p, "cfar.%s.minRange_m", names[i]);
         const double lo = num(p);
         snprintf(p, sizeof p, "cfar.%s.maxRange_m", names[i]);
@@ -1158,10 +1179,34 @@ static void export_config(void)
         beamU = xcalloc(1, sizeof(double));
         beamU[0] = NAN;
     }
+    for (int i = 0; i < 2; i++) {                        /* beam directions on the carrier of each sub-pulse */
+        wv[i].beamU = xcalloc((size_t)nBeams, sizeof(double));
+        for (int b = 0; b < nBeams; b++) {
+            double u = beamU[b] * (num("fc") / wv[i].fc_Hz);
+            if (fabs(u) > 1) u = u > 0 ? 1.0 : -1.0;
+            wv[i].beamU[b] = u;
+        }
+    }
 
     /* CPI and Doppler processing */
     const double cpiTime = azBeamwidth / rate;
-    int cpiLength = empty("proc.cpiLength") ? (int)lround(cpiTime / meanPri) : (int)num("proc.cpiLength");
+    /* cfg.proc.cpiMode: 'auto' (beam dwell) or 'manual' (cfg.proc.cpiLength); without the field
+     * (older configurations) cpiLength = [] means auto */
+    int cpiAuto = !has("proc.cpiLength") || empty("proc.cpiLength");
+    if (has("proc.cpiMode") && !empty("proc.cpiMode")) {
+        const char *m = str("proc.cpiMode");
+        if (same_text(m, "auto")) cpiAuto = 1;
+        else if (same_text(m, "manual")) cpiAuto = 0;
+        else fail("cfg.proc.cpiMode must be 'auto' or 'manual'.");
+    }
+    int cpiLength;
+    if (cpiAuto) cpiLength = (int)lround(cpiTime / meanPri);
+    else {
+        if (!has("proc.cpiLength") || empty("proc.cpiLength")) fail("cfg.proc.cpiMode = 'manual' needs cfg.proc.cpiLength: a whole number of pulses.");
+        const double v = num("proc.cpiLength");
+        if (v < 1 || v != floor(v)) fail("cfg.proc.cpiMode = 'manual' needs cfg.proc.cpiLength: a whole number of pulses.");
+        cpiLength = (int)v;
+    }
     if (staggered) cpiLength = nStagger * (cpiLength / nStagger);
     const int nOut = cpiLength - (nTaps - 1);
     int nRows, rowLen;
@@ -1184,11 +1229,27 @@ static void export_config(void)
     double *fHz = xcalloc((size_t)nfft, sizeof(double));
     for (int k = 0; k < nfft; k++) fHz[k] = (k - nfft / 2) / (nfft * rowPri);
 
-    /* noise gain and looks of every Doppler bin: white noise (impulses) through MTI, window, FFT */
-    double *noiseGain = xcalloc((size_t)nfft, sizeof(double));
-    double *Cre = xcalloc((size_t)(nfft * nRows * nRows), sizeof(double));
-    double *Cim = xcalloc((size_t)(nfft * nRows * nRows), sizeof(double));
-    {
+    /* clutter filter only up to cfg.mti.maxRange_m: the cells beyond get the bypass weights (the last tap) */
+    double mtiMaxRange = INFINITY;
+    if (has("mti.maxRange_m") && !empty("mti.maxRange_m")) mtiMaxRange = num("mti.maxRange_m");
+    if (isnan(mtiMaxRange) || mtiMaxRange < 0)
+        fail("cfg.mti.maxRange_m must be a non-negative scalar range in metres (Inf is allowed).");
+    int bypassUsed = 0;
+    for (int i = 0; i < 2; i++)
+        for (int k = 0; k < wv[i].nRange; k++) bypassUsed |= wv[i].range_m[k] > mtiMaxRange;
+    double *bypass = xcalloc((size_t)(nStagger * nTaps), sizeof(double));
+    for (int k = 0; k < nStagger; k++) bypass[k * nTaps + nTaps - 1] = 1.0;
+
+    /* noise gain and looks of every Doppler bin: white noise (impulses) through MTI, window, FFT
+     * (pass 1: the same without the clutter filter, for the cells beyond mtiMaxRange) */
+    double *noiseGain = xcalloc((size_t)(2 * nfft), sizeof(double));
+    double *noiseGainB = noiseGain + nfft;
+    double *Cre = xcalloc((size_t)(2 * nfft * nRows * nRows), sizeof(double));
+    double *Cim = xcalloc((size_t)(2 * nfft * nRows * nRows), sizeof(double));
+    for (int pass = 0; pass < 1 + bypassUsed; pass++) {
+        const double *co = pass ? bypass : mti;
+        double *gainP = pass ? noiseGainB : noiseGain;
+        double *CreP = Cre + (size_t)pass * nfft * nRows * nRows, *CimP = Cim + (size_t)pass * nfft * nRows * nRows;
         double *y = xcalloc((size_t)(nOut > 0 ? nOut : 1), sizeof(double));
         double *Yr = xcalloc((size_t)(nRows * nfft), sizeof(double)), *Yi = xcalloc((size_t)(nRows * nfft), sizeof(double));
         double *cosT = xcalloc((size_t)nfft, sizeof(double)), *sinT = xcalloc((size_t)nfft, sizeof(double));
@@ -1197,7 +1258,7 @@ static void export_config(void)
         for (int imp = 0; imp < cpiLength; imp++) {
             for (int m = 0; m < nOut; m++) {
                 const int l = imp - m, st = m % nStagger;
-                y[m] = (l >= 0 && l < nTaps) ? mti[st * nTaps + l] : 0.0;
+                y[m] = (l >= 0 && l < nTaps) ? co[st * nTaps + l] : 0.0;
             }
             for (int r = 0; r < nRows; r++)
                 for (int i = 0; i < nfft; i++) {
@@ -1217,18 +1278,20 @@ static void export_config(void)
             for (int i = 0; i < nfft; i++) {
                 double pw = 0;
                 for (int r = 0; r < nRows; r++) pw += Yr[r * nfft + i] * Yr[r * nfft + i] + Yi[r * nfft + i] * Yi[r * nfft + i];
-                noiseGain[i] += pw / nRows;
+                gainP[i] += pw / nRows;
                 for (int r1 = 0; r1 < nRows; r1++)            /* C = Yk' * Yk */
                     for (int r2 = 0; r2 < nRows; r2++) {
                         const double ar = Yr[r1 * nfft + i], ai = -Yi[r1 * nfft + i];
                         const double br = Yr[r2 * nfft + i], bi = Yi[r2 * nfft + i];
-                        Cre[(i * nRows + r1) * nRows + r2] += ar * br - ai * bi;
-                        Cim[(i * nRows + r1) * nRows + r2] += ar * bi + ai * br;
+                        CreP[(i * nRows + r1) * nRows + r2] += ar * br - ai * bi;
+                        CimP[(i * nRows + r1) * nRows + r2] += ar * bi + ai * br;
                     }
             }
         }
         free(y); free(Yr); free(Yi); free(cosT); free(sinT);
     }
+    if (!bypassUsed) memcpy(noiseGainB, noiseGain, sizeof(double) * (size_t)nfft);
+    free(bypass);
     const double notchWidth = num("cfar.notchWidth");
     const double notchMaxRange_m = num("cfar.notchMaxRange_m");
     const int notchBins = (int)lround(notchWidth * 2 * nfft / rowLen);
@@ -1238,14 +1301,17 @@ static void export_config(void)
     {
         const int m = 2 * nRows;
         double *A = xcalloc((size_t)(m * m), sizeof(double));
-        for (int i = 0; i < nfft; i++) {
+        for (int ii = 0; ii < nfft * (1 + bypassUsed); ii++) {
+            const int i = ii % nfft;
+            const double *CreP = Cre + (size_t)(ii / nfft) * nfft * nRows * nRows;
+            const double *CimP = Cim + (size_t)(ii / nfft) * nfft * nRows * nRows;
             if (notchMaxRange_m >= maxRange && !(abs(i + 1 - zeroBin) > notchBins)) continue;
             anyTested = 1;
             double tr = 0;
             for (int r1 = 0; r1 < nRows; r1++) {
-                tr += Cre[(i * nRows + r1) * nRows + r1];
+                tr += CreP[(i * nRows + r1) * nRows + r1];
                 for (int r2 = 0; r2 < nRows; r2++) {       /* [Re -Im; Im Re]: the eigenvalues of C, twice */
-                    const double re = Cre[(i * nRows + r1) * nRows + r2], im = Cim[(i * nRows + r1) * nRows + r2];
+                    const double re = CreP[(i * nRows + r1) * nRows + r2], im = CimP[(i * nRows + r1) * nRows + r2];
                     A[r1 * m + r2] = re;
                     A[(r1 + nRows) * m + (r2 + nRows)] = re;
                     A[r1 * m + (r2 + nRows)] = -im;
@@ -1316,7 +1382,10 @@ static void export_config(void)
     double sigmaVr = empty("track.sigmaVr_mps") ? 0.4 * fabs((-fHz[1] * lambda / 2) - (-fHz[0] * lambda / 2))
                                                 : num("track.sigmaVr_mps");
     const double Rvr = sigmaVr * sigmaVr;
-    const double vrSpan = lambda / (2 * rowPri);
+    /* the plot velocity is known modulo the Doppler span on the carrier of its sub-pulse */
+    const double vrSpanPulse[2] = { wv[0].lambda_m / (2 * rowPri), wv[1].lambda_m / (2 * rowPri) };
+    const double vrSpan = !ws->enable ? vrSpanPulse[1] : !wl->enable ? vrSpanPulse[0]
+                        : vrSpanPulse[0] < vrSpanPulse[1] ? vrSpanPulse[0] : vrSpanPulse[1];
     double minSpeed = 0;
     if (has("track.minSpeedEnable") && num("track.minSpeedEnable") != 0) {
         minSpeed = num("track.minSpeed_mps");
@@ -1347,6 +1416,11 @@ static void export_config(void)
         Wave *w = &wv[i];
         char nm[32];
         const char *n = names[i];
+        pfx(nm, n, "_enable");     rec_scalar(nm, w->enable);
+        pfx(nm, n, "_fc_Hz");      rec_scalar(nm, w->fc_Hz);
+        pfx(nm, n, "_lambda_m");   rec_scalar(nm, w->lambda_m);
+        if (!w->enable) continue;
+        pfx(nm, n, "_beamU");      rec_vec(nm, w->beamU, nBeams, 1);
         pfx(nm, n, "_rxFirst");    rec_scalar(nm, w->rxFirst - 1);
         pfx(nm, n, "_rxCount");    rec_scalar(nm, w->rxCount);
         pfx(nm, n, "_ddcFirst");   rec_scalar(nm, w->ddcFirst1 - 1);
@@ -1356,7 +1430,6 @@ static void export_config(void)
         pfx(nm, n, "_taps");       rec_cvec(nm, w->tapsRe, w->tapsIm, w->nTaps);
         pfx(nm, n, "_range_m");    rec_vec(nm, w->range_m, w->nRange, 0);
         pfx(nm, n, "_delay_s");    rec_vec(nm, w->delay_s, w->nRange, 0);
-        pfx(nm, n, "_lambda_m");   rec_scalar(nm, lambda);
         pfx(nm, n, "_testFirst");  rec_scalar(nm, w->testFirst - 1);
         pfx(nm, n, "_testCount");  rec_scalar(nm, w->testLast - w->testFirst + 1 > 0 ? w->testLast - w->testFirst + 1 : 0);
         pfx(nm, n, "_waveform");   rec_scalar(nm, w->phaseCode);
@@ -1384,6 +1457,8 @@ static void export_config(void)
     rec_scalar("nfft", nfft);
     rec_vec("dopWindow", win, rowLen, 1);
     rec_vec("noiseGain", noiseGain, nfft, 0);
+    rec_scalar("mtiMaxRange_m", mtiMaxRange);
+    rec_vec("noiseGainBypass", noiseGainB, nfft, 0);
     rec_vec("dopFreq_Hz", fHz, nfft, 0);
     rec_scalar("notchBins", notchBins);
     rec_scalar("notchMaxRange_m", notchMaxRange_m);
@@ -1432,26 +1507,37 @@ static void export_config(void)
     rec_scalar("trackVrUnambiguous", maxSpeed < vrSpan / 2);
     rec_scalar("trackSigmaVr", sqrt(Rvr));
     rec_scalar("trackVrSpan", vrSpan);
+    rec_vec("trackVrSpanPulse", vrSpanPulse, 2, 0);
     rec_scalar("trackGateVr", 2 * gammaincinv(gateProb, (dim + 1) / 2.0));
     rec_scalar("trackConfirmHits", num("track.confirmHits"));
     rec_scalar("trackMaxMissTentative", num("track.maxMissTentative"));
     rec_scalar("trackMaxMiss", num("track.maxMiss"));
     rec_scalar("trackMinSpeed", minSpeed);
     rec_scalar("scanTime_s", 360.0 / rate);
-    int pmbm = 0;
+    int trkMethod = 0;                                   /* 0 EKF, 1 PMBM, 2 TOMHT */
     if (has("track.method") && !empty("track.method")) {
         const char *m = str("track.method");
-        if (same_text(m, "pmbm")) pmbm = 1;
-        else if (!same_text(m, "ekf")) fail("cfg.track.method must be 'ekf' or 'pmbm'.");
+        if (same_text(m, "pmbm")) trkMethod = 1;
+        else if (same_text(m, "tomht")) trkMethod = 2;
+        else if (!same_text(m, "ekf")) fail("cfg.track.method must be 'ekf', 'pmbm' or 'tomht'.");
     }
-    rec_scalar("trackMethod", pmbm);
+    const int pmbm = trkMethod != 0;                     /* the IMM-UKF of the PMBM (also the TOMHT) */
+    const char *tk = trkMethod == 2 ? "track.tomht" : "track.pmbm";
+#define TK(f) (snprintf(p, sizeof p, "%s.%s", tk, f), p)
+    rec_scalar("trackMethod", trkMethod);
     rec_scalar("trackAz0_deg", num("ant.az0_deg"));
-    if (pmbm) {                                          /* pmbm_setup of track_setup.m */
-        const double pd = num("track.pmbm.pd"), ps = num("track.pmbm.ps");
+    if (pmbm) {                                          /* pmbm_setup (tomht_setup) of track_setup.m */
+        const double pd = num(TK("pd")), ps = trkMethod == 2 ? 1.0 : num(TK("ps"));
         if (!(pd > 0 && pd < 1) || !(ps > 0 && ps <= 1)) fail("cfg.track.pmbm: pd must lie in (0, 1) and ps in (0, 1].");
-        const double fpps = num("track.pmbm.falsePlotsPerScan"), und = num("track.pmbm.undetectedTargets");
+        const double fpps = num(TK("falsePlotsPerScan")), und = num(TK("undetectedTargets"));
         if (!(fpps > 0) || !(und > 0)) fail("cfg.track.pmbm: falsePlotsPerScan and undetectedTargets must be positive.");
-        double vol = (wl->range_m[wl->nRange - 1] - ws->range_m[0]) * 2 * PI;
+        double rLo = INFINITY, rHi = -INFINITY;          /* the range covered by the sub-pulses that are on */
+        for (int i = 0; i < 2; i++)
+            for (int k = 0; k < wv[i].nRange; k++) {
+                if (wv[i].range_m[k] < rLo) rLo = wv[i].range_m[k];
+                if (wv[i].range_m[k] > rHi) rHi = wv[i].range_m[k];
+            }
+        double vol = (rHi - rLo) * 2 * PI;
         if (dim == 3) {
             double emax = beamElKeep[0], emin = beamElKeep[0], de = 1;
             for (int b = 1; b < nBeams; b++) { emax = beamElKeep[b] > emax ? beamElKeep[b] : emax; emin = beamElKeep[b] < emin ? beamElKeep[b] : emin; }
@@ -1462,15 +1548,16 @@ static void export_config(void)
         rec_scalar("pmbmPs", ps);
         const double ll[3] = { log(fpps / vol), log(und / vol), -log(vrSpan) };
         rec_vec("pmbmLogLambda", ll, 3, 0);
-        const double maxHyp = num("track.pmbm.maxHypotheses");
-        const double rPrune = num("track.pmbm.rPrune"), rConfirm = num("track.pmbm.rConfirm"), rDelete = num("track.pmbm.rDelete");
+        const double maxHyp = num(TK("maxHypotheses"));
+        const double rPrune = trkMethod == 2 ? 1e-9 : num(TK("rPrune")), rConfirm = trkMethod == 2 ? 1.0 : num(TK("rConfirm"));
+        const double rDelete = trkMethod == 2 ? 1e-6 : num(TK("rDelete"));
         if (!(maxHyp >= 1) || !(rPrune < rDelete && rDelete < rConfirm && rConfirm <= 1))
             fail("cfg.track.pmbm: maxHypotheses >= 1 and rPrune < rDelete < rConfirm <= 1 needed.");
         rec_scalar("pmbmMaxHyp", maxHyp);
-        const double pr[4] = { log(num("track.pmbm.hypPrune")), rPrune, rConfirm, rDelete };
+        const double pr[4] = { log(num(TK("hypPrune"))), rPrune, rConfirm, rDelete };
         rec_vec("pmbmPrune", pr, 4, 0);
         /* IMM models */
-        const MValue *mv = field("track.pmbm.imm.models", 1);
+        const MValue *mv = field(TK("imm.models"), 1);
         double models[3];
         int M = 0;
         static const char *const mnames[3] = { "cv", "ca", "ct" };
@@ -1485,7 +1572,7 @@ static void export_config(void)
         }
         if (!okModels) fail("cfg.track.pmbm.imm.models must be distinct models of 'cv', 'ca', 'ct'.");
         rec_vec("pmbmModels", models, M, 0);
-        const MValue *muv = field("track.pmbm.imm.mu0", 1);
+        const MValue *muv = field(TK("imm.mu0"), 1);
         if (muv->type != MV_NUM || muv->rows * muv->cols != M) fail("cfg.track.pmbm.imm.mu0 needs one non-negative probability per model.");
         double mu[3], musum = 0;
         for (int i = 0; i < M; i++) {
@@ -1496,27 +1583,27 @@ static void export_config(void)
         if (!(musum > 0)) fail("cfg.track.pmbm.imm.mu0 needs one non-negative probability per model.");
         for (int i = 0; i < M; i++) mu[i] /= musum;
         rec_vec("pmbmMu0", mu, M, 0);
-        double sw = M == 1 ? 0 : num("track.pmbm.imm.switchProb");
+        double sw = M == 1 ? 0 : num(TK("imm.switchProb"));
         if (!(sw >= 0 && sw < (M - 1.0) / M)) fail("cfg.track.pmbm.imm.switchProb must lie in [0, (M-1)/M) for M models.");
         rec_scalar("pmbmSwitchLambda", 1 - sw * M / (M - 1 + (M == 1)));
         const double qzA = pow(num("track.sigmaAccelZ_mps2"), 2), qzJ = pow(num("track.sigmaJerkZ_mps3"), 2);
-        const double sCv = num("track.pmbm.imm.sigmaAccelCv_mps2"), sCa = num("track.pmbm.imm.sigmaJerkCa_mps3");
-        const double sCt = num("track.pmbm.imm.sigmaAccelCt_mps2");
+        const double sCv = num(TK("imm.sigmaAccelCv_mps2")), sCa = num(TK("imm.sigmaJerkCa_mps3"));
+        const double sCt = num(TK("imm.sigmaAccelCt_mps2"));
         double qcv[3] = { sCv * sCv, sCv * sCv, qzA }, qca[3] = { sCa * sCa, sCa * sCa, qzJ }, qct[3] = { sCt * sCt, sCt * sCt, qzA };
         for (int k = dim; k < 3; k++) qcv[k] = qca[k] = qct[k] = 0;
         rec_vec("pmbmQCv", qcv, 3, 0);
         rec_vec("pmbmQCa", qca, 3, 0);
         rec_vec("pmbmQCt", qct, 3, 0);
-        const double sigmaTurn0 = PI / 180 * num("track.pmbm.imm.maxTurn_dps") / sqrt(3.0);
-        const double maxClimb = num("track.pmbm.maxClimb_mps");
-        const double turn[3] = { pow(PI / 180 * num("track.pmbm.imm.sigmaTurn_dps"), 2), sigmaTurn0,
+        const double sigmaTurn0 = PI / 180 * num(TK("imm.maxTurn_dps")) / sqrt(3.0);
+        const double maxClimb = num(TK("maxClimb_mps"));
+        const double turn[3] = { pow(PI / 180 * num(TK("imm.sigmaTurn_dps")), 2), sigmaTurn0,
                                  (maxSpeed < maxClimb ? maxSpeed : maxClimb) / sqrt(3.0) };
         rec_vec("pmbmTurn", turn, 3, 0);
         const double sigmaA0 = num("track.maxAccel_mps2") / sqrt(3.0);
         const double unused[2] = { sigmaA0 * sigmaA0, sigmaTurn0 * sigmaTurn0 };
         rec_vec("pmbmUnused", unused, 2, 0);
         const int n = 3 * dim + 1;
-        const double ua = num("track.pmbm.ukf.alpha"), ub = num("track.pmbm.ukf.beta"), uk = num("track.pmbm.ukf.kappa");
+        const double ua = num(TK("ukf.alpha")), ub = num(TK("ukf.beta")), uk = num(TK("ukf.kappa"));
         const double lam = ua * ua * (n + uk) - n;
         if (!(n + lam > 0)) fail("cfg.track.pmbm.ukf: alpha^2*(n + kappa) must be positive (n = %d).", n);
         const double wm0 = lam / (n + lam);
@@ -1525,6 +1612,18 @@ static void export_config(void)
         const double timing[2] = { num("track.gnnMaxSector_deg") / rate + 2 * cpiTime, 1 / rate };
         rec_vec("pmbmTiming", timing, 2, 0);
     }
+    if (trkMethod == 2) {                                /* tomht_setup of track_setup.m */
+        const double v[8] = { num("track.tomht.pd"), num("track.tomht.maxHypotheses"), num("track.tomht.kBest"),
+                              log(num("track.tomht.hypPrune")), num("track.tomht.nScan"), num("track.tomht.confirmScore"),
+                              num("track.tomht.deleteScore"), num("track.tomht.pDelete") };
+        const double hp = num("track.tomht.hypPrune");
+        if (!(v[1] >= 1) || !(v[2] >= 1) || !(v[4] >= 1 && v[4] <= 16) || v[4] != floor(v[4]) || !(v[6] > 0) || !(v[7] > 0 && v[7] < 1) ||
+            !(hp > 0 && hp < 1))
+            fail("cfg.track.tomht: maxHypotheses >= 1, kBest >= 1, nScan a whole number 1 ... 16, deleteScore > 0, "
+                 "pDelete and hypPrune in (0, 1) needed.");
+        rec_vec("tomhtParams", v, 8, 0);
+    }
+#undef TK
 
     if (!g_quiet) {
         printf("%d element(s), %d beam(s), DDC %d samples at %.0f MHz; short %d / long %d range cells; CPI %d "

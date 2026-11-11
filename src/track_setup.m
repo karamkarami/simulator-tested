@@ -19,8 +19,8 @@ t = cfg.track;
 p.enable = logical(t.enable);
 p.method = 'ekf';
 if isfield(t, 'method') && ~isempty(t.method), p.method = lower(t.method); end
-if ~any(strcmp(p.method, {'ekf', 'pmbm'}))
-    error('cfg.track.method must be ''ekf'' or ''pmbm''.');
+if ~any(strcmp(p.method, {'ekf', 'pmbm', 'tomht'}))
+    error('cfg.track.method must be ''ekf'', ''pmbm'' or ''tomht''.');
 end
 switch lower(t.dim)
     case 'auto', p.dim = 2 + sys.dbf.enabled;
@@ -55,7 +55,13 @@ p.useVr = logical(t.useRadialVelocity);
 sigmaVr = t.sigmaVr_mps;
 if isempty(sigmaVr), sigmaVr = 0.4 * abs(diff(sys.dop.v_mps(1:2))); end   % 0.4 Doppler bins
 p.Rvr = sigmaVr^2;
-p.vrSpan = sys.lambda / (2 * sys.dop.rowPri_s);   % the plot velocity is known modulo this
+% the plot velocity is known modulo the span of the Doppler axis on the carrier of its sub-pulse
+% (cfg.wave.<pulse>.fc_Hz); unambiguous when no target is faster than half the smallest span
+p.vrSpanPulse = struct('short', sys.wave.short.lambda_m, 'long', sys.wave.long.lambda_m);
+p.vrSpanPulse.short = p.vrSpanPulse.short / (2 * sys.dop.rowPri_s);
+p.vrSpanPulse.long  = p.vrSpanPulse.long / (2 * sys.dop.rowPri_s);
+spans = [p.vrSpanPulse.short, p.vrSpanPulse.long];
+p.vrSpan = min(spans(sys.pulseOn));
 p.vrUnambiguous = t.maxSpeed_mps < p.vrSpan / 2;
 p.gateVr = 2 * gammaincinv(t.gateProb, (p.dim + 1)/2);
 p.confirmHits = t.confirmHits;
@@ -77,6 +83,32 @@ p.az0_deg = cfg.ant.az0_deg;                       % antenna azimuth at t = 0 (l
 p.rate_dps = sys.ant.rate_dps;
 if strcmp(p.method, 'pmbm')
     p.pmbm = pmbm_setup(t, sys, p);
+elseif strcmp(p.method, 'tomht')
+    [p.pmbm, p.tomht] = tomht_setup(t, sys, p);
+end
+end
+
+function [m, q] = tomht_setup(t, sys, p)
+% Parameters of the TOMHT tracker (track_tomht.m): its IMM-UKF state estimation
+% as the PMBM (m, from cfg.track.tomht.imm / ukf) and the MHT settings q.
+s = t.tomht;
+u = s;                                             % the PMBM part of the setup: IMM-UKF, densities, timing
+u.ps = 1;  u.rPrune = 1e-9;  u.rConfirm = 1;  u.rDelete = 1e-6;  u.hypPrune = s.hypPrune;
+tt = t;  tt.pmbm = u;
+m = pmbm_setup(tt, sys, p);
+q.pd = s.pd;
+q.logLambdaC = m.logLambdaC;  q.logLambdaU = m.logLambdaU;  q.logVrDensity = m.logVrDensity;
+q.maxHyp = s.maxHypotheses;
+q.kBest = s.kBest;
+q.logHypPrune = log(s.hypPrune);
+q.nScan = s.nScan;
+q.confirmScore = s.confirmScore;
+q.deleteScore = s.deleteScore;
+q.pDelete = s.pDelete;
+if ~(q.maxHyp >= 1) || ~(q.kBest >= 1) || ~(q.nScan >= 1 && q.nScan <= 16) || q.nScan ~= round(q.nScan) || ~(q.deleteScore > 0) || ...
+        ~(q.pDelete > 0 && q.pDelete < 1) || ~(s.hypPrune > 0 && s.hypPrune < 1)
+    error(['cfg.track.tomht: maxHypotheses >= 1, kBest >= 1, nScan a whole number 1 ... 16, deleteScore > 0, ' ...
+           'pDelete and hypPrune in (0, 1) needed.']);
 end
 end
 
@@ -93,7 +125,8 @@ if ~(s.falsePlotsPerScan > 0) || ~(s.undetectedTargets > 0)
 end
 % measurement space of a plot: range x azimuth (x elevation) (x radial velocity); the
 % false plots and the undetected targets are uniform in it
-rCover = [sys.wave.short.range_m(1), sys.wave.long.range_m(end)];
+rAll = [sys.wave.short.range_m(:); sys.wave.long.range_m(:)];   % (the sub-pulses that are on)
+rCover = [min(rAll), max(rAll)];
 vol = diff(rCover) * 2*pi;                         % [m rad]
 if p.dim == 3
     el = sys.dbf.beamEl_deg(:);
