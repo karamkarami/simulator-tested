@@ -506,7 +506,10 @@ The panel on the right of the window has:
   with the current `export_receiver_config.m`). *Apply* sends the value in
   the field to the processing thread, which uses it from the next CPI update
   on and reports it back (also printed on the console); *Default* returns to
-  the value of the configuration.
+  the value of the configuration. The field does not go below the threshold
+  of `cfg.cfar.maxPfa` (record `alphaMin`, default Pfa 1e-3); a lower
+  `--cfar-threshold` is raised to it. Older configuration files without
+  `alphaMin` have no limit.
 * **Mean time per PRI [us]** (bottom right, above the help): the mean
   time per PRI over the PRIs since the previous panel update (at least 100;
   the last line says how many), so a change such as a lower CFAR threshold

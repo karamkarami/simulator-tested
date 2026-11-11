@@ -31,6 +31,7 @@ want = struct('raw', '', 'beam', 1, 'rd', false);
 if ~ishandle(ppi.fig), return; end                       % the window was closed
 dB = ppi_callbacks('takeCfar', ppi.fig);
 if ~isempty(dB)
+    if isfield(sys.cfar, 'alphaMin'), dB = max(dB, 10*log10(sys.cfar.alphaMin)); end   % cfg.cfar.maxPfa
     sys.cfar.alpha = 10^(dB/10);
     if sys.cfg.console.enable
         fprintf('  CFAR threshold set to %.2f dB (Pfa %.1e) at t = %.3f s\n', dB, ...

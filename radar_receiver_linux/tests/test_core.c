@@ -635,6 +635,11 @@ static void test_cfar_pfa(const char *configPath)
                cfg.alpha, 10 * log10(cfg.alpha), cfg.nTrain, cfg.nLooks, pfa);
         CHECK(fabs(pfa / 1e-8 - 1.0) < 1e-3, "Pfa of the configured threshold %.4e (expected 1e-8)", pfa);
         CHECK(cfar_pfa(&cfg, cfg.alpha * 2.0) < pfa, "a higher threshold has a lower Pfa");
+        if (cfg.alphaMin > 0.0) {                      /* lowest threshold: cfg.cfar.maxPfa = 1e-3 */
+            const double pmax = cfar_pfa(&cfg, cfg.alphaMin);
+            CHECK(fabs(pmax / 1e-3 - 1.0) < 1e-3 && cfg.alphaMin < cfg.alpha,
+                  "Pfa of the lowest threshold %.4e (expected 1e-3)", pmax);
+        }
     } else {
         printf("configuration without nLooks: Pfa check skipped\n");
     }

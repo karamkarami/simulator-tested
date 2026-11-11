@@ -374,6 +374,19 @@ static void print_timing(const App *app, const Processor *proc, const UdpInput *
                 "with export_receiver_config.m)\n", (unsigned long long)t.rejected);
 }
 
+/* Sets the CFAR threshold [dB], not below the threshold of cfg.cfar.maxPfa
+ * (cfg.alphaMin). */
+static void set_cfar_threshold(App *app, Processor *proc, double dB)
+{
+    double alpha = pow(10.0, dB / 10.0);
+    if (alpha < app->cfg.alphaMin) {
+        alpha = app->cfg.alphaMin;
+        fprintf(stderr, "CFAR threshold %.2f dB is below the lowest threshold %.2f dB (cfg.cfar.maxPfa): limited to it\n",
+                dB, 10.0 * log10(alpha));
+    }
+    processor_set_cfar_alpha(proc, alpha);
+}
+
 /* Prints the CFAR threshold in use and shows it in the PPI. */
 static void report_cfar(App *app, const Processor *proc, double default_dB, int changed)
 {
@@ -388,7 +401,8 @@ static void report_cfar(App *app, const Processor *proc, double default_dB, int 
 #ifdef RADAR_WITH_QT
     if (app->opt.ppi) {
         const double t0 = now_seconds();
-        ppi_post_cfar_threshold(dB, pfa, default_dB);
+        ppi_post_cfar_threshold(dB, pfa, default_dB,
+                                app->cfg.alphaMin > 0.0 ? 10.0 * log10(app->cfg.alphaMin) : 0.0);
         app->display_ms += ms_since(t0);
     }
 #endif
@@ -448,7 +462,7 @@ static int worker(void *arg)
 #endif
     const double default_dB = 10.0 * log10(app->cfg.alpha);
     if (!isnan(app->opt.cfarThreshold_dB))
-        processor_set_cfar_alpha(proc, pow(10.0, app->opt.cfarThreshold_dB / 10.0));
+        set_cfar_threshold(app, proc, app->opt.cfarThreshold_dB);
     report_cfar(app, proc, default_dB, 0);
     /* live stream: a full queue drops PRIs; replay: the reader waits */
     const int live = app->opt.replayPath == NULL;
@@ -513,7 +527,7 @@ static int worker(void *arg)
         const int request = app->opt.ppi && ppi_take_cfar_request(&request_dB);
         if (app->opt.ppi) app->display_ms += ms_since(tReq);
         if (request) {                                         /* Apply in the PPI */
-            processor_set_cfar_alpha(proc, pow(10.0, request_dB / 10.0));
+            set_cfar_threshold(app, proc, request_dB);
             report_cfar(app, proc, default_dB, 1);
         }
 #endif

@@ -203,13 +203,15 @@ cfg.mti.maxRange_m = Inf;      % the clutter filter is applied to the range cell
 % from pfa (and the training cells, the type and the looks: cfar_alpha.m),
 % unless threshold_dB is given: alpha = 10^(threshold_dB/10). The PPI
 % threshold field changes the threshold of the selected type and window
-% while the radar runs.
+% while the radar runs, not below the threshold of cfg.cfar.maxPfa.
 % Doppler is circular, so the window is always complete. At the first and
 % last range cells of a sub-pulse the range window is shifted inwards (same
 % number of training cells, the cell under test is no longer in the middle),
 % so every range cell can be tested.
 cfg.cfar.type   = 'ca';   % 'ca', 'go', 'so' or 'os'
 cfg.cfar.method = '2d';   % '2d', 'range' or 'doppler'
+cfg.cfar.maxPfa = 1e-3;   % largest Pfa allowed (per cell and CPI): the lowest threshold that can be set
+                          % (pfa / threshold_dB of the window and the PPI threshold field, MATLAB and C)
 cfg.cfar.osRank = 0.9;    % OS: rank of the statistic as a fraction of the training cells (0 ... 1]. The
                           % textbook 0.75 suits isolated interfering targets; here the eclipsed long-pulse
                           % echo of a near target (short-pulse range, below 22.5 km) smears over the next

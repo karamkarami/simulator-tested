@@ -1346,6 +1346,12 @@ static void export_config(void)
              cfarType == 1 ? "go" : "so", method);
     cfar_quadrature(nLooks);
     const double alpha = isnan(thr_dB) ? cfar_alpha(pfa, &det) : pow(10.0, thr_dB / 10.0);
+    const double maxPfa = num_or("cfar.maxPfa", 1e-3);    /* lowest threshold: the factor of maxPfa */
+    if (!(maxPfa > 0 && maxPfa < 1)) fail("cfg.cfar.maxPfa must be a scalar in (0, 1).");
+    const double alphaMin = cfar_alpha(maxPfa, &det);
+    if (alpha < alphaMin * (1 - 1e-9))
+        fail("CFAR threshold %.2f dB (Pfa %.2e) is below the lowest threshold %.2f dB of cfg.cfar.maxPfa = %.1e.",
+             10 * log10(alpha), cfar_pfa(alpha, &det), 10 * log10(alphaMin), maxPfa);
     double noiseScale = 1;                               /* mean of the statistic for noise of mean 1 */
     if (cfarType != 0) {
         noiseScale = 0;
@@ -1470,6 +1476,7 @@ static void export_config(void)
     rec_scalar("trainDoppler", trainD);
     rec_scalar("nTrain", nTrain);
     rec_scalar("alpha", alpha);
+    rec_scalar("alphaMin", alphaMin);
     rec_scalar("cfarType", cfarType);
     rec_scalar("cfarNHalf", det.nHalf);
     rec_scalar("cfarOsK", det.osK);

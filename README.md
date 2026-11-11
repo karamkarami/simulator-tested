@@ -958,7 +958,11 @@ The panel on the right has:
   selected CFAR detector and window (`cfg.cfar.type`, `cfg.cfar.method`). *Apply* hands the value to the
   running simulation at its next display update (`ppi_update` returns `sys`
   with the new `sys.cfar.alpha`), from then on every CFAR uses it. *Default*
-  goes back to the value of the method's Pfa. The line below shows the
+  goes back to the value of the method's Pfa. The threshold cannot be set
+  below the factor of `cfg.cfar.maxPfa` (default 1e-3, the largest allowed
+  Pfa per cell and CPI): a lower value is raised to it; a configured
+  `pfa` / `threshold_dB` beyond it stops `setup_radar` with a message
+  (exported as `alphaMin`). The line below shows the
   method, the threshold in use and its false alarm probability (`cfar_pfa.m`,
   the inverse of `cfar_alpha.m`, for every detector), e.g. `CA 2-D: 12.79 dB (Pfa 1.0e-08)`.
 * Reset view, Clear display, Remove data tips, Pause, and **Save screenshot

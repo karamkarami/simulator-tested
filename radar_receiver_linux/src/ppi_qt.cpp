@@ -187,6 +187,7 @@ struct PlotMark {
 struct CfarState {
     bool     known = false;     /* the worker reported its threshold            */
     double   dB = 0.0, pfa = NAN, default_dB = NAN;
+    double   min_dB = 0.0;      /* lowest threshold (cfg.cfar.maxPfa)            */
     uint64_t serial = 0;        /* counts the reports                           */
     bool     requested = false; /* Apply pressed, not yet taken by the worker   */
     double   request_dB = 0.0;
@@ -2581,6 +2582,8 @@ public:
         cfar_->setEnabled(true);
         apply_->setEnabled(true);
         default_->setEnabled(std::isfinite(c.default_dB));
+        /* not below the threshold of cfg.cfar.maxPfa (rounded up to the shown 0.01 dB) */
+        cfar_->setMinimum(std::max(0.0, std::ceil(c.min_dB * 100.0 - 1e-6) / 100.0));
         cfar_->setValue(c.dB);
         cfarInfo_->setText(std::isfinite(c.pfa)
                                ? QStringLiteral("%1: %2 dB (Pfa %3)").arg(detName_).arg(c.dB, 0, 'f', 2).arg(c.pfa, 0, 'e', 1)
@@ -2786,7 +2789,7 @@ extern "C" void ppi_post_timing(const ProcessorTiming *timing, const char *detec
     s.timingSerial++;
 }
 
-extern "C" void ppi_post_cfar_threshold(double threshold_dB, double pfa, double default_dB)
+extern "C" void ppi_post_cfar_threshold(double threshold_dB, double pfa, double default_dB, double min_dB)
 {
     Shared &s = shared();
     std::lock_guard<std::mutex> lock(s.mutex);
@@ -2794,6 +2797,7 @@ extern "C" void ppi_post_cfar_threshold(double threshold_dB, double pfa, double 
     s.cfar.dB = threshold_dB;
     s.cfar.pfa = pfa;
     s.cfar.default_dB = default_dB;
+    s.cfar.min_dB = min_dB;
     s.cfar.serial++;
 }
 

@@ -559,6 +559,19 @@ else
     sys.cfar.alpha = 10^(c.threshold_dB/10);
 end
 sys.cfar.pfa = cfar_pfa(sys.cfar.alpha, sys.cfar, sys.dop.nLooks);   % of the threshold in use
+% lowest threshold: the factor of the largest allowed Pfa (cfg.cfar.maxPfa)
+maxPfa = 1e-3;
+if isfield(cfg.cfar, 'maxPfa') && ~isempty(cfg.cfar.maxPfa), maxPfa = cfg.cfar.maxPfa; end
+if ~isscalar(maxPfa) || ~isreal(maxPfa) || ~(maxPfa > 0 && maxPfa < 1)
+    error('cfg.cfar.maxPfa must be a scalar in (0, 1).');
+end
+sys.cfar.maxPfa = maxPfa;
+sys.cfar.alphaMin = cfar_alpha(maxPfa, sys.cfar, sys.dop.nLooks);
+if sys.cfar.alpha < sys.cfar.alphaMin * (1 - 1e-9)
+    error(['CFAR threshold %.2f dB (Pfa %.2e) is below the lowest threshold %.2f dB of ' ...
+           'cfg.cfar.maxPfa = %.1e.'], 10*log10(sys.cfar.alpha), sys.cfar.pfa, ...
+          10*log10(sys.cfar.alphaMin), maxPfa);
+end
 % mean of the statistic for noise of mean 1: the noise estimate of a cell is statistic / noiseScale
 sys.cfar.noiseScale = 1;
 if ~strcmp(c.type, 'ca')

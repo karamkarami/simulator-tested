@@ -184,12 +184,18 @@ switch action
         S = redraw(S);
     case 'cfar'
         dB = varargin{1};
-        if isscalar(dB) && isfinite(dB) && dB >= 0 && dB <= 50
+        minDb = cfar_min_db(S.sys);
+        if isscalar(dB) && isfinite(dB) && dB <= 50
+            note = '';
+            if dB < minDb
+                dB = minDb;                                 % not below the threshold of cfg.cfar.maxPfa
+                note = sprintf(' (lowest: Pfa %.0e)', S.sys.cfar.maxPfa);
+            end
             S.opt.cfarRequest_dB = dB;
             set(S.h.ui.cfar, 'String', sprintf('%.2f', dB));
-            set(S.h.ui.cfarInfo, 'String', sprintf('%.2f dB requested ...', dB));
+            set(S.h.ui.cfarInfo, 'String', sprintf('%.2f dB requested%s ...', dB, note));
         else
-            set(S.h.ui.cfarInfo, 'String', 'enter 0 ... 50 dB');
+            set(S.h.ui.cfarInfo, 'String', sprintf('enter %.2f ... 50 dB', minDb));
         end
     case 'takeCfar'
         out = S.opt.cfarRequest_dB;
@@ -1040,4 +1046,10 @@ function s = compact_label(s)
 s = strrep(s, '-D', 'D');
 if numel(s) > 15, s = strrep(strrep(s, ' range', ' rng'), ' Doppler', ' Dop'); end
 s = s(1:min(end, 15));
+end
+
+function dB = cfar_min_db(sys)
+% lowest CFAR threshold [dB]: the factor of cfg.cfar.maxPfa (rounded up to the shown 0.01 dB)
+dB = 0;
+if isfield(sys.cfar, 'alphaMin'), dB = max(0, ceil(10*log10(sys.cfar.alphaMin) * 100 - 1e-6) / 100); end
 end

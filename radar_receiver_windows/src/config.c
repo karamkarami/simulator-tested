@@ -323,6 +323,10 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             cfg->cfarNoiseScale = (r && r->rows * r->cols >= 1) ? r->data[0] : 1.0;
         }
         cfg->alpha        = get_scalar(&rs, "alpha");
+        {                                              /* optional: no limit in older files */
+            const Record *r = find_optional(&rs, "alphaMin");
+            cfg->alphaMin = (r && r->rows * r->cols >= 1 && r->data[0] > 0.0) ? r->data[0] : 0.0;
+        }
         cfg->nLooks       = get_scalar(&rs, "nLooks");
         cfg->sidelobeMargin_dB = get_scalar(&rs, "sidelobeMargin_dB");
         {                                              /* optional: median in older files */

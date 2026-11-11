@@ -124,6 +124,8 @@ typedef struct {
     double  cfarNoiseScale;  /* mean of the statistic for unit noise (noise estimate =
                                 statistic / this; 1 for CA)                            */
     double  alpha;         /* CFAR threshold factor (design value from cfg.cfar.pfa)  */
+    double  alphaMin;      /* lowest factor that can be set (cfg.cfar.maxPfa; optional
+                              in the file: 0)                                          */
     double  nLooks;        /* looks of the noise power in a cell (for cfar_pfa)       */
     double  sidelobeMargin_dB;
     int     snrNoise;      /* SNR = power / noise - 1 of the reports with the noise of
@@ -442,7 +444,7 @@ void ppi_post_detections(const Detection *dets, int n, double arcWidth_deg);
  * (and its Pfa, NaN if unknown; default_dB = the design value for the Default
  * button); ppi_take_cfar_request() returns 1 and the new threshold when the
  * user pressed Apply (or Default) since the last call. */
-void ppi_post_cfar_threshold(double threshold_dB, double pfa, double default_dB);
+void ppi_post_cfar_threshold(double threshold_dB, double pfa, double default_dB, double min_dB);
 int  ppi_take_cfar_request(double *threshold_dB);
 /* Display mode at the start of ppi_run (call before it): plots after the plot
  * extractor (default), CFAR detections before it, both, or the raw video. */

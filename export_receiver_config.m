@@ -97,6 +97,7 @@ r{end+1} = {'guardDoppler', sys.cfar.guardDoppler};
 r{end+1} = {'trainDoppler', sys.cfar.trainDoppler};
 r{end+1} = {'nTrain', sys.cfar.nTrain};
 r{end+1} = {'alpha', sys.cfar.alpha};               % threshold factor of the selected detector
+r{end+1} = {'alphaMin', sys.cfar.alphaMin};         % lowest factor (cfg.cfar.maxPfa)
 r{end+1} = {'cfarType', find(strcmp(sys.cfar.type, {'ca', 'go', 'so', 'os'})) - 1};   % 0 CA, 1 GO, 2 SO, 3 OS
 r{end+1} = {'cfarNHalf', sys.cfar.nHalf};            % GO, SO: training cells per half window
 r{end+1} = {'cfarOsK', sys.cfar.osK};                % OS: rank of the statistic

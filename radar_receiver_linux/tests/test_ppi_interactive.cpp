@@ -232,7 +232,7 @@ int main(int argc, char **argv)
     win.show();
     win.refresh();
     check(!win.applyButton()->isEnabled() && win.cfarInfo().contains("waiting"), "CFAR field waits for the processing");
-    ppi_post_cfar_threshold(12.79, 1.0e-8, 12.79);
+    ppi_post_cfar_threshold(12.79, 1.0e-8, 12.79, 9.0);
     win.refresh();
     check(win.applyButton()->isEnabled() && std::fabs(win.cfarBox()->value() - 12.79) < 1e-9 &&
           win.cfarInfo().contains(": 12.79 dB") && win.cfarInfo().contains("1.0e-08"),
@@ -244,7 +244,9 @@ int main(int argc, char **argv)
     check(ppi_take_cfar_request(&req) == 1 && req == 17.5 && win.cfarInfo().contains("requested"),
           "Apply sends the new threshold to the processing");
     check(ppi_take_cfar_request(&req) == 0, "the request is taken once");
-    ppi_post_cfar_threshold(17.5, 2e-20, 12.79);
+    win.cfarBox()->setValue(5.0);
+    check(std::fabs(win.cfarBox()->value() - 9.0) < 1e-9, "the threshold field stops at the threshold of cfg.cfar.maxPfa");
+    ppi_post_cfar_threshold(17.5, 2e-20, 12.79, 9.0);
     win.refresh();
     check(win.cfarInfo().contains(": 17.50 dB"), "the applied threshold is shown");
     win.defaultButton()->click();

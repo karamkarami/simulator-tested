@@ -115,7 +115,7 @@ static int worker(void *arg)
         const double t = (azU - AZ0_DEG) / RATE_DPS;
         const uint32_t scan = (uint32_t)floor((azU - AZ0_DEG) / 360.0) + 1;
         ppi_post_antenna(fmod(azU, 360.0), t, scan);
-        if (k == 0) ppi_post_cfar_threshold(12.8, 1e-8, 12.8);
+        if (k == 0) ppi_post_cfar_threshold(12.8, 1e-8, 12.8, 9.0);
         double request_dB;
         if (ppi_take_cfar_request(&request_dB)) ++*posted;   /* nobody pressed Apply: must not happen */
         for (int i = 0; i < N_PLOTS; ++i) {                  /* detections while the antenna passes */
@@ -181,7 +181,7 @@ int main(int argc, char **argv)
     ppi_post_antenna(10.0, 0.0, 1);
     post_plot(&kPlots[0], 0.0, 0);
     ppi_post_detections(NULL, 0, 0.1);
-    ppi_post_cfar_threshold(13.0, NAN, 13.0);
+    ppi_post_cfar_threshold(13.0, NAN, 13.0, 0.0);
 
     printf(failures ? "FAIL\n" : "PASS\n");
     return failures ? 1 : 0;
