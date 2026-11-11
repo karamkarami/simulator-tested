@@ -27,7 +27,8 @@
  *   1. targets (radar equation, Swerling RCS per antenna pass, maneuvers),
  *      ground clutter of the terrain map (land, mountains, hills, desert, sea;
  *      shadowing; CNR -> sigma0), transmitter leakage, STC, thermal noise on
- *      the IF of every sub-pulse (cfg.wave.<pulse>.enable / fc_Hz), receiver
+ *      the 30 MHz IF (receiver LO tuned to the carrier of every sub-pulse,
+ *      cfg.wave.<pulse>.enable / fc_Hz), receiver
  *      gain, 16-bit ADC with its noise (ENOB)
  *   2. raw ADC data -> <rawFolder>/pulse_<n>.mat (adcData int16 [nAdc x nElements], hdr)
  *   3. fixed-point DDC (2 or 4 MHz) -> <ddcFolder>/ddc_<n>.mat (I, Q int16 [nDdc x nElements], hdr)
@@ -367,7 +368,7 @@ static double mod360(double a) { double r = fmod(a, 360.0); if (r < 0) r += 360.
 typedef struct {
     const char *name;
     int    enable, phaseCode;
-    double fc, lambda, fIF, radarConst;
+    double fc, lambda, fIF, fLO, radarConst;
     double width, bw, chip, tTx;
     int    nCode;
     double *codeRe, *codeIm;
@@ -393,6 +394,7 @@ typedef struct {
     double fsOut, fs1;
     int    nAdc, nDdc;
     double *cosNco, *msinNco;        /* 16-bit NCO values per ADC sample */
+    double *loShift[2];              /* complex LO correction of sub-pulse p per ADC sample, NULL = 1 */
     float  *stc;                     /* STC amplitude gain per ADC sample */
     unsigned char *rxSample;         /* receive interval samples (ADC overload) */
     int    nRx;
@@ -705,14 +707,11 @@ static void setup(Radar *s)
         snprintf(p, sizeof p, "wave.%s.tTx_s", names[i]);         w->tTx = num(p);
         snprintf(p, sizeof p, "wave.%s.compression", names[i]);
         w->compMismatch = same_text(str_or(p, "matched"), "mismatch");
-        if (!(w->fc > 0) || !isfinite(w->fc)) fail("cfg.wave.%s.fc_Hz must be a positive carrier frequency [Hz] (or [] = cfg.fc).", names[i]);
+        if (!(w->fc > s->fIF) || !isfinite(w->fc))
+            fail("cfg.wave.%s.fc_Hz must be a carrier frequency [Hz] above cfg.adc.fIF_Hz (or [] = cfg.fc).", names[i]);
         w->lambda = s->c / w->fc;
-        w->fIF = s->fIF + (w->fc - s->fc);
-        const double bwHalf = 0.5 * (w->phaseCode ? 1.0 / w->chip : w->bw);
-        if (w->enable && (w->fIF - bwHalf <= 0 || w->fIF + bwHalf >= s->fs / 2))
-            fail("cfg.wave.%s.fc_Hz = %.3f MHz puts the sub-pulse on the IF %.3f MHz: it must lie inside (0, %.1f MHz) "
-                 "with its bandwidth (LO = cfg.fc - cfg.adc.fIF_Hz = %.3f MHz).", names[i], w->fc / 1e6, w->fIF / 1e6,
-                 s->fs / 2e6, s->fLO / 1e6);
+        w->fIF = s->fIF;              /* every sub-pulse on the same IF: the LO follows its carrier */
+        w->fLO = w->fc - s->fIF;
         w->radarConst = s->radarConst * pow(w->lambda / s->lambda, 2);
         anyCode |= w->phaseCode;
     }
@@ -769,6 +768,8 @@ static void setup(Radar *s)
     s->cosNco = xcalloc((size_t)s->nAdc, sizeof(double));
     s->msinNco = xcalloc((size_t)s->nAdc, sizeof(double));
     s->stc = xcalloc((size_t)s->nAdc, sizeof(float));
+    if (ws->enable && wl->enable && ws->fc != wl->fc)
+        for (int p = 0; p < 2; p++) s->loShift[p] = xcalloc((size_t)2 * s->nAdc, sizeof(double));
     s->rxSample = xcalloc((size_t)s->nAdc, 1);
     s->stcOn = num("rx.stc.enable") != 0;
     int cr = 0, cc = 0, lr = 0, lc = 0;
@@ -784,10 +785,16 @@ static void setup(Radar *s)
     }
     for (int k = 0; k < s->nAdc; k++) {
         const double t = k / s->fs;
-        double f = ws->enable ? ws->fIF : wl->fIF;
-        if (ws->enable && wl->enable && t >= wl->tTx) f = wl->fIF;
-        s->cosNco[k] = round(cos(2 * PI * f * t) * 32768.0) / 32768.0;
-        s->msinNco[k] = round(-sin(2 * PI * f * t) * 32768.0) / 32768.0;
+        s->cosNco[k] = round(cos(2 * PI * s->fIF * t) * 32768.0) / 32768.0;
+        s->msinNco[k] = round(-sin(2 * PI * s->fIF * t) * 32768.0) / 32768.0;
+        if (s->loShift[0]) {          /* LO of the short pulse, from the long transmission on that of the long */
+            const double lo = t >= wl->tTx ? wl->fLO : ws->fLO;
+            for (int p = 0; p < 2; p++) {
+                const double ph = -2 * PI * (lo - s->w[p].fLO) * (t - s->w[p].tTx);
+                s->loShift[p][2 * k] = cos(ph);
+                s->loShift[p][2 * k + 1] = sin(ph);
+            }
+        }
         const int inShort = ws->enable && t >= ws->tTx + ws->width && t < shortEnd;
         const int inLong = wl->enable && t >= wl->tTx + wl->width;
         s->rxSample[k] = (unsigned char)(inShort || inLong);
@@ -1459,9 +1466,15 @@ static double simulate_pri(const Radar *s, const Clutter *C, const Target *tg, i
                 const double t = (n - 1) / fs, tau = 2 * (R + vr * t) / c;
                 double er, ei;
                 envelope(w, t - w->tTx - tau0, &er, &ei);
-                const double ph = 2 * PI * (w->fIF * (t - w->tTx - tau) - s->fLO * tau);
+                const double ph = 2 * PI * (w->fIF * (t - w->tTx - tau) - w->fLO * tau);
                 const double cr = cos(ph), ci = sin(ph);
-                const double zr = amp * (er * cr - ei * ci), zi = amp * (er * ci + ei * cr);
+                double zr = amp * (er * cr - ei * ci), zi = amp * (er * ci + ei * cr);
+                if (s->loShift[p]) {  /* received while the LO is that of the other sub-pulse */
+                    const double lr = s->loShift[p][2 * (n - 1)], li = s->loShift[p][2 * (n - 1) + 1];
+                    const double z0 = zr;
+                    zr = z0 * lr - zi * li;
+                    zi = z0 * li + zi * lr;
+                }
                 for (int ch = 0; ch < nCh; ch++) x[(size_t)ch * nAdc + n - 1] += (float)(zr * vre[ch] - zi * vim[ch]);
             }
         }
@@ -1477,7 +1490,15 @@ static double simulate_pri(const Radar *s, const Clutter *C, const Target *tg, i
                 for (int ch = 0; ch < nCh; ch++) {
                     const double sr = st[2 * (ch * C->G + g)], si = st[2 * (ch * C->G + g) + 1];
                     float *xr = x + (size_t)ch * nAdc;
-                    for (int k = 0; k < nAdc; k++) xr[k] += (float)(xc[2 * k] * sr - xc[2 * k + 1] * si);
+                    const double *ls = nPages == 2 ? s->loShift[pg] : NULL;
+                    if (!ls)
+                        for (int k = 0; k < nAdc; k++) xr[k] += (float)(xc[2 * k] * sr - xc[2 * k + 1] * si);
+                    else
+                        for (int k = 0; k < nAdc; k++) {
+                            const double ar = xc[2 * k] * ls[2 * k] - xc[2 * k + 1] * ls[2 * k + 1];
+                            const double ai = xc[2 * k] * ls[2 * k + 1] + xc[2 * k + 1] * ls[2 * k];
+                            xr[k] += (float)(ar * sr - ai * si);
+                        }
                 }
             }
         }

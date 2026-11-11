@@ -6,7 +6,7 @@ function x = generate_rx_signal(sys, targets, t_s, azAnt_deg, clutterIf)
 %   the antenna at azAnt_deg:
 %     1. every target: position from its motion, received power from the
 %        radar equation (RCS of this antenna pass, Swerling 1), echo of both
-%        sub-pulses on the 30 MHz IF with the element phases
+%        sub-pulses on the 30 MHz IF (LO of each sub-pulse) with the element phases
 %     2. ground clutter (clutterIf from clutter_signal.m, [] = none: one
 %        column per elevation group, steering vectors sys.clutterSteer)
 %     3. transmitter leakage while a pulse is transmitted (isolation)
@@ -49,10 +49,13 @@ for i = 1:numel(targets)
         n  = (first:last)';
         t  = sys.tAdc(n);                           % time inside the PRI
         tau = 2*(R + vr*t)/c;                       % delay of every sample (intra-pulse Doppler)
-        % RF echo (carrier wv.fc_Hz) mixed down by the LO: the IF of the sub-pulse plus the
-        % carrier phase -2*pi*fLO*tau (its Doppler comes from tau: fc_Hz = fLO + fIF_Hz)
+        % RF echo (carrier wv.fc_Hz) mixed down by the LO of the sub-pulse: the IF plus the
+        % carrier phase -2*pi*fLO*tau (its Doppler comes from tau: fc_Hz = fLO_Hz + fIF_Hz)
         echo = amp * waveform_envelope(wv, t - wv.tTx_s - tau0) ...
-             .* exp(1j*2*pi*(wv.fIF_Hz*(t - wv.tTx_s - tau) - sys.fLO*tau));
+             .* exp(1j*2*pi*(wv.fIF_Hz*(t - wv.tTx_s - tau) - wv.fLO_Hz*tau));
+        if ~isempty(sys.rx.loShift)                 % received while the LO is that of the other pulse
+            echo = echo .* double(sys.rx.loShift(n, p));
+        end
         x(n, :) = x(n, :) + real(single(echo) * single(v).');
     end
 end
@@ -63,7 +66,9 @@ if ~isempty(clutterIf)
         x = x + real(single(clutterIf) * single(sys.wave.short.clutterSteer).');
     else                                           % sub-pulses on different carriers
         for p = 1:2
-            x = x + real(single(clutterIf(:, :, p)) * single(sys.wave.(names{p}).clutterSteer).');
+            cp = single(clutterIf(:, :, p));
+            if ~isempty(sys.rx.loShift), cp = cp .* sys.rx.loShift(:, p); end
+            x = x + real(cp * single(sys.wave.(names{p}).clutterSteer).');
         end
     end
 end

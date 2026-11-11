@@ -455,11 +455,15 @@ there, at the same beam and Doppler, behind very strong far targets.
   short-pulse receive window lasts to `cfg.rx.maxRange_m` (the record ends
   after it: 4.2 - 80.6 km with 1021 cells), without the short pulse the long
   pulse covers 22.9 - 80.6 km (blind below). `fc_Hz = []` is `cfg.fc`; another
-  carrier keeps the receiver LO at `cfg.fc - cfg.adc.fIF_Hz`, so the
-  sub-pulse is on the IF `fIF_Hz + (fc_Hz - cfg.fc)` (it must lie inside
-  0 ... 60 MHz with its bandwidth; e.g. 165 / 175 MHz: 25 / 35 MHz). The DDC
-  NCO switches to the IF of the long pulse when it is transmitted (no DDC
-  sample of a receive window straddles the switch). Its wavelength sets its
+  carrier keeps the IF at `cfg.adc.fIF_Hz` (30 MHz at the DDC input for both
+  sub-pulses) and tunes the receiver LO instead: `fc_Hz - fIF_Hz` of the
+  short pulse, switched to that of the long pulse when the long pulse is
+  transmitted (e.g. 165 / 175 MHz: LO 135 / 145 MHz; `wv.fLO_Hz`,
+  `sys.rx.fLO_Hz`). The DDC NCO stays at 30 MHz (no DDC sample of a receive
+  window straddles the switch). An echo received with the LO of the other
+  sub-pulse lands on `30 MHz + (fc_p - fc_other)` (the short-pulse echo of a
+  far target in the long window: 20 MHz), where the DDC filters reject it when
+  the carriers are more than the bandwidth apart. Its wavelength sets its
   received power (radar constant ~ lambda^2), element phases, clutter
   Doppler and clutter power, the radial velocity axis of its plots
   (`wv.lambda_m`, `wv.v_mps`) and the span of its Doppler axis in the
@@ -560,7 +564,7 @@ there, at the same beam and Doppler, behind very strong far targets.
   The unfiltered cells get their own noise gain (`sys.dop.noiseGainBypass`,
   flat, 1 with the fixed PRF) so the noise floor stays flat across the limit;
   the CFAR looks are the smaller of both. Clutter beyond the limit is not
-  cancelled: use `cfg.cfar.notchMaxRange_m` (the zero-Doppler bins) together
+  cancelled: use `cfg.cfar.notchMaxRange_km` (the zero-Doppler bins) together
   with it. Exported as `mtiMaxRange_m`, `noiseGainBypass`; the C receiver
   does the same (`processor.c`, test `core` / `core_carriers`).
 * **Doppler:** fixed PRF: 3-pulse canceller (112 outputs), Hamming window
@@ -1176,7 +1180,7 @@ budget.
 | `test_tracker_pmbm` | PMBM tracker with IMM-UKF on synthetic plots (target positions from `target_state`, plots at the antenna looks, errors of `cfg.track`, folded radial velocity), 3-D and 2-D, against the EKF on the same plots: six targets with 8 false plots per scan (fixed and staggered PRF): one confirmed track per target, no false track; a 4 deg/s turn: one track, smaller position error than the EKF, CT dominant in the turn; a 6 m/s^2 acceleration: one track, CA dominant, smaller velocity error than the EKF; Pd 0.7 with 30 false plots per scan: every target detected in the last 3 scans tracked, at most one false track; two targets 200 m apart and two crossing targets: no merge, no swap; track termination after the missed scans; speed gate; the 13 challenge targets with detections from the SNR budget: every target detected in the last 3 scans tracked, no false track |
 | `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA, with and without the radial velocity: one confirmed track per target, close to it, no false track; the radial velocity lowers the velocity error after two scans; staggered PRF (folded plot velocities): the track radial velocity is unfolded; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |
 | `test_peak_interpolation` | peak interpolation: a peak that is Gaussian in Doppler and across the beams gives its exact fractional Doppler bin (radial velocity) and beam (elevation); the Doppler axis wraps; the lowest beam keeps its centre; with the options off the bin and beam centres stay (the C `test_cfar` checks the same in `processor.c`) |
-| `test_new_options` | the options of this revision: `cfg.proc.cpiMode` auto / manual; `cfg.mti.maxRange_m` (a stationary echo cancelled before the limit and kept beyond it, a flat noise floor on both sides); the long pulse off (the short pulse to 80.6 km, a target at 50 km as a short-pulse plot), the short pulse off (blind below 22.9 km, long-pulse plots only); the sub-pulses on 165 / 175 MHz (IF 25 / 35 MHz, the radial velocity of each plot on its own carrier within one Doppler bin, the DBF beams scaled by fc / fc_Hz); `cfg.io.saveMf` / `saveDoppler` (one file per PRI / per CPI update, block sizes, `[]` for a sub-pulse that is off); the PPI video noise floor over a mountain sector (0.5 dB); `radar_export_config` writes the same records as `export_receiver_config` for all of them and the TOMHT tracker |
+| `test_new_options` | the options of this revision: `cfg.proc.cpiMode` auto / manual; `cfg.mti.maxRange_m` (a stationary echo cancelled before the limit and kept beyond it, a flat noise floor on both sides); the long pulse off (the short pulse to 80.6 km, a target at 50 km as a short-pulse plot), the short pulse off (blind below 22.9 km, long-pulse plots only); the sub-pulses on 165 / 175 MHz (IF 30 MHz for both, LO 135 / 145 MHz, echo spectra at the ADC on 30 MHz and the short-pulse echo in the long window on 20 MHz, the radial velocity of each plot on its own carrier within one Doppler bin, the DBF beams scaled by fc / fc_Hz); `cfg.io.saveMf` / `saveDoppler` (one file per PRI / per CPI update, block sizes, `[]` for a sub-pulse that is off); the PPI video noise floor over a mountain sector (0.5 dB); `radar_export_config` writes the same records as `export_receiver_config` for all of them and the TOMHT tracker |
 | `test_tracker_tomht` | the cases of `test_tracker_pmbm` with the TOMHT tracker (`test_tracker_pmbm('tomht')`), and the C TOMHT tracker on the same calls |
 | `test_generate_ddc_c` | the C program `radar_generate_ddc` against `generate_ddc_files.m`: equal files without noise (2 / 4 MHz, other carriers, long pulse off, phase codes), equal clutter with fixed reflectivities, the same power of random clutter and noise, reproducible with any number of threads, the six targets generated in C detected by the C receiver |
 | `test_mti_fir` | clutter filter option: the FIR file instead of [1 -2 1], CPI - (L - 1) outputs, deeper notch than the canceller, flat noise floor after the noise gain of every bin, one row for every stagger position or one row per position, invalid files refused, `mtiCoeffs` and `mtiType` exported |

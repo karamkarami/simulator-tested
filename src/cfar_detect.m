@@ -14,7 +14,7 @@ function [isDet, noise] = cfar_detect(P, sys, wv)
 %   the statistic. noise is the noise estimate of the tested cells: the
 %   statistic / sys.cfar.noiseScale (its mean for unit noise: 1 for CA), 0
 %   elsewhere (OS: only at its detections). The MTI notch is applied only
-%   through sys.cfar.notchMaxRange_m; every Doppler bin is tested beyond it.
+%   through cfg.cfar.notchMaxRange_km (sys.cfar.notchMaxRange_m); every Doppler bin is tested beyond it.
 nD = size(P, 3);
 zeroBin = floor(nD/2) + 1;                         % zero Doppler after fftshift
 notch = max(1, zeroBin-sys.dop.notchBins):min(nD, zeroBin+sys.dop.notchBins);

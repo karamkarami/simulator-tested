@@ -171,22 +171,18 @@ for i = 1:2
     wv = cfg.wave.(names{i});
     wv.name     = names{i};
     % sub-pulse on or off (cfg.wave.<pulse>.enable) and its carrier (cfg.wave.<pulse>.fc_Hz, [] = cfg.fc).
-    % The receiver LO stays at cfg.fc - fIF: a sub-pulse on another carrier is on the IF
-    % fIF + (fc_Hz - cfg.fc), and the DDC mixes its receive window with that IF.
+    % Every sub-pulse reaches the ADC on the same IF cfg.adc.fIF_Hz: the receiver LO is tuned to
+    % fc_Hz - fIF while the sub-pulse is transmitted and received (it switches to the LO of the long
+    % pulse when the long pulse is transmitted), and the NCO of the DDC stays at fIF.
     if ~isfield(wv, 'enable') || isempty(wv.enable), wv.enable = true; end
     wv.enable = logical(wv.enable);
     if ~isfield(wv, 'fc_Hz') || isempty(wv.fc_Hz), wv.fc_Hz = cfg.fc; end
-    if ~isscalar(wv.fc_Hz) || ~(wv.fc_Hz > 0) || ~isfinite(wv.fc_Hz)
-        error('cfg.wave.%s.fc_Hz must be a positive carrier frequency [Hz] (or [] = cfg.fc).', names{i});
+    if ~isscalar(wv.fc_Hz) || ~(wv.fc_Hz > sys.fIF) || ~isfinite(wv.fc_Hz)
+        error('cfg.wave.%s.fc_Hz must be a carrier frequency [Hz] above cfg.adc.fIF_Hz (or [] = cfg.fc).', names{i});
     end
     wv.lambda_m = c / wv.fc_Hz;
-    wv.fIF_Hz   = sys.fIF + (wv.fc_Hz - cfg.fc);
-    bwHalf = 0.5 * waveform_bandwidth(wv);
-    if wv.enable && (wv.fIF_Hz - bwHalf <= 0 || wv.fIF_Hz + bwHalf >= fs/2)
-        error(['cfg.wave.%s.fc_Hz = %.3f MHz puts the sub-pulse on the IF %.3f MHz: it must lie inside ' ...
-               '(0, %.1f MHz) with its bandwidth (LO = cfg.fc - cfg.adc.fIF_Hz = %.3f MHz).'], names{i}, ...
-              wv.fc_Hz/1e6, wv.fIF_Hz/1e6, fs/2e6, sys.fLO/1e6);
-    end
+    wv.fIF_Hz   = sys.fIF;                                   % IF at the ADC (the same for both)
+    wv.fLO_Hz   = wv.fc_Hz - sys.fIF;                        % receiver LO of this sub-pulse
     wv.radarConst = sys.radarConst * (wv.lambda_m / sys.lambda)^2;   % received power ~ lambda^2
     wv.compression = lower(wv.compression);
     if strcmpi(wv.type, 'phasecode')
@@ -239,16 +235,26 @@ sys.adc.rxSamples = find((ws.enable & sys.tAdc >= ws.tTx_s + ws.width_s & sys.tA
                          (wl.enable & sys.tAdc >= wl.tTx_s + wl.width_s));  % receive intervals (adc_overload.m)
 sys.rx.stcGain = single(stc_gain(sys, sys.tAdc));            % STC in front of the receiver (1 = off)
 
+% Receiver LO at every ADC sample: that of the short pulse, from the transmission of the long
+% pulse on that of the long pulse. An echo of sub-pulse p received while the LO is that of the
+% other sub-pulse lands on fIF + (fc_p - fc_other) (the DDC filters reject it when the carriers are
+% more than the bandwidth apart): sys.rx.loShift(:, p) = exp(-1j*2*pi*(fLO(t) - fLO_p)*(t - tTx_p))
+% multiplies its complex IF signal ([] = one LO for the whole PRI).
+fLO = repmat(ws.fLO_Hz, sys.nAdc, 1);
+if ~ws.enable, fLO(:) = wl.fLO_Hz; end
+if ws.enable && wl.enable, fLO(sys.tAdc >= wl.tTx_s) = wl.fLO_Hz; end
+sys.rx.fLO_Hz = fLO;
+sys.rx.loShift = [];
+if ws.enable && wl.enable && ws.fc_Hz ~= wl.fc_Hz
+    sys.rx.loShift = single([exp(-1j*2*pi*(fLO - ws.fLO_Hz).*(sys.tAdc - ws.tTx_s)), ...
+                             exp(-1j*2*pi*(fLO - wl.fLO_Hz).*(sys.tAdc - wl.tTx_s))]);
+end
+
 % NCO of the DDC: the real line is multiplied by cos(2*pi*fIF*t), the imaginary
 % line by -sin(2*pi*fIF*t). At fIF = fs/4 these are exactly 1, 0, -1, 0, ...
-% With sub-pulses on different carriers the NCO switches to the IF of the long
-% pulse when it is transmitted (no DDC output of the receive windows straddles it).
-fNco = repmat(ws.fIF_Hz, sys.nAdc, 1);
-if ~ws.enable, fNco(:) = wl.fIF_Hz; end
-if ws.enable && wl.enable, fNco(sys.tAdc >= wl.tTx_s) = wl.fIF_Hz; end
-sys.ddc.fNco_Hz  = fNco;
-sys.ddc.cos      = round(cos(2*pi*fNco.*sys.tAdc) * 2^15) / 2^15;   % 16-bit NCO values
-sys.ddc.minusSin = round(-sin(2*pi*fNco.*sys.tAdc) * 2^15) / 2^15;
+sys.ddc.fNco_Hz  = sys.fIF;
+sys.ddc.cos      = round(cos(2*pi*sys.fIF*sys.tAdc) * 2^15) / 2^15;   % 16-bit NCO values
+sys.ddc.minusSin = round(-sin(2*pi*sys.fIF*sys.tAdc) * 2^15) / 2^15;
 
 % DDC output samples: their time (a valid output is centred on its input window, linear-phase
 % FIR) and the first/last ADC sample each of them depends on
@@ -642,13 +648,15 @@ function w = cfar_window(cfg)
 c = cfg.cfar;
 w.method = lower(c.method);
 w.notchWidth = c.notchWidth;
-w.notchMaxRange_m = Inf;
-if isfield(c, 'notchMaxRange_m') && ~isempty(c.notchMaxRange_m)
-    w.notchMaxRange_m = c.notchMaxRange_m;
+if isfield(c, 'notchMaxRange_m')
+    error('cfg.cfar.notchMaxRange_m was renamed: set cfg.cfar.notchMaxRange_km (in km).');
 end
-if ~isscalar(w.notchMaxRange_m) || ~isreal(w.notchMaxRange_m) || isnan(w.notchMaxRange_m) || w.notchMaxRange_m < 0
-    error('cfg.cfar.notchMaxRange_m must be a non-negative scalar range in metres (Inf is allowed).');
+km = Inf;                                          % cfg.cfar.notchMaxRange_km [km], kept in metres
+if isfield(c, 'notchMaxRange_km') && ~isempty(c.notchMaxRange_km), km = c.notchMaxRange_km; end
+if ~isscalar(km) || ~isreal(km) || isnan(km) || km < 0
+    error('cfg.cfar.notchMaxRange_km must be a non-negative scalar range in km (Inf is allowed).');
 end
+w.notchMaxRange_m = km * 1e3;
 w.type = 'ca';                                     % detector: cfg.cfar.type
 if isfield(c, 'type') && ~isempty(c.type), w.type = lower(c.type); end
 if ~any(strcmp(w.type, {'ca', 'go', 'so', 'os'}))

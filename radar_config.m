@@ -104,9 +104,10 @@ cfg.adc.overloadWarn     = 0.01;   % warn when more than this fraction of the re
 % the receive window and the DDC output are the same as with the matched filter.
 % Each sub-pulse can be switched off (enable = false: not transmitted, not processed; with the
 % long pulse off the short-pulse receive window lasts to cfg.rx.maxRange_m) and can have its own
-% carrier (fc_Hz, [] = cfg.fc). The receiver LO stays at cfg.fc - cfg.adc.fIF_Hz: a sub-pulse on
-% fc_Hz is on the IF cfg.adc.fIF_Hz + (fc_Hz - cfg.fc) (inside 0 ... 60 MHz with its bandwidth),
-% the DDC mixes its receive window with that IF, and its wavelength sets its radial velocity
+% carrier (fc_Hz, [] = cfg.fc). The IF stays at cfg.adc.fIF_Hz (30 MHz at the DDC input for both):
+% the receiver LO is tuned to fc_Hz - cfg.adc.fIF_Hz of each sub-pulse (LO of the short pulse, from
+% the transmission of the long pulse on that of the long pulse), the DDC NCO stays at 30 MHz, and
+% the wavelength of each sub-pulse sets its radial velocity
 % axis, received power (~ lambda^2), element phases (beam directions) and clutter Doppler. Carriers
 % more than the pulse bandwidth apart also keep the short-pulse echo of far targets out of the
 % long window (the DDC filters reject it).
@@ -176,7 +177,7 @@ cfg.mti.maxRange_m = Inf;      % the clutter filter is applied to the range cell
                                % (both sub-pulses); the cells beyond it go to the Doppler FFT unfiltered
                                % (the newest L pulses' last one, so every cell has the same CPI), with
                                % their own noise-gain equalisation. Inf = every range cell (as before).
-                               % Use cfg.cfar.notchMaxRange_m to test the zero-Doppler bins beyond it.
+                               % Use cfg.cfar.notchMaxRange_km to test the zero-Doppler bins beyond it.
 
 %% Detection: CFAR on every range-Doppler map
 % type (detector; the noise statistic of the training cells of the window):
@@ -235,7 +236,7 @@ cfg.cfar.doppler.threshold_dB = [];
 
 cfg.cfar.notchWidth   = 1;     % half-width of the zero-Doppler band that is not tested (MTI notch,
                                % clutter residue), in Doppler window mainlobes (1 -> +-2 bins)
-cfg.cfar.notchMaxRange_m = Inf; % apply notchWidth only through this range [m]; beyond it, test every Doppler bin
+cfg.cfar.notchMaxRange_km = Inf; % apply notchWidth only through this range [km]; beyond it, test every Doppler bin
 % Range interval in which each sub-pulse is tested (all methods); the cells
 % outside it are only used as training cells. The short pulse also stops
 % where the long pulse starts (handover).

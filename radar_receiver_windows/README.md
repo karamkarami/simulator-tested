@@ -262,13 +262,13 @@ field of `pulse_header.m`), into `cfg.io.ddcFolder`, and with
 `radar_stream_send` then sends them to the receiver. Per PRI, as
 `generate_rx_signal.m`, `adc_sample.m` and `ddc.m`: the targets (radar
 equation, element phases, two-way patterns, Swerling 1 per antenna pass,
-maneuvers of `target_state.m`) on the IF of every sub-pulse that is on, the
+maneuvers of `target_state.m`) on the 30 MHz IF of every sub-pulse that is on (LO tuned to its carrier), the
 terrain clutter (`clutter_terrain.m`: land, mountains, hills, desert, sea,
 shapes, shadowing, elevation groups; sigma0 from `cfg.clutter.cnr_dB` as
 `clutter_cnr.m`; Rayleigh cells with the Gaussian or exponential internal
 motion; FFT convolution with the IF pulse), the transmitter leakage, the STC,
 thermal noise, the receiver gain, the 16-bit ADC with its noise (ENOB), and
-the fixed-point two-stage DDC (NCO switching to the IF of the long pulse,
+the fixed-point two-stage DDC (NCO fixed at the 30 MHz IF,
 rounding and saturation of both stages). The PRIs run in parallel (OpenMP).
 
 | Option | Meaning |

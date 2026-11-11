@@ -112,8 +112,26 @@ for i = 1:2
     txt = [txt sprintf(' %s (%s, %.0f MHz): vr %.1f m/s, truth %.1f (error %.1f, with cfg.fc %.1f m/s);', ...
                        c.targets(i).name, pulse{i}, s.wave.(pulse{i}).fc_Hz/1e6, plots(m(1)).vr_mps, vr, err, wrong)]; %#ok<AGROW>
 end
-ok = check(good && s.wave.short.fIF_Hz == 25e6 && s.wave.long.fIF_Hz == 35e6, ...
-           sprintf('own carriers (IF 25 / 35 MHz, Doppler bin %.1f m/s):%s', bin, txt)) && ok;
+ok = check(good && s.wave.short.fIF_Hz == 30e6 && s.wave.long.fIF_Hz == 30e6 && s.wave.short.fLO_Hz == 135e6 ...
+           && s.wave.long.fLO_Hz == 145e6 && isscalar(s.ddc.fNco_Hz) && s.ddc.fNco_Hz == 30e6, ...
+           sprintf('own carriers (IF 30 MHz, LO 135 / 145 MHz, NCO fixed, Doppler bin %.1f m/s):%s', bin, txt)) && ok;
+% at the ADC both echoes are on the 30 MHz IF; the short-pulse echo of the far target, received
+% with the LO of the long pulse, on 30 + (165 - 175) = 20 MHz
+sq = s;  sq.cfg.rx.addThermalNoise = false;  sq.cfg.rx.addLeakage = false;  sq.cfg.rx.stc.enable = false;
+fPk = zeros(1, 3);  pul = {'short', 'long', 'short'};  tgt = [1 2 2];
+for i = 1:3
+    [R, azT] = target_geometry(c.targets(tgt(i)), 0, c.ant.height_m);
+    x = double(generate_rx_signal(sq, c.targets(tgt(i)), 0, azT, []));
+    wv = s.wave.(pul{i});
+    n = find(s.tAdc >= wv.tTx_s + 2*R/c.const.c & s.tAdc < wv.tTx_s + 2*R/c.const.c + wv.width_s);
+    seg = x(n, 1);
+    nf = 2^nextpow2(16 * numel(seg));
+    X = abs(fft(seg .* hanning(numel(seg)), nf));
+    [~, k] = max(X(1:nf/2));
+    fPk(i) = (k - 1) * s.fs / nf;
+end
+ok = check(all(abs(fPk - [30e6 30e6 20e6]) < 0.3e6), sprintf(['own carriers: echo spectra at the ADC: short %.2f MHz, ' ...
+           'long %.2f MHz (30 MHz IF), short-pulse echo in the long window %.2f MHz (20 MHz)'], fPk / 1e6)) && ok;
 c48 = c;  c48.ant.nElements = 48;
 s48 = setup_radar(c48);
 uExp = sind(s48.dbf.beamEl_deg - s48.ant.tilt_deg) * c.fc / 175e6;
