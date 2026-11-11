@@ -177,7 +177,7 @@ cfg.mti.maxRange_m = Inf;      % the clutter filter is applied to the range cell
                                % (both sub-pulses); the cells beyond it go to the Doppler FFT unfiltered
                                % (the newest L pulses' last one, so every cell has the same CPI), with
                                % their own noise-gain equalisation. Inf = every range cell (as before).
-                               % Use cfg.cfar.notchMaxRange_km to test the zero-Doppler bins beyond it.
+                               % Use cfg.cfar.notchMaxRange_m to test the zero-Doppler bins beyond it.
 
 %% Detection: CFAR on every range-Doppler map
 % type (detector; the noise statistic of the training cells of the window):
@@ -236,7 +236,7 @@ cfg.cfar.doppler.threshold_dB = [];
 
 cfg.cfar.notchWidth   = 1;     % half-width of the zero-Doppler band that is not tested (MTI notch,
                                % clutter residue), in Doppler window mainlobes (1 -> +-2 bins)
-cfg.cfar.notchMaxRange_km = Inf; % apply notchWidth only through this range [km]; beyond it, test every Doppler bin
+cfg.cfar.notchMaxRange_m = Inf; % apply notchWidth only through this range [m]; beyond it, test every Doppler bin
 % Range interval in which each sub-pulse is tested (all methods); the cells
 % outside it are only used as training cells. The short pulse also stops
 % where the long pulse starts (handover).

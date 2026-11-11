@@ -564,7 +564,7 @@ there, at the same beam and Doppler, behind very strong far targets.
   The unfiltered cells get their own noise gain (`sys.dop.noiseGainBypass`,
   flat, 1 with the fixed PRF) so the noise floor stays flat across the limit;
   the CFAR looks are the smaller of both. Clutter beyond the limit is not
-  cancelled: use `cfg.cfar.notchMaxRange_km` (the zero-Doppler bins) together
+  cancelled: use `cfg.cfar.notchMaxRange_m` (the zero-Doppler bins) together
   with it. Exported as `mtiMaxRange_m`, `noiseGainBypass`; the C receiver
   does the same (`processor.c`, test `core` / `core_carriers`).
 * **Doppler:** fixed PRF: 3-pulse canceller (112 outputs), Hamming window

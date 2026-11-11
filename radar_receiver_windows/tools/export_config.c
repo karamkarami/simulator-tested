@@ -1293,8 +1293,7 @@ static void export_config(void)
     if (!bypassUsed) memcpy(noiseGainB, noiseGain, sizeof(double) * (size_t)nfft);
     free(bypass);
     const double notchWidth = num("cfar.notchWidth");
-    if (has("cfar.notchMaxRange_m")) fail("cfg.cfar.notchMaxRange_m was renamed: set cfg.cfar.notchMaxRange_km (in km).");
-    const double notchMaxRange_m = num_or("cfar.notchMaxRange_km", INFINITY) * 1e3;
+    const double notchMaxRange_m = num("cfar.notchMaxRange_m");
     const int notchBins = (int)lround(notchWidth * 2 * nfft / rowLen);
     const int zeroBin = nfft / 2 + 1;
     double nLooks = INFINITY;

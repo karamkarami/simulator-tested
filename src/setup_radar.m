@@ -648,15 +648,13 @@ function w = cfar_window(cfg)
 c = cfg.cfar;
 w.method = lower(c.method);
 w.notchWidth = c.notchWidth;
-if isfield(c, 'notchMaxRange_m')
-    error('cfg.cfar.notchMaxRange_m was renamed: set cfg.cfar.notchMaxRange_km (in km).');
+w.notchMaxRange_m = Inf;
+if isfield(c, 'notchMaxRange_m') && ~isempty(c.notchMaxRange_m)
+    w.notchMaxRange_m = c.notchMaxRange_m;
 end
-km = Inf;                                          % cfg.cfar.notchMaxRange_km [km], kept in metres
-if isfield(c, 'notchMaxRange_km') && ~isempty(c.notchMaxRange_km), km = c.notchMaxRange_km; end
-if ~isscalar(km) || ~isreal(km) || isnan(km) || km < 0
-    error('cfg.cfar.notchMaxRange_km must be a non-negative scalar range in km (Inf is allowed).');
+if ~isscalar(w.notchMaxRange_m) || ~isreal(w.notchMaxRange_m) || isnan(w.notchMaxRange_m) || w.notchMaxRange_m < 0
+    error('cfg.cfar.notchMaxRange_m must be a non-negative scalar range in metres (Inf is allowed).');
 end
-w.notchMaxRange_m = km * 1e3;
 w.type = 'ca';                                     % detector: cfg.cfar.type
 if isfield(c, 'type') && ~isempty(c.type), w.type = lower(c.type); end
 if ~any(strcmp(w.type, {'ca', 'go', 'so', 'os'}))
