@@ -191,6 +191,12 @@ if(ZLIB_FOUND)
 endif()
 if(RADAR_OPENMP AND OpenMP_C_FOUND)
     target_link_libraries(radar_generate_ddc PRIVATE OpenMP::OpenMP_C)
+    # With the MinGW shipped with CLion the imported target can compile with
+    # -fopenmp but leave it (and -lgomp) off the link line, giving "undefined
+    # reference to GOMP_parallel / omp_get_wtime". Pass the flag explicitly.
+    if(NOT MSVC AND OpenMP_C_FLAGS)
+        target_link_options(radar_generate_ddc PRIVATE ${OpenMP_C_FLAGS})
+    endif()
 endif()
 if(NOT WIN32)
     target_link_libraries(radar_generate_ddc PRIVATE m)
