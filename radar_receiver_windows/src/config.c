@@ -488,7 +488,7 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         /* radar mode (information) */
         {
             const Record *r = find_optional(&rs, "radarMode");
-            if (r && r->rows * r->cols >= 2) { cfg->radarMode = (int)lround(r->data[0]); cfg->subModeSingle = r->data[1] != 0; }
+            if (r && r->rows * r->cols >= 1) cfg->radarMode = (int)lround(r->data[0]);
             r = find_optional(&rs, "ddcRecord");
             if (r && r->rows * r->cols >= 2) { cfg->ddcManual = r->data[0] != 0; cfg->ddcT0_s = r->data[1]; }
             r = find_optional(&rs, "codeIndex");

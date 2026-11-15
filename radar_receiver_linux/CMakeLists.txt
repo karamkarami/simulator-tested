@@ -288,10 +288,10 @@ if(RADAR_BUILD_TESTS)
     set_tests_properties(core_exported PROPERTIES FIXTURES_REQUIRED exported_config)
     # options of radar_config.m exported and processed: one sub-pulse off, the sub-pulses on their
     # own carriers with the clutter filter up to 50 km and a CPI of 96 pulses, the TOMHT tracker,
-    # the scan-to-scan PRF, radar mode 1, the single-pulse sub-mode, radar mode 2 (short pulse sent at
+    # the scan-to-scan PRF, radar mode 1, radar mode 7 with only the long pulse, radar mode 2 (short pulse sent at
     # 11 us, receive windows set in the PRI), the Blackman Doppler window and "agility": stagger pair 3,
     # phase codes 2 / 4 and a manual DDC record (1800 samples from 0 us)
-    foreach(variant IN ITEMS short_off long_off carriers tomht scan2scan lfm_mode single mode2 blackman agility)
+    foreach(variant IN ITEMS short_off long_off carriers tomht scan2scan lfm_mode mode7 mode2 blackman agility)
         if(variant STREQUAL "short_off")
             set(stmt "cfg.wave.short.enable = false;")
         elseif(variant STREQUAL "long_off")
@@ -314,8 +314,8 @@ if(RADAR_BUILD_TESTS)
         elseif(variant STREQUAL "agility")
             set(stmt "cfg.prf.mode = 'staggered'; cfg.prf.staggerSet = 3; cfg.wave.short.codeIndex = 2; cfg.wave.long.codeIndex = 4; cfg.rx.manualDdc = true; cfg.rx.nDdc = 1800; cfg.rx.ddcT0_s = 0;")
         else()
-            # the single-pulse sub-mode of mode 0 (only its cfg.wave.singlePulse)
-            set(stmt "cfg.modes.subMode = 'single'; cfg = apply_radar_mode(cfg);")
+            # mode7: the last of the 8 modes, with only the long pulse (the short one switched off)
+            set(stmt "cfg.modes.available = [0 1 2 3 4 5 6 7]; cfg.modes.active = 7; cfg = apply_radar_mode(cfg); cfg.wave.short.enable = false;")
         endif()
         add_test(NAME export_${variant} COMMAND radar_export_config --quiet --set "${stmt}"
                  --out ${CMAKE_CURRENT_BINARY_DIR}/radar_config_${variant}.bin)

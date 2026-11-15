@@ -220,6 +220,14 @@ for i = 1:2
             error('The %s code %d of %s has %d chips, but width_s/chip_s = %d.', names{i}, wv.codeIndex, ...
                   cfg.files.phaseCode, numel(wv.code), round(wv.width_s / wv.chip_s));
         end
+        if wv.enable && wv.chip_s * sys.fsOut < 1 - 1e-9
+            % every chip must hold at least one DDC sample: the echo is sampled per chip
+            % (waveform_envelope: chip floor(t/chip_s) at every ADC sample) and the filters
+            % hold every chip / mismatch coefficient for its DDC samples (2 per 1 us chip at 2 MHz)
+            error(['cfg.wave.%s.chip_s = %.3g us is shorter than the DDC sample period %.3g us ' ...
+                   '(%.3g MHz): the code bandwidth 1/chip_s does not fit the DDC output.'], ...
+                  names{i}, wv.chip_s*1e6, 1e6/sys.fsOut, sys.fsOut/1e6);
+        end
         if strcmp(wv.compression, 'mismatch')
             if ~isfield(codes, [names{i} 'Mismatch' sfx])
                 error('%s has no mismatch filter ''%sMismatch%s'' for the %s code %d.', cfg.files.phaseCode, ...
@@ -843,29 +851,25 @@ end
 end
 
 function m = radar_mode_check(cfg)
-% Checks cfg.modes (radar_config.m, apply_radar_mode.m): at most 6 modes, numbers 0 ... 5, the
-% active one among them, sub-mode 'dual' or 'single', cfg.wave.singlePulse 'short' or 'long'.
-% Without cfg.modes (older configurations): mode 0, 'dual'.
-m = struct('available', 0, 'active', 0, 'subMode', 'dual', 'name', '');
+% Checks cfg.modes (radar_config.m, apply_radar_mode.m): at most 8 modes, numbers 0 ... 7, the
+% active one among them. Without cfg.modes (older configurations): mode 0.
+m = struct('available', 0, 'active', 0, 'name', '');
 if ~isfield(cfg, 'modes'), return; end
 md = cfg.modes;
 if isfield(md, 'available'), m.available = md.available; end
 if isfield(md, 'active'), m.active = md.active; end
-if isfield(md, 'subMode'), m.subMode = lower(md.subMode); end
 if isfield(md, 'name'), m.name = md.name; end
+if isfield(md, 'subMode') || (isfield(cfg, 'wave') && isfield(cfg.wave, 'singlePulse'))
+    error(['cfg.modes.subMode and cfg.wave.singlePulse no longer exist: a mode with one sub-pulse ' ...
+           'per PRI switches the other one off (cfg.wave.<pulse>.enable = false in its mode file).']);
+end
 a = m.available;
-if isempty(a) || ~isnumeric(a) || numel(a) > 6 || any(a(:) ~= round(a(:))) || any(a(:) < 0 | a(:) > 5) || ...
+if isempty(a) || ~isnumeric(a) || numel(a) > 8 || any(a(:) ~= round(a(:))) || any(a(:) < 0 | a(:) > 7) || ...
         numel(unique(a)) ~= numel(a)
-    error('cfg.modes.available must hold 1 to 6 different mode numbers 0 ... 5.');
+    error('cfg.modes.available must hold 1 to 8 different mode numbers 0 ... 7.');
 end
 if ~isscalar(m.active) || ~any(a == m.active)
     error('cfg.modes.active = %s is not one of cfg.modes.available = [%s].', mat2str(m.active), num2str(a(:).'));
-end
-if ~any(strcmp(m.subMode, {'dual', 'single'}))
-    error('cfg.modes.subMode must be ''dual'' or ''single''.');
-end
-if isfield(cfg.wave, 'singlePulse') && ~any(strcmpi(cfg.wave.singlePulse, {'short', 'long'}))
-    error('cfg.wave.singlePulse (mode %d) must be ''short'' or ''long''.', m.active);
 end
 end
 

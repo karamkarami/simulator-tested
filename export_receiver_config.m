@@ -117,8 +117,8 @@ if isfield(cfg.display, 'rdRate_Hz') && ~isempty(cfg.display.rdRate_Hz), rdRate 
 r{end+1} = {'rdRate_Hz', rdRate};
 r{end+1} = {'minExtent_deg', cfg.extract.minExtent_deg};
 r{end+1} = {'meanPri_s', mean(sys.pri)};
-if isfield(sys, 'mode')                               % radar mode (information): number, sub-mode 0 dual / 1 single
-    r{end+1} = {'radarMode', [sys.mode.active, double(strcmp(sys.mode.subMode, 'single'))]};
+if isfield(sys, 'mode')                               % radar mode (information): its number
+    r{end+1} = {'radarMode', sys.mode.active};
 end
 % (information) the DDC record (manual: cfg.rx.manualDdc, nDdc, ddcT0_s), the code / mismatch pair of
 % every sub-pulse (0: no phase code) and the (T, w) pair of the staggered PRF (0: not staggered)

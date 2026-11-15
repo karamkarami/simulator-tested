@@ -220,7 +220,7 @@ record within 3e-14 (relative).
 **Radar modes and scan-to-scan PRF** (`../README.md`, "Radar modes" and
 "Scan-to-scan PRF"):
 
-* The mode (`cfg.modes.active`, `cfg.modes.subMode`) is applied by
+* The mode (`cfg.modes.active`, at most 8 modes 0 ... 7) is applied by
   `radar_config.m` itself, so the export holds every setting of that mode:
   the waveforms, transmit times and receive windows (`cfg.wave.<pulse>.tTx_s`,
   `rxStart_s`, `rxEnd_s`: the receive intervals `short_rxFirst` / `_rxCount`,
@@ -240,9 +240,11 @@ record within 3e-14 (relative).
   sample], `codeIndex` = [short long] (0: no phase code) and `staggerSet`
   (0: not staggered) are printed at the start (information). Both exporters
   and `radar_generate_ddc` check the choices against the files. Another mode: `--set "cfg.modes.active = 1; cfg =
-  apply_radar_mode(cfg);"` (sub-mode: `cfg.modes.subMode = 'single';` before
-  it). Record `radarMode` = [mode, 1 single / 0 dual] (information, printed
-  at the start). Both exporters check the modes as `setup_radar.m`.
+  apply_radar_mode(cfg);"`; a mode with one sub-pulse per PRI switches the
+  other one off in its file (`cfg.wave.<pulse>.enable = false`; there are no
+  sub-modes: `cfg.modes.subMode` and `cfg.wave.singlePulse` are refused).
+  Record `radarMode` = the mode number (information, printed at the start;
+  files of earlier versions with a second value are read as well). Both exporters check the modes as `setup_radar.m`.
 * `cfg.prf.mode = 'scan2scan'`: record `scan2scan` = 1, `prfScan_Hz`, and per
   PRF j the records `s2s<j>_pri_s`, `_cpiLength`, `_rowLen`, `_nfft`,
   `_dopWindow`, `_noiseGain`, `_noiseGainBypass`, `_dopFreq_Hz`, `_notchBins`,
@@ -949,7 +951,7 @@ Timing:
 | `core` (`tests/test_core.c`) | batched FFT against a direct DFT; plot extractor, also on random dense detection streams (hundreds of open groups) against the linear search of `plot_extractor.m`: the same plots in the same order; a moving target through the whole chain with the exported configuration (its velocity a quarter of the Doppler axis from zero, for any carrier frequency; one plot at the right range, velocity and beam); direct and fast-convolution matched filters give the same plot; the same target with the CFAR threshold raised to 45 dB at run time gives no detection; `cfar_pfa()` against the closed forms of CA, GO, SO and OS (one look) and the Pfa 1e-8 of the configured threshold; the display taps of the processor (`processor_set_profile`, `processor_set_rdmap`): a DBF and an MF profile every PRI, the MF peak in the target's range bin, the DBF echo above the noise, the range-Doppler map of the target's beam with its peak at the target's range bin and Doppler bin and only that beam's detections; the raw video of the PPI (`video.c`): mean power over the channels, the short-pulse samples up to the handover, then the long-pulse samples, in the right range bins; records with 500 DDC samples more than the configuration (large values after the last receive window) give the same plot |
 | `core_phasecode` | the same core test with `config/radar_config_phasecode.bin` (both sub-pulses P4 phase codes with mismatch filters; the same as mode 0 of the default `radar_config.bin`): the echo is the real code, the plot lies on the target cell |
 | `export_scan2scan`, `core_scan2scan` | `cfg.prf.mode = 'scan2scan'` exported and processed: the core test, and a target in a scan with PRF 1 and in the next scan with PRF 2 (stagger index 1, then 2): one change of the PRF, the settings of PRF 2 in use, the target found in both scans with its radial velocity on the Doppler axis of each PRF |
-| `export_lfm_mode`, `core_lfm_mode`, `export_single`, `core_single` | radar mode 1 (LFM sub-pulses) and the single-pulse sub-mode of mode 0, selected with `--set "...; cfg = apply_radar_mode(cfg);"`, exported and processed |
+| `export_lfm_mode`, `core_lfm_mode`, `export_mode7`, `core_mode7` | radar mode 1 (LFM sub-pulses) and radar mode 7 (the last of the 8 modes, `cfg.modes.available = [0 ... 7]`) with only the long pulse (`cfg.wave.short.enable = false`), selected with `--set "...; cfg = apply_radar_mode(cfg);"`, exported and processed |
 | `export_agility`, `core_agility` | stagger pair 3 (5 PRIs), phase codes 2 (short) and 4 (long) with their mismatch filters and a manual DDC record of 1800 samples from 0 us (the ADC record starts before the PRI), exported and processed; the core test drives a staggered configuration with the stagger positions in turn and the echo in the passband of the clutter filter |
 | `export_mode2`, `core_mode2`, `export_blackman`, `core_blackman` | radar mode 2 (short pulse sent at 11 us, receive windows 40 - 248 us and 533 - 1780 us, PRI 1.8 ms: 3556 DDC samples, ranges 4.4 - 31.8 km and 31.8 - 200 km) and the Blackman Doppler window, exported and processed |
 | `core_1ch` | the same core test with `config/radar_config_1ch.bin` (the default radar with one receive element, no DBF): four-step FFT and direct matched filter give the same plot |

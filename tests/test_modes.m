@@ -1,13 +1,15 @@
 function ok = test_modes()
-%TEST_MODES  Radar modes, single/dual sub-modes, the scan-to-scan PRF and the CFAR limit cfg.cfar.maxPfa.
+%TEST_MODES  Radar modes (8), one sub-pulse per PRI, the scan-to-scan PRF and the CFAR limit cfg.cfar.maxPfa.
 %   1. radar_config: modes 0, 1, 2 available, mode 0 'medium_mode' active
-%      with both sub-pulses phase codes and mismatch filters, 'dual'.
-%   2. apply_radar_mode: mode 1 'lfm_mode' (LFM, matched filters); its
-%      'single' sub-mode keeps only cfg.wave.singlePulse (the long pulse); back
-%      to mode 0 'dual' restores both sub-pulses and the phase codes.
-%   3. setup_radar refuses a mode that is not available, more than 6 modes,
-%      repeated or out-of-range mode numbers, an unknown sub-mode and an
-%      unknown cfg.wave.singlePulse, with a message that names the setting.
+%      with both sub-pulses phase codes and mismatch filters.
+%   2. apply_radar_mode: mode 1 'lfm_mode' (LFM, matched filters); all 8
+%      modes 0 ... 7 load and set up; mode 7 with the short pulse switched
+%      off (a mode with one sub-pulse per PRI); back to mode 0 restores both
+%      sub-pulses and the phase codes.
+%   3. setup_radar refuses a mode that is not available, more than 8 modes,
+%      repeated or out-of-range mode numbers, the removed cfg.modes.subMode /
+%      cfg.wave.singlePulse and phase-code chips shorter than a DDC sample,
+%      with a message that names the setting.
 %   4. Scan-to-scan PRF: one set of slow-time settings per PRF of
 %      cfg.files.scan2scan (CPI = the pulses in the 3 dB beam, FFT, Doppler
 %      axis); pulse_schedule gives every scan its PRF (the pulses of a scan
@@ -60,35 +62,42 @@ ok = true;
 
 %% 1) defaults
 cfg = radar_config();
-ok = report('modes 0, 1, 2 available, mode 0 ''medium_mode'' active, dual', isequal(cfg.modes.available, [0 1 2]) && ...
-            cfg.modes.active == 0 && strcmp(cfg.modes.name, 'medium_mode') && strcmp(cfg.modes.subMode, 'dual')) && ok;
+ok = report('modes 0, 1, 2 available, mode 0 ''medium_mode'' active', isequal(cfg.modes.available, [0 1 2]) && ...
+            cfg.modes.active == 0 && strcmp(cfg.modes.name, 'medium_mode') && ~isfield(cfg.modes, 'subMode') && ...
+            ~isfield(cfg.wave, 'singlePulse')) && ok;
 ok = report('mode 0: both sub-pulses phase codes with mismatch filters', ...
             strcmp(cfg.wave.short.type, 'phasecode') && strcmp(cfg.wave.long.type, 'phasecode') && ...
             strcmp(cfg.wave.short.compression, 'mismatch') && strcmp(cfg.wave.long.compression, 'mismatch') && ...
             cfg.wave.short.enable && cfg.wave.long.enable) && ok;
 
-%% 2) another mode and the single-pulse sub-mode
+%% 2) the other modes, all 8 of them, and a mode with one sub-pulse per PRI
 c = cfg;  c.modes.active = 1;  c = apply_radar_mode(c);
 ok = report('mode 1 ''lfm_mode'': both sub-pulses LFM, matched filters', strcmp(c.modes.name, 'lfm_mode') && ...
             strcmp(c.wave.short.type, 'lfm') && strcmp(c.wave.long.type, 'lfm') && ...
             strcmp(c.wave.long.compression, 'matched') && c.wave.short.enable && c.wave.long.enable) && ok;
-c.modes.subMode = 'single';  c = apply_radar_mode(c);
-ok = report('mode 1, single: only cfg.wave.singlePulse (long) on', ~c.wave.short.enable && c.wave.long.enable && ...
-            strcmp(c.wave.singlePulse, 'long')) && ok;
-c.console.enable = false;  c.ant.nElements = 1;
+allOk = true;
+for k = 0:7
+    c = cfg;  c.modes.available = 0:7;  c.modes.active = k;  c = apply_radar_mode(c);
+    c.console.enable = false;  c.ant.nElements = 1;
+    s = setup_radar(c);
+    allOk = allOk && s.mode.active == k && isequal(s.mode.available, 0:7) && s.wave.short.nRange > 0 && ...
+            s.wave.long.nRange > 0 && (k < 3 || strcmp(c.modes.name, sprintf('mode_%d', k)));
+end
+ok = report('modes 0 ... 7 (cfg.modes.available = 0:7): every mode file loads and sets up', allOk) && ok;
+c = cfg;  c.modes.available = 0:7;  c.modes.active = 7;  c = apply_radar_mode(c);
+c.wave.short.enable = false;  c.console.enable = false;  c.ant.nElements = 1;
 s = setup_radar(c);
-ok = report('setup of the single sub-mode: no short-pulse cells, the long pulse from its blind range', ...
-            ~s.wave.short.enable && s.wave.short.nRange == 0 && s.wave.long.nRange > 0 && ...
-            s.mode.active == 1 && strcmp(s.mode.subMode, 'single')) && ok;
-c.modes.active = 0;  c.modes.subMode = 'dual';  c = apply_radar_mode(c);
-ok = report('back to mode 0, dual: both sub-pulses and the phase codes again', c.wave.short.enable && ...
+ok = report('mode 7 with the short pulse off: no short-pulse cells, the long pulse from its blind range', ...
+            ~s.wave.short.enable && s.wave.short.nRange == 0 && s.wave.long.nRange > 0 && s.mode.active == 7) && ok;
+c.modes.active = 0;  c = apply_radar_mode(c);
+ok = report('back to mode 0: both sub-pulses and the phase codes again', c.wave.short.enable && ...
             c.wave.long.enable && strcmp(c.wave.short.type, 'phasecode')) && ok;
 
 %% 3) invalid modes
 base = cfg;  base.console.enable = false;  base.ant.nElements = 1;
-bad = {'modes.active', 4, 'cfg.modes.active';  'modes.available', 0:6, 'cfg.modes.available';
-       'modes.available', [0 0 1], 'cfg.modes.available';  'modes.available', [0 7], 'cfg.modes.available';
-       'modes.subMode', 'triple', 'cfg.modes.subMode';  'wave.singlePulse', 'middle', 'cfg.wave.singlePulse'};
+bad = {'modes.active', 4, 'cfg.modes.active';  'modes.available', 0:8, 'cfg.modes.available';
+       'modes.available', [0 0 1], 'cfg.modes.available';  'modes.available', [0 8], 'cfg.modes.available';
+       'modes.subMode', 'single', 'cfg.modes.subMode';  'wave.singlePulse', 'long', 'cfg.wave.singlePulse'};
 for i = 1:size(bad, 1)
     c = base;
     f = strsplit(bad{i, 1}, '.');
@@ -103,6 +112,16 @@ for i = 1:size(bad, 1)
     if ischar(v), v = ['''' v '''']; else, v = mat2str(v); end
     ok = report(sprintf('refused: %s = %s', bad{i, 1}, v), ~isempty(strfind(msg, bad{i, 3}))) && ok;
 end
+% phase-code chips shorter than a DDC sample (0.25 us at 2 MHz; 25 chips as in the default file)
+c = base;  c.wave.short.chip_s = 0.25e-6;  c.wave.short.width_s = 6.25e-6;
+msg = '';
+try
+    setup_radar(c);
+catch err
+    msg = err.message;
+end
+ok = report('refused: short-pulse chips of 0.25 us (shorter than the 0.5 us DDC sample)', ...
+            ~isempty(strfind(msg, 'cfg.wave.short.chip_s'))) && ok;
 
 %% 4) scan-to-scan PRF: settings per PRF, schedule, header
 c = base;

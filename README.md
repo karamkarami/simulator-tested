@@ -165,17 +165,16 @@ tracks (see Tests: `test_multi_scan`).
 
 ## Radar modes
 
-The radar has at most **6 modes** (numbers 0 ... 5). Every mode has its own
+The radar has at most **8 modes** (numbers 0 ... 7). Every mode has its own
 file `modes/radar_config_mode_<k>.m` with **everything of the receiver
 processing chain**, not only the timing:
 
 | Settings in the mode file | Fields |
 |---|---|
-| waveforms of both sub-pulses | `cfg.wave.short`, `cfg.wave.long`: type, width, bandwidth, chip, compression filter, carrier, on/off |
+| waveforms of both sub-pulses | `cfg.wave.short`, `cfg.wave.long`: type, width, bandwidth, chip, compression filter, carrier, on/off (`enable`: a mode with only the short or only the long pulse switches the other one off) |
 | timing | transmit time `tTx_s` and receive window `rxStart_s` / `rxEnd_s` of each sub-pulse (see "PRI timeline") |
 | DDC record | automatic, or set by hand (`cfg.rx.manualDdc = true`): `cfg.rx.nDdc` DDC samples per PRI, the first at `cfg.rx.ddcT0_s` |
 | phase codes (code agility) | `cfg.wave.maxCodes` (largest number of code / mismatch pairs per sub-pulse in `cfg.files.phaseCode`) and `cfg.wave.<pulse>.codeIndex` (the pair of each sub-pulse) |
-| single-pulse sub-mode | `cfg.wave.singlePulse` |
 | instrumented range | `cfg.rx.maxRange_m` |
 | PRF | `cfg.prf` (fixed, staggered, scan to scan); staggered: `cfg.prf.maxStaggerSets` (largest number of (T, w) pairs in `cfg.files.stagger`) and `cfg.prf.staggerSet` (the pair of the mode) |
 | input files of the processing | `cfg.files.stagger` (staggered PRIs and MTI weights), `cfg.files.scan2scan`, `cfg.files.phaseCode`, `cfg.files.mtiFir`: each mode may have its own |
@@ -194,51 +193,48 @@ the other mode files have the same settings with short comments.
 which one runs:
 
 ```matlab
-cfg.modes.available = [0 1 2];  % modes of this program (at most 6 of the numbers 0 ... 5)
+cfg.modes.available = [0 1 2];  % modes of this program (at most 8 of the numbers 0 ... 7)
 cfg.modes.active    = 0;        % mode the radar runs in (one of cfg.modes.available)
-cfg.modes.subMode   = 'dual';   % 'dual' (both sub-pulses) or 'single' (only cfg.wave.singlePulse)
 cfg = apply_radar_mode(cfg);    % every setting of the active mode
 ```
 
-Every mode has two sub-modes: **dual pulse** (`'dual'`, both sub-pulses in
-every PRI, as set in the mode file) and **single pulse** (`'single'`, only
-the sub-pulse `cfg.wave.singlePulse` of the mode; the other one is switched
-off, so with only the short pulse its receive window lasts to its
-`rxEnd_s` or to `cfg.rx.maxRange_m`).
+There are no sub-modes: a mode with one sub-pulse per PRI is a mode of its
+own whose file switches the other sub-pulse off (`cfg.wave.short.enable =
+false` or `cfg.wave.long.enable = false`; with only the short pulse its
+receive window lasts to its `rxEnd_s` or to `cfg.rx.maxRange_m`).
+(`cfg.modes.subMode` and `cfg.wave.singlePulse` of earlier versions are
+refused with a message.)
 
-| Mode | Name | Sub-pulses | Timing | PRF | single-pulse sub-mode |
-|---|---|---|---|---|---|
-| 0 | `medium_mode` | both phase codes (P4, 25 / 150 chips of 1 us), mismatch filters | short at 0, long at 200 us, windows from the pulse ends, to 80 km | fixed 1 kHz | long pulse |
-| 1 | `lfm_mode` | both LFM (1 MHz), Taylor-windowed matched filter (the waveforms before the modes) | as mode 0 | fixed 1 kHz | long pulse |
-| 2 | `long_range_mode` | both LFM (25 / 125 us) | short at 11 us (received 40 - 248 us), long at 321 us (received 533 - 1780 us, to 200 km) | fixed 1.8 ms | long pulse |
-| 3 ... 5 | `mode_3` ... `mode_5` | not yet defined: the settings of mode 1, to be edited | as mode 1 | fixed 1 kHz | long pulse |
+| Mode | Name | Sub-pulses | Timing | PRF |
+|---|---|---|---|---|
+| 0 | `medium_mode` | both phase codes (P4, 25 / 150 chips of 1 us), mismatch filters | short at 0, long at 200 us, windows from the pulse ends, to 80 km | fixed 1 kHz |
+| 1 | `lfm_mode` | both LFM (1 MHz), Taylor-windowed matched filter (the waveforms before the modes) | as mode 0 | fixed 1 kHz |
+| 2 | `long_range_mode` | both LFM (25 / 125 us) | short at 11 us (received 40 - 248 us), long at 321 us (received 533 - 1780 us, to 200 km) | fixed 1.8 ms |
+| 3 ... 7 | `mode_3` ... `mode_7` | not yet defined: the settings of mode 1, to be edited | as mode 1 | fixed 1 kHz |
 
-The processing settings of modes 0 ... 5 are all the same so far (those of
+The processing settings of modes 0 ... 7 are all the same so far (those of
 the radar before the modes); edit them per mode.
 
-`src/apply_radar_mode.m` runs the mode file of `cfg.modes.active` and then
-applies the sub-mode. Every mode file sets the same fields (all of them), so
+`src/apply_radar_mode.m` runs the mode file of `cfg.modes.active`. Every mode file sets the same fields (all of them), so
 selecting another mode replaces them all; a new setting of the processing goes
 into every mode file (`test_modes` checks that they all set the same fields
-and that `radar_config.m` sets none of them). Another mode or sub-mode in a
-script:
+and that `radar_config.m` sets none of them). Another mode in a script:
 
 ```matlab
 cfg = radar_config;
-cfg.modes.active  = 1;              % one of cfg.modes.available
-cfg.modes.subMode = 'single';
+cfg.modes.active = 1;               % one of cfg.modes.available
 cfg = apply_radar_mode(cfg);        % every setting of mode 1; changes after this are kept
+cfg.wave.short.enable = false;      % e.g. only the long pulse (better: in the mode file)
 results = run_radar_sim(cfg);
 ```
 
-`setup_radar.m` checks the modes (1 to 6 different numbers 0 ... 5, the
-active one among them, the sub-mode, `cfg.wave.singlePulse`); the run summary
-prints the mode, its name, the sub-mode and the waveforms. For the C receiver
+`setup_radar.m` checks the modes (1 to 8 different numbers 0 ... 7, the
+active one among them); the run summary prints the mode, its name and the
+waveforms. For the C receiver
 the mode is exported like any other setting (`export_receiver_config(cfg)`,
 or without MATLAB `radar_export_config --set "cfg.modes.active = 1; cfg =
 apply_radar_mode(cfg);"`; `radar_export_config` runs the mode files itself);
-the configuration file holds the mode number and sub-mode (record
-`radarMode`, printed by the receiver). The receiver processes the mode it was
+the configuration file holds the mode number (record `radarMode`, printed by the receiver). The receiver processes the mode it was
 configured for; to change the mode, export the configuration again and
 restart it.
 
@@ -278,9 +274,10 @@ cfg.io.saveMf = true;  cfg.io.saveDoppler = true;        % matched filter / Dopp
 cfg.track.method = 'tomht';         % 'ekf', 'pmbm' or 'tomht' (track-oriented MHT, IMM-UKF)
 results = run_radar_sim(cfg);
 
-cfg = radar_config;                 % radar mode 1 (LFM), single-pulse sub-mode (see "Radar modes")
-cfg.modes.active = 1;  cfg.modes.subMode = 'single';
+cfg = radar_config;                 % radar mode 1 (LFM), only the long pulse (see "Radar modes")
+cfg.modes.active = 1;
 cfg = apply_radar_mode(cfg);
+cfg.wave.short.enable = false;
 cfg.prf.mode = 'scan2scan';         % PRF from scan to scan (inputs/scan2scan_prf.mat), fixed in a scan
 cfg.sim.nScans = 3;
 results = run_radar_sim(cfg);
@@ -315,8 +312,8 @@ file was built for other values (for example after you change
 | File | Purpose |
 |---|---|
 | `radar_config.m` | all user parameters |
-| `modes/radar_config_mode_<k>.m` | the settings of radar mode k = 0 ... 5: waveforms, transmit times, receive windows, single-pulse sub-mode, PRF, files, STC and the whole receiver processing chain (see "Radar modes") |
-| `src/apply_radar_mode.m` | runs the mode file of `cfg.modes.active` and applies the sub-mode `cfg.modes.subMode` |
+| `modes/radar_config_mode_<k>.m` | the settings of radar mode k = 0 ... 7: waveforms (each sub-pulse on or off), transmit times, receive windows, DDC record, PRF, files, STC and the whole receiver processing chain (see "Radar modes") |
+| `src/apply_radar_mode.m` | runs the mode file of `cfg.modes.active` |
 | `src/select_prf_profile.m` | scan-to-scan PRF: the slow-time settings (CPI, FFT, Doppler axis, noise gains, notch) of the PRF of a scan |
 | `export_receiver_config.m` | writes the configuration of the C receiver (`radar_receiver_<os>/config/radar_config.bin`; without MATLAB: `radar_export_config` of the receiver project) |
 | `run_radar_sim.m` | main loop: generation, recording, DDC/streaming, processing, display |
@@ -659,7 +656,13 @@ there, at the same beam and Doppler, behind very strong far targets.
   lowers the range sidelobes for a small SNR loss. Each coefficient is held
   for the DDC samples of one chip (by default one coefficient per chip:
   chip-matched sum, then the chip-rate filter), so one file serves the 2
-  and the 4 MHz DDC output. The filter peaks earlier than the matched
+  and the 4 MHz DDC output. The code itself is never used at one sample
+  per chip either: the echo takes the chip of every ADC sample time (120
+  ADC samples per 1 us chip, any delay), and the matched filter is the code
+  sampled at the DDC rate (2 samples per 1 us chip at 2 MHz, 4 at 4 MHz).
+  Chips shorter than one DDC sample (`cfg.wave.<pulse>.chip_s` < 1/DDC rate:
+  a code bandwidth the DDC output cannot carry) are refused by
+  `setup_radar.m`, both exporters and `radar_generate_ddc`. The filter peaks earlier than the matched
   filter (`wv.mfShift` samples, found from the pulse after the DDC filters),
   which the range axis takes into account. The filter may have any length
   that is not shorter than the code (`cfg.wave.<pulse>.mismatchLength`
@@ -1370,7 +1373,7 @@ budget.
 | `test_generate_ddc_c` | the C program `radar_generate_ddc` against `generate_ddc_files.m`: equal files without noise (2 / 4 MHz, other carriers, long pulse off, phase codes, radar mode 2 with its transmit times and receive windows), equal clutter with fixed reflectivities, the same power of random clutter and noise, reproducible with any number of threads, the six targets generated in C detected by the C receiver |
 | `test_mti_fir` | clutter filter option: the FIR file instead of [1 -2 1], CPI - (L - 1) outputs, deeper notch than the canceller, flat noise floor after the noise gain of every bin, one row for every stagger position or one row per position, invalid files refused, `mtiCoeffs` and `mtiType` exported |
 | `test_c_receiver(mode, ..., cfarMethod, cfarType, trackMethod, radarMode, overrides)` | the six-target scenario streamed over UDP to the C receiver (`radar_receiver_<os>/`) with the given PRF mode (`'fixed'`, `'staggered'`, `'scan2scan'`), CFAR window, detector, tracker, radar mode (default 1; 2: short pulse at 11 us, set receive windows) and further settings (`overrides`, e.g. a stagger pair, phase codes and a manual DDC record): its plots and track updates must match MATLAB; the recorded stream is replayed to check repeatability and speed |
-| `test_modes` | radar modes: the defaults (modes 0, 1, 2, mode 0 active, dual); another mode and the single-pulse sub-mode; invalid modes refused; the scan-to-scan PRF (settings per PRF, schedule, header, a target in two scans); `cfg.cfar.maxPfa`; every mode file sets the same settings (the whole processing chain) and `radar_config.m` none; `apply_radar_mode` replaces changed settings; a mode of its own with another CFAR, tracker, model, Doppler window, stagger file, CPI and STC gives exactly these; mode 2: the DDC samples of the receive windows lie in them, the range cells follow from the windows and transmit times (no gap at the handover), the PRI header carries the windows, invalid windows refused, a simulation finds a target in each window at its true range and velocity; the Doppler windows (Hann, Blackman, rectangular) and their MTI notch widths; the manual DDC record (1800 samples from 0 us: sizes, first sample on the ADC grid, header, the same range cells, a simulation with a target in each window, invalid settings refused); code agility (every `codeIndex` selects its pair, a one-pair file, too many pairs or a missing pair refused); stagger pairs (every `staggerSet` selects its T and w, invalid files refused); the time-varying MTI weights (each output with the row of its oldest pulse, 32 dB less residue than [1 -2 1] on slow clutter) |
+| `test_modes` | radar modes: the defaults (modes 0, 1, 2, mode 0 active); another mode, all 8 modes 0 ... 7 set up, mode 7 with only the long pulse; invalid modes (more than 8, numbers above 7, the removed `subMode` / `singlePulse`) and phase-code chips shorter than a DDC sample refused; the scan-to-scan PRF (settings per PRF, schedule, header, a target in two scans); `cfg.cfar.maxPfa`; every mode file sets the same settings (the whole processing chain) and `radar_config.m` none; `apply_radar_mode` replaces changed settings; a mode of its own with another CFAR, tracker, model, Doppler window, stagger file, CPI and STC gives exactly these; mode 2: the DDC samples of the receive windows lie in them, the range cells follow from the windows and transmit times (no gap at the handover), the PRI header carries the windows, invalid windows refused, a simulation finds a target in each window at its true range and velocity; the Doppler windows (Hann, Blackman, rectangular) and their MTI notch widths; the manual DDC record (1800 samples from 0 us: sizes, first sample on the ADC grid, header, the same range cells, a simulation with a target in each window, invalid settings refused); code agility (every `codeIndex` selects its pair, a one-pair file, too many pairs or a missing pair refused); stagger pairs (every `staggerSet` selects its T and w, invalid files refused); the time-varying MTI weights (each output with the row of its oldest pulse, 32 dB less residue than [1 -2 1] on slow clutter) |
 
 Results of this revision (Octave 8.4, 4 vCPUs): `test_new_options`,
 `test_tracker_tomht` (every case; the C TOMHT tracker equals MATLAB in all

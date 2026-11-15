@@ -71,11 +71,10 @@ cfg.adc.overloadWarn     = 0.01;   % warn when more than this fraction of the re
                                    % is at full scale (cfg.rx.gain_dB too high for the echoes)
 
 %% Radar modes: waveforms, timing, PRF, STC and the whole receiver processing chain
-% The radar has at most 6 modes (numbers 0 ... 5). Each mode has its own
+% The radar has at most 8 modes (numbers 0 ... 7). Each mode has its own
 % settings in its mode file modes/radar_config_mode_<k>.m: the waveforms,
 % transmit times and receive windows of both sub-pulses (cfg.wave.short,
-% cfg.wave.long), the sub-pulse of its single-pulse sub-mode
-% (cfg.wave.singlePulse), the instrumented range (cfg.rx.maxRange_m), the PRF
+% cfg.wave.long, each one on or off), the DDC record, the instrumented range (cfg.rx.maxRange_m), the PRF
 % (cfg.prf) with its files (cfg.files.stagger, cfg.files.scan2scan), the
 % phase codes (cfg.files.phaseCode), the STC (cfg.rx.stc) and the whole
 % processing chain: pulse compression and CPI buffer (cfg.proc, incl. the
@@ -85,25 +84,24 @@ cfg.adc.overloadWarn     = 0.01;   % warn when more than this fraction of the re
 % Common to all modes (this file): the antenna, transmitter, receiver gain,
 % ADC, DDC, clutter, targets, recording and display. A program uses some of
 % the modes (cfg.modes.available, e.g. [0 1 2]: modes 0, 1 and 2) and runs one
-% of them (cfg.modes.active). Every mode has two sub-modes: 'dual' (both
-% sub-pulses in every PRI) and 'single' (only the sub-pulse cfg.wave.singlePulse
-% of the mode; the other one is switched off).
+% of them (cfg.modes.active), at most 8 modes 0 ... 7. A mode with one sub-pulse per PRI (only
+% the short or only the long pulse) switches the other one off in its file
+% (cfg.wave.<pulse>.enable = false).
 %   mode 0 'medium_mode'      both sub-pulses phase codes (P4, mismatch filters), fixed PRF 1 kHz
 %   mode 1 'lfm_mode'         both sub-pulses LFM (Taylor-windowed matched filter), fixed PRF 1 kHz
 %   mode 2 'long_range_mode'  example of set transmit times and receive windows: short pulse at
 %                             11 us (received 40 ... 248 us), long pulse of 125 us at 321 us
 %                             (received 533 ... 1780 us, to 200 km), LFM, PRI 1.8 ms
-%   modes 3 ... 5             not yet defined (the settings of mode 1): edit their files
+%   modes 3 ... 7             not yet defined (the settings of mode 1): edit their files
 % radar_config_mode_0.m explains every setting. apply_radar_mode.m (called
-% below) runs the mode file of cfg.modes.active and applies the sub-mode.
-% Another mode in a script: set cfg.modes.active / cfg.modes.subMode and call
+% below) runs the mode file of cfg.modes.active.
+% Another mode in a script: set cfg.modes.active and call
 % cfg = apply_radar_mode(cfg) again: it sets every setting of that mode
 % (C receiver: radar_export_config --set "cfg.modes.active = 1; cfg = apply_radar_mode(cfg);").
 % Changes of these settings after that (as the tests do) are kept. A new
 % setting of the processing goes into every mode file.
-cfg.modes.available = [0 1 2];  % modes of this program (at most 6 of the numbers 0 ... 5)
+cfg.modes.available = [0 1 2];  % modes of this program (at most 8 of the numbers 0 ... 7)
 cfg.modes.active    = 0;        % mode the radar runs in (one of cfg.modes.available)
-cfg.modes.subMode   = 'dual';   % 'dual' (both sub-pulses) or 'single' (only cfg.wave.singlePulse of the mode)
 addpath(fullfile(root, 'modes'));
 cfg = apply_radar_mode(cfg);    % every setting of the active mode (modes/radar_config_mode_<k>.m)
 

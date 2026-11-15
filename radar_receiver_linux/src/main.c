@@ -639,8 +639,8 @@ int main(int argc, char **argv)
             "CPI %d pulses, FFT %d x %d row(s), update every %d pulse(s), plots need %d update(s)\n", app.cfg.nCh,
             app.cfg.nBeams, app.cfg.nDdc, app.cfg.pulse[0].nRange, app.cfg.pulse[1].nRange, app.cfg.cpiLength,
             app.cfg.nfft, app.cfg.nRows, app.cfg.updateEvery, app.cfg.minHits);
-    fprintf(stderr, "Radar mode %d (%s sub-mode); DDC record %s: %d samples, the first at %.3f us", app.cfg.radarMode,
-            app.cfg.subModeSingle ? "single" : "dual", app.cfg.ddcManual ? "manual" : "automatic", app.cfg.nDdc,
+    fprintf(stderr, "Radar mode %d; DDC record %s: %d samples, the first at %.3f us", app.cfg.radarMode,
+            app.cfg.ddcManual ? "manual" : "automatic", app.cfg.nDdc,
             app.cfg.ddcT0_s * 1e6);
     for (int i = 0; i < N_PULSES; i++)
         if (app.cfg.codeIndex[i] > 0) fprintf(stderr, "; %s code %d", i == PULSE_SHORT ? "short" : "long", app.cfg.codeIndex[i]);

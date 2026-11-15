@@ -154,8 +154,8 @@ typedef struct {
     double  minExtent_deg;  /* azimuth extent of a plot (minHits = this / azimuth step per update) */
     double  meanPri_s;      /* mean PRI                                               */
 
-    /* radar mode (information; optional in the file): cfg.modes.active, sub-mode 1 single / 0 dual */
-    int     radarMode, subModeSingle;
+    /* radar mode (information; optional in the file): cfg.modes.active (0 ... 7) */
+    int     radarMode;
     /* (information; optional) DDC record set by hand (cfg.rx.manualDdc) and the time of its first
      * sample, code / mismatch pair of each sub-pulse (0: no phase code), (T, w) pair of the
      * staggered PRF (0: not staggered) */

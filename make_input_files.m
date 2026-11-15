@@ -204,7 +204,11 @@ if (doAll || strcmpi(which, 'mtiFir')) && isfield(cfg.files, 'mtiFir')
     save(cfg.files.mtiFir, 'coeffs', '-v7');
 end
 
-fprintf('Default input file(s) "%s" written to %s\n', which, folder);
+if doAll
+    fprintf('Default input files written to %s\n', folder);
+else
+    fprintf('Default input file "%s" written: %s\n', which, cfg.files.(which));
+end
 end
 
 function h = lowpass_fir(nTaps, fCutNorm)

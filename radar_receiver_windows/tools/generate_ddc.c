@@ -806,6 +806,9 @@ static void setup(Radar *s)
             w->nCode = (int)cv->numel;
             if (w->nCode != (int)lround(w->width / w->chip))
                 fail("The %s code has %d chips, but width_s/chip_s = %d.", names[i], w->nCode, (int)lround(w->width / w->chip));
+            if (w->enable && w->chip * s->fsOut < 1 - 1e-9)
+                fail("cfg.wave.%s.chip_s = %.3g us is shorter than the DDC sample period %.3g us (%.3g MHz): the code "
+                     "bandwidth 1/chip_s does not fit the DDC output.", names[i], w->chip * 1e6, 1e6 / s->fsOut, s->fsOut / 1e6);
             w->codeRe = xcalloc((size_t)w->nCode, sizeof(double));
             w->codeIm = xcalloc((size_t)w->nCode, sizeof(double));
             for (int k = 0; k < w->nCode; k++) { w->codeRe[k] = cv->re[k]; w->codeIm[k] = cv->im ? cv->im[k] : 0; }

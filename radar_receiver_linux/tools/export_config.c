@@ -1145,28 +1145,26 @@ static void export_config(void)
     const double fsOut = ddc.fsOut;
 
     /* radar mode (cfg.modes, apply_radar_mode.m): checked as in setup_radar.m */
-    int radarMode = 0, subSingle = 0;
+    int radarMode = 0;
     if (has("modes")) {
+        if (has("modes.subMode") || has("wave.singlePulse"))
+            fail("cfg.modes.subMode and cfg.wave.singlePulse no longer exist: a mode with one sub-pulse per PRI switches "
+                 "the other one off (cfg.wave.<pulse>.enable = false in its mode file).");
         const MValue *av = field("modes.available", 1);
-        if (av->type != MV_NUM || av->rows * av->cols < 1 || av->rows * av->cols > 6)
-            fail("cfg.modes.available must hold 1 to 6 different mode numbers 0 ... 5.");
+        if (av->type != MV_NUM || av->rows * av->cols < 1 || av->rows * av->cols > 8)
+            fail("cfg.modes.available must hold 1 to 8 different mode numbers 0 ... 7.");
         const int nAv = av->rows * av->cols;
         for (int i = 0; i < nAv; i++) {
             const double m = av->re[i];
             int dup = 0;
             for (int k = 0; k < i; k++) dup |= av->re[k] == m;
-            if (m != floor(m) || m < 0 || m > 5 || dup) fail("cfg.modes.available must hold 1 to 6 different mode numbers 0 ... 5.");
+            if (m != floor(m) || m < 0 || m > 7 || dup) fail("cfg.modes.available must hold 1 to 8 different mode numbers 0 ... 7.");
         }
         const double act = num("modes.active");
         int found = 0;
         for (int i = 0; i < nAv; i++) found |= av->re[i] == act;
         if (!found) fail("cfg.modes.active = %g is not one of cfg.modes.available.", act);
         radarMode = (int)act;
-        const char *sm = str("modes.subMode");
-        if (same_text(sm, "single")) subSingle = 1;
-        else if (!same_text(sm, "dual")) fail("cfg.modes.subMode must be 'dual' or 'single'.");
-        if (has("wave.singlePulse") && !same_text(str("wave.singlePulse"), "short") && !same_text(str("wave.singlePulse"), "long"))
-            fail("cfg.wave.singlePulse (mode %d) must be 'short' or 'long'.", radarMode);
     }
 
     /* PRI sequence and MTI weights */
@@ -1339,6 +1337,9 @@ static void export_config(void)
             if (w->nCode != (int)lround(w->width_s / w->chip_s))
                 fail("The %s code %d of %s has %d chips, but width_s/chip_s = %d.", names[i], w->codeIndex, str("files.phaseCode"),
                      w->nCode, (int)lround(w->width_s / w->chip_s));
+            if (w->enable && w->chip_s * fsOut < 1 - 1e-9)
+                fail("cfg.wave.%s.chip_s = %.3g us is shorter than the DDC sample period %.3g us (%.3g MHz): the code "
+                     "bandwidth 1/chip_s does not fit the DDC output.", names[i], w->chip_s * 1e6, 1e6 / fsOut, fsOut / 1e6);
             w->codeRe = xcalloc((size_t)w->nCode, sizeof(double));
             w->codeIm = xcalloc((size_t)w->nCode, sizeof(double));
             for (int k = 0; k < w->nCode; k++) { w->codeRe[k] = cv->re[k]; w->codeIm[k] = cv->im ? cv->im[k] : 0; }
@@ -1747,8 +1748,8 @@ static void export_config(void)
     rec_scalar("minExtent_deg", minExtent);
     rec_scalar("meanPri_s", meanPri);
     {                                                    /* radar mode (information): number, 0 dual / 1 single */
-        const double md[2] = { radarMode, subSingle };
-        rec_vec("radarMode", md, 2, 0);
+        const double md[1] = { radarMode };
+        rec_vec("radarMode", md, 1, 0);
     }
     {   /* (information) DDC record [manual 1/0, time of the first DDC sample], code / mismatch pair of every
          * sub-pulse (0: no phase code), (T, w) pair of the staggered PRF (0: not staggered) */
@@ -1927,8 +1928,8 @@ static void export_config(void)
                nCh, nBeams, nDdc, fsOut / 1e6, ws->nRange, wl->nRange, cpiLength, nfft, nRows,
                mtiFir ? "FIR" : "canceller", nTaps, cfarType == 0 ? "CA" : cfarType == 1 ? "GO" : cfarType == 2 ? "SO" : "OS",
                method, 10 * log10(alpha), cfar_pfa(alpha, &det), nLooks);
-        printf("Radar mode %d%s%s (%s sub-mode): short %s, long %s\n", radarMode, has("modes.name") ? " " : "",
-               has("modes.name") ? str("modes.name") : "", subSingle ? "single" : "dual",
+        printf("Radar mode %d%s%s: short %s, long %s\n", radarMode, has("modes.name") ? " " : "",
+               has("modes.name") ? str("modes.name") : "",
                !ws->enable ? "off" : ws->phaseCode ? (ws->mismatch ? "phase code (mismatch)" : "phase code") : "LFM",
                !wl->enable ? "off" : wl->phaseCode ? (wl->mismatch ? "phase code (mismatch)" : "phase code") : "LFM");
         printf("DDC record (%s): %d samples, the first at %.3f us", manualDdc ? "manual" : "automatic", nDdc, tDdc[0] * 1e6);

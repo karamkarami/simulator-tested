@@ -5,8 +5,8 @@ function cfg = radar_config_mode_5(cfg)
 %   of mode 1 (LFM, fixed PRF). Edit the values below to define it.
 %
 %   cfg = RADAR_CONFIG_MODE_5(cfg) sets everything of this mode in cfg: the
-%   waveforms, transmit times and receive windows of both sub-pulses, the
-%   sub-pulse of the single-pulse sub-mode, the PRF, the input files of the
+%   waveforms, transmit times and receive windows of both sub-pulses (each
+%   one on or off), the PRF, the input files of the
 %   processing (stagger, scan-to-scan PRFs, phase codes, FIR clutter filter),
 %   the STC and the whole receiver processing chain (pulse compression, CPI
 %   buffer, Doppler window and FFT, clutter filter, CFAR, pruning, reports,
@@ -15,8 +15,8 @@ function cfg = radar_config_mode_5(cfg)
 %   and display. radar_config.m calls this file (through apply_radar_mode.m)
 %   when this mode is cfg.modes.active. Every mode file sets the same fields
 %   (all of them), so that selecting another mode with apply_radar_mode
-%   replaces them all. Each mode has two sub-modes (cfg.modes.subMode): 'dual'
-%   (both sub-pulses, as set here) and 'single' (only cfg.wave.singlePulse).
+%   replaces them all. A mode with one sub-pulse per PRI switches the other
+%   one off (cfg.wave.<pulse>.enable = false).
 %   The meaning of every setting: radar_config_mode_0.m and README.md.
 %   The file is also evaluated by radar_export_config (C receiver): only
 %   assignments, no if/for blocks.
@@ -34,7 +34,7 @@ cfg.modes.name = 'mode_5';              % name of the mode (run summary, receive
 % Range cells of a sub-pulse: the echoes that lie whole inside its window, i.e. the delays
 % rxStart_s - tTx_s ... rxEnd_s - tTx_s - width_s.
 cfg.wave.maxCodes           = 4;        % phase codes: largest number of code / mismatch pairs per sub-pulse
-cfg.wave.short.enable       = true;     % short sub-pulse on/off (in the 'dual' sub-mode)
+cfg.wave.short.enable       = true;     % short sub-pulse on/off (false: only the long pulse)
 cfg.wave.short.fc_Hz        = [];       % its carrier [Hz] ([] = cfg.fc)
 cfg.wave.short.type         = 'lfm';    % 'lfm' or 'phasecode' (code from cfg.files.phaseCode)
 cfg.wave.short.width_s      = 25e-6;    % pulse width [s]
@@ -48,7 +48,7 @@ cfg.wave.short.tTx_s        = 0;        % transmit time in the PRI [s]
 cfg.wave.short.rxStart_s    = [];       % start of its receive window in the PRI [s] ([] = end of the pulse)
 cfg.wave.short.rxEnd_s      = [];       % end of its receive window [s] ([] = transmission of the long pulse)
 
-cfg.wave.long.enable        = true;     % long sub-pulse on/off (in the 'dual' sub-mode)
+cfg.wave.long.enable        = true;     % long sub-pulse on/off (false: only the short pulse)
 cfg.wave.long.fc_Hz         = [];
 cfg.wave.long.type          = 'lfm';
 cfg.wave.long.width_s       = 150e-6;
@@ -66,9 +66,6 @@ cfg.rx.maxRange_m      = 80e3;   % instrumented range [m]: the end of the long-p
 cfg.rx.manualDdc = false;        % true: the DDC record of this mode is set by hand (nDdc, ddcT0_s)
 cfg.rx.nDdc      = [];           % manualDdc: DDC samples per PRI
 cfg.rx.ddcT0_s   = [];           % manualDdc: time of the first DDC sample in the PRI [s] ([] = automatic)
-
-% Sub-mode 'single' (one sub-pulse per PRI): the sub-pulse it keeps, 'short' or 'long'
-cfg.wave.singlePulse = 'long';
 
 %% PRF: 'fixed' (pri_s), 'staggered' (PRIs of cfg.files.stagger, with their MTI weights) or
 % 'scan2scan' (one PRF per antenna scan from cfg.files.scan2scan, constant during the scan)
