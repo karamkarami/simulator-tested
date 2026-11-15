@@ -57,6 +57,12 @@ cfg.modes.name = 'medium_mode';         % name of the mode (run summary, receive
 % more than the pulse bandwidth apart also keep the short-pulse echo of far targets out of the
 % long window (the DDC filters reject it).
 %
+% Code agility: cfg.files.phaseCode holds up to cfg.wave.maxCodes code / mismatch-filter pairs per
+% sub-pulse (<pulse>Code_<k>, <pulse>Mismatch_<k>, k = 1, 2, ...; the default file: maxCodes pairs,
+% code 1 P4, the others polyphase codes of other roots); cfg.wave.<pulse>.codeIndex selects the pair
+% of each sub-pulse. A file with more pairs than maxCodes, or a codeIndex above maxCodes or above
+% the pairs of the file, stops with a message.
+cfg.wave.maxCodes           = 4;        % phase codes: largest number of code / mismatch pairs per sub-pulse
 cfg.wave.short.enable       = true;     % short sub-pulse on/off (in the 'dual' sub-mode)
 cfg.wave.short.fc_Hz        = [];       % its carrier [Hz] ([] = cfg.fc)
 cfg.wave.short.type         = 'phasecode'; % 'lfm' or 'phasecode' (code from cfg.files.phaseCode)
@@ -64,6 +70,7 @@ cfg.wave.short.width_s      = 25e-6;    % pulse width [s]
 cfg.wave.short.bandwidth_Hz = 1e6;      % LFM sweep bandwidth [Hz]
 cfg.wave.short.chip_s       = 1e-6;     % phase-code chip length [s] (width_s/chip_s chips)
 cfg.wave.short.compression  = 'mismatch'; % phase code: 'matched' or 'mismatch' filter (LFM: 'matched')
+cfg.wave.short.codeIndex    = 1;        % phase code: code / mismatch pair of cfg.files.phaseCode (1 ... maxCodes)
 cfg.wave.short.mismatchLength = [];     % coefficients (one per chip) of the mismatch filter in the default
                                         % phase-code file ([] = chips + 10, at most 2x the chips)
 cfg.wave.short.tTx_s        = 0;        % transmit time in the PRI [s]
@@ -77,6 +84,7 @@ cfg.wave.long.width_s       = 150e-6;
 cfg.wave.long.bandwidth_Hz  = 1e6;
 cfg.wave.long.chip_s        = 1e-6;
 cfg.wave.long.compression   = 'mismatch';
+cfg.wave.long.codeIndex     = 1;
 cfg.wave.long.mismatchLength = [];
 cfg.wave.long.tTx_s         = 200e-6;   % transmit time in the PRI [s]
 cfg.wave.long.rxStart_s     = [];       % start of its receive window [s] ([] = end of the pulse)
@@ -84,6 +92,15 @@ cfg.wave.long.rxEnd_s       = [];       % end of its receive window = end of the
                                         % ([] = end of the echoes from cfg.rx.maxRange_m)
 cfg.rx.maxRange_m      = 80e3;   % instrumented range [m]: the end of the long-pulse receive window when its
                                  % rxEnd_s is [] (else set it to match the window); the PPI range
+% DDC record of every PRI: automatic (from the PRI start to the end of the last receive window) or,
+% with manualDdc = true, nDdc DDC samples whose first one is at ddcT0_s in the PRI ([] = the
+% automatic time: half the input span of a DDC sample after the PRI start). ddcT0_s is rounded to
+% the ADC sample grid; it may be before the PRI start (e.g. 0). The receive windows are taken out
+% of the record as with the automatic one (a set rxEnd_s must lie inside it); the record must end
+% within the shortest PRI.
+cfg.rx.manualDdc = false;        % true: the DDC record of this mode is set by hand (nDdc, ddcT0_s)
+cfg.rx.nDdc      = [];           % manualDdc: DDC samples per PRI
+cfg.rx.ddcT0_s   = [];           % manualDdc: time of the first DDC sample in the PRI [s] ([] = automatic)
 
 % Sub-mode 'single' (one sub-pulse per PRI): the sub-pulse it keeps, 'short' or 'long'
 cfg.wave.singlePulse = 'long';
@@ -101,6 +118,13 @@ cfg.wave.singlePulse = 'long';
 %               blind speeds follow the PRF of the scan.
 cfg.prf.mode  = 'fixed';
 cfg.prf.pri_s = 1e-3;                   % PRI in fixed mode [s] (at least the end of the last receive window)
+% Staggered PRF: cfg.files.stagger holds up to maxStaggerSets pairs of a PRI sequence T
+% (priVector_s_<k>) and its MTI weights w (mtiCoeffs_<k>: one row per stagger position, applied
+% time-varying: each MTI output uses the row of the stagger position of its oldest pulse);
+% staggerSet selects the pair. More pairs in the file than maxStaggerSets, or a staggerSet above
+% maxStaggerSets or above the pairs of the file, stops with a message.
+cfg.prf.staggerSet     = 1;     % staggered PRF: pair (T, w) of cfg.files.stagger (1 ... maxStaggerSets)
+cfg.prf.maxStaggerSets = 4;     % staggered PRF: largest number of (T, w) pairs
 
 %% Input files of this mode (each mode may have its own files)
 cfg.files.stagger   = fullfile(root, 'inputs', 'stagger_prf.mat');    % staggered PRIs + MTI weights (cfg.prf.mode = 'staggered')

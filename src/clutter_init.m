@@ -101,7 +101,7 @@ for i = 1:2
     clut.(names{i}).nFft   = nFft;
     clut.(names{i}).txFft  = fft(tx, nFft);
     % ADC sample (0-based, relative to the window start) where an echo of zero delay starts
-    clut.(names{i}).start0 = round((wv.tTx_s - sys.rxStart_s) * fs);
+    clut.(names{i}).start0 = round(wv.tTx_s * fs) - round(sys.rxStart_s * fs);
     clut.(names{i}).enable = wv.enable;
     clut.(names{i}).fdScale  = wv.fc_Hz / sys.cfg.fc;        % internal motion Doppler on its carrier
     clut.(names{i}).ampScale = wv.lambda_m / sys.lambda;     % power ~ lambda^2

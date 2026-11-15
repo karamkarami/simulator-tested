@@ -20,7 +20,8 @@ function ok = test_new_options()
 %      update, with the sizes of the blocks ([] for a sub-pulse that is off)
 %   7) the C program radar_export_config (when built) writes the same records as
 %      export_receiver_config for every option above, the Doppler window 'blackman', a
-%      short pulse at 11 us with set receive-window starts and radar mode 2 (set windows)
+%      short pulse at 11 us with set receive-window starts and radar mode 2 (set windows), stagger
+%      pair 3 with codes 2 / 4 and a manual DDC record from 0 us, mode 2 with a manual record
 %   8) the noise floor of the PPI video (colour scale) stays within 0.5 dB while the antenna
 %      crosses a 45 deg sector whose rows are 95% clutter (the mountains)
 
@@ -191,7 +192,12 @@ if exist(exe, 'file')
              'cfg.proc.dopplerWindow = ''blackman'';', {'proc.dopplerWindow', 'blackman'}
              'cfg.wave.short.tTx_s = 11e-6; cfg.wave.short.rxStart_s = 40e-6; cfg.wave.long.rxStart_s = 360e-6;', ...
                  {'wave.short.tTx_s', 11e-6; 'wave.short.rxStart_s', 40e-6; 'wave.long.rxStart_s', 360e-6}
-             'cfg.modes.active = 2; cfg = apply_radar_mode(cfg);', {'modes.active', 2}};
+             'cfg.modes.active = 2; cfg = apply_radar_mode(cfg);', {'modes.active', 2}
+             'cfg.prf.mode = ''staggered''; cfg.prf.staggerSet = 3; cfg.wave.short.codeIndex = 2; cfg.wave.long.codeIndex = 4; cfg.rx.manualDdc = true; cfg.rx.nDdc = 1800; cfg.rx.ddcT0_s = 0;', ...
+                 {'prf.mode', 'staggered'; 'prf.staggerSet', 3; 'wave.short.codeIndex', 2; 'wave.long.codeIndex', 4; ...
+                  'rx.manualDdc', true; 'rx.nDdc', 1800; 'rx.ddcT0_s', 0}
+             'cfg.modes.active = 2; cfg = apply_radar_mode(cfg); cfg.rx.manualDdc = true; cfg.rx.nDdc = 3600; cfg.rx.ddcT0_s = 5e-6;', ...
+                 {'modes.active', 2; 'rx.manualDdc', true; 'rx.nDdc', 3600; 'rx.ddcT0_s', 5e-6}};
     for k = 1:size(cases, 1)
         c = radar_config();
         for j = 1:size(cases{k, 2}, 1)

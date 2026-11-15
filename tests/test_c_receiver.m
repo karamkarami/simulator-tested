@@ -1,4 +1,4 @@
-function [ok, cmp] = test_c_receiver(prfMode, receiverBin, port, targetIdx, replayOnly, cfarMethod, cfarType, trackMethod, radarMode)
+function [ok, cmp] = test_c_receiver(prfMode, receiverBin, port, targetIdx, replayOnly, cfarMethod, cfarType, trackMethod, radarMode, overrides)
 %TEST_C_RECEIVER  The C receiver (radar_receiver_<os>/, <os> = windows or linux: receiver_dir.m) against the MATLAB processing.
 %
 %   [ok, cmp] = TEST_C_RECEIVER(prfMode, receiverBin, port) runs the
@@ -26,6 +26,9 @@ function [ok, cmp] = test_c_receiver(prfMode, receiverBin, port, targetIdx, repl
 %   radarMode: radar mode (default 1 'lfm_mode'; e.g. 2: the short pulse sent at
 %   11 us and receive windows set in the PRI, modes/radar_config_mode_2.m); its
 %   settings, then prfMode, cfarMethod, cfarType and trackMethod.
+%   overrides: further settings {path, value; ...} applied last, e.g.
+%   {'prf.staggerSet', 3; 'wave.short.codeIndex', 2; 'rx.manualDdc', true;
+%    'rx.nDdc', 1800; 'rx.ddcT0_s', 0} (the output folder gets the suffix _custom).
 %   The tracks of both programs are compared as well: the same track
 %   numbers, update by update, with positions within 20 m.
 %   Needs a POSIX shell (Linux, macOS) to start the receiver in the background.
@@ -43,6 +46,7 @@ if nargin < 6 || isempty(cfarMethod), cfarMethod = '2d'; end
 if nargin < 7 || isempty(cfarType), cfarType = 'ca'; end
 if nargin < 8 || isempty(trackMethod), trackMethod = 'ekf'; end
 if nargin < 9 || isempty(radarMode), radarMode = 1; end
+if nargin < 10, overrides = cell(0, 2); end
 if ~exist(receiverBin, 'file')
     error('C receiver %s not found: build it first (radar_receiver_<os>/README.md)', receiverBin);
 end
@@ -60,9 +64,14 @@ cfg.cfar.type       = cfarType;
 cfg.track.method    = trackMethod;
 cfg.clutter.enable  = true;
 if isempty(cfg.wave.long.rxEnd_s), cfg.rx.maxRange_m = 50e3; end   % (a set window keeps its end)
+for j = 1:size(overrides, 1)
+    parts = strsplit(overrides{j, 1}, '.');
+    cfg = setfield(cfg, parts{:}, overrides{j, 2});
+end
 cfg.targets         = six_targets_scenario();
 if strcmp(prfMode, 'scan2scan'), cfg.sim.nScans = 2; end   % the second scan has the second PRF
 modeTag = '';  if radarMode ~= 1, modeTag = sprintf('_mode%d', radarMode); end
+if ~isempty(overrides), modeTag = [modeTag '_custom']; end
 cfg.io.outFolder    = fullfile(root, 'output', ['c_receiver_' prfMode '_' cfarType '_' cfarMethod '_' trackMethod modeTag]);
 cfg.io.saveRaw      = false;
 cfg.display.enable  = false;

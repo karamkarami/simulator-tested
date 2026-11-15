@@ -8,7 +8,8 @@ function ok = test_generate_ddc_c()
 %      signal in single precision): at least 99.9% of the samples equal, none
 %      more than 2 LSB apart. Cases: default (2 MHz), 4 MHz DDC with the
 %      sub-pulses on 165 / 175 MHz, the long pulse off, phase codes, radar mode 2
-%      (short pulse sent at 11 us, receive windows set in the PRI).
+%      (short pulse sent at 11 us, receive windows set in the PRI), codes 2 / 4 with
+%      a staggered pair 3 and a manual DDC record that starts before the PRI.
 %   2. Terrain clutter: with the expected amplitude in every cell (no random
 %      phase, no motion: RADAR_GEN_FIXED_CLUTTER, and clutter_init.m changed the
 %      same way) the DDC output agrees with MATLAB as in 1 (over the mountains
@@ -49,7 +50,10 @@ cases = {'default, 2 MHz', {}
          'long pulse off', {'wave.long.enable', false}
          'P4 phase codes, mismatch filter (long)', {'wave.short.type', 'phasecode'; 'wave.long.type', 'phasecode'; ...
                                                     'wave.long.compression', 'mismatch'}
-         'mode 2: short pulse at 11 us, set receive windows', {'modes.active', 2}};
+         'mode 2: short pulse at 11 us, set receive windows', {'modes.active', 2}
+         'codes 2 / 4 (mismatch), stagger pair 3, manual DDC record from 0 us', {'wave.short.codeIndex', 2; ...
+             'wave.long.codeIndex', 4; 'prf.mode', 'staggered'; 'prf.staggerSet', 3; 'rx.manualDdc', true; ...
+             'rx.nDdc', 1800; 'rx.ddcT0_s', 0}};
 for k = 1:size(cases, 1)
     c = base;
     for j = 1:size(cases{k, 2}, 1)

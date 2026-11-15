@@ -10,12 +10,13 @@ function make_input_files(cfg, which)
 %     ddc_filters_4MHz.mat: the same for the 4 MHz output (other h2)
 %     dbf_matrix.mat      : elevation DBF matrix W [nBeams x cfg.ant.nElements]
 %                           and beam elevations
-%     stagger_prf.mat     : staggered PRI vector and the matching MTI weights
+%     stagger_prf.mat     : pairs of a staggered PRI vector and its MTI weights
 %     scan2scan_prf.mat   : PRFs of the antenna scans (prf_Hz, used in turn) for
 %                           cfg.prf.mode = 'scan2scan'
 %     phase_code.mat      : phase codes of the short and the long sub-pulse
-%                           (P4, width_s/chip_s chips) and their mismatch
-%                           filters (one coefficient per chip)
+%                           (cfg.wave.maxCodes per sub-pulse, the first P4,
+%                           width_s/chip_s chips) and their mismatch filters
+%                           (one coefficient per chip)
 %     mti_fir.mat         : FIR clutter filter along slow time (coeffs), used with
 %                           cfg.mti.type = 'fir'
 %   MAKE_INPUT_FILES(cfg, which) writes only one of them: which = 'antenna',
@@ -103,19 +104,36 @@ if doAll || strcmpi(which, 'dbf')
     save(cfg.files.dbf, 'W', 'beamEl_deg', 'madeFor', '-v7');
 end
 
-%% 4) Staggered PRF: PRI vector and time-varying 3-pulse MTI weights
+%% 4) Staggered PRF: pairs of a PRI sequence T and its time-varying 3-pulse MTI weights w
+% priVector_s_<k> [K x 1] and mtiCoeffs_<k> [K x 3] (one row per stagger position: the weights of
+% the MTI outputs whose oldest pulse has that position), k = 1 ... cfg.prf.maxStaggerSets (default
+% 1): the mode selects pair cfg.prf.staggerSet. Pair 1 is the stagger of the radar before the
+% pairs; the others are further sequences (the same mean PRI of about 1 ms, other blind speeds).
+% A file of your own may hold fewer pairs (at least 1, numbered from 1) of any lengths, or only
+% priVector_s and mtiCoeffs (one pair).
 if doAll || strcmpi(which, 'stagger')
-    priVector_s = [920; 1000; 960; 1040] * 1e-6;
-    K = numel(priVector_s);
-    mtiCoeffs = zeros(K, 3);
-    for k = 1:K
-        % Pulses k, k+1, k+2 are separated by T1 and T2. The weights null DC and
-        % the first-order (linear phase) clutter term; they equal [1 -2 1] when T1 = T2.
-        T1 = priVector_s(k);
-        T2 = priVector_s(mod(k, K) + 1);
-        mtiCoeffs(k, :) = 2 * [T2, -(T1 + T2), T1] / (T1 + T2);
+    maxSets = 1;
+    if isfield(cfg.prf, 'maxStaggerSets') && ~isempty(cfg.prf.maxStaggerSets), maxSets = cfg.prf.maxStaggerSets; end
+    seqs = {[920; 1000; 960; 1040], [940; 1000; 920; 1060], [960; 1020; 930; 1050; 990], [920; 980; 1040; 1100], ...
+            [930; 1010; 970; 1050; 950; 1030]};
+    out = struct();
+    for j = 1:maxSets
+        T = seqs{mod(j - 1, numel(seqs)) + 1} * 1e-6;
+        if j > numel(seqs), T = circshift(T, floor((j - 1) / numel(seqs))); end   % (more pairs: rotated)
+        K = numel(T);
+        w = zeros(K, 3);
+        for k = 1:K
+            % Pulses k, k+1, k+2 are separated by T1 and T2. The weights null DC and the
+            % first-order (linear phase) clutter term; they equal [1 -2 1] when T1 = T2.
+            T1 = T(k);
+            T2 = T(mod(k, K) + 1);
+            w(k, :) = 2 * [T2, -(T1 + T2), T1] / (T1 + T2);
+        end
+        out.(sprintf('priVector_s_%d', j)) = T;
+        out.(sprintf('mtiCoeffs_%d', j)) = w;
     end
-    save(cfg.files.stagger, 'priVector_s', 'mtiCoeffs', '-v7');
+    out.madeFor = struct('nSets', maxSets);
+    save(cfg.files.stagger, '-struct', 'out', '-v7');
 end
 
 %% 4b) Scan-to-scan PRF: one PRF per antenna scan (used in turn, cfg.prf.mode = 'scan2scan')
@@ -124,28 +142,33 @@ if (doAll || strcmpi(which, 'scan2scan')) && isfield(cfg.files, 'scan2scan')
     save(cfg.files.scan2scan, 'prf_Hz', '-v7');
 end
 
-%% 5) Phase codes (P4) and their mismatch filters
-% shortCode, longCode [nChips x 1]: complex chip values, the first chip is
-% sent first. shortMismatch, longMismatch [K x 1]: mismatch filter with one
-% coefficient per chip, as a convolution filter (output = conv(code,
-% filter)); its main peak is in the middle of the full convolution. Length
-% K = cfg.wave.<pulse>.mismatchLength (any K >= nChips, e.g. 3*nChips; the
-% extra coefficients are split between both ends), by default nChips + 2*pad
-% with pad = min(5, nChips/2): more padding gives little here (25 chips: PSL
-% -25.9 dB with 5, -26.0 dB with 10). Any length works with the rest of the
-% chain: the range cells and the receive window do not depend on it
-% (setup_radar.m). The filter minimises the peak sidelobe for a unit main
-% peak (mismatch_filter.m). A filter with another sample rate (e.g. designed
-% at the DDC output rate on the received pulse) can be given with
-% <pulse>MismatchRate_Hz (setup_radar.m).
+%% 5) Phase codes and their mismatch filters (code agility: several pairs per sub-pulse)
+% shortCode_<k>, longCode_<k> [nChips x 1]: complex chip values, the first chip is sent first;
+% shortMismatch_<k>, longMismatch_<k> [K x 1]: the mismatch filter of code k with one
+% coefficient per chip, as a convolution filter (output = conv(code, filter)); its main peak is
+% in the middle of the full convolution. k = 1 ... cfg.wave.maxCodes (default 1); the mode selects
+% the pair cfg.wave.<pulse>.codeIndex. Code 1 is P4; the others are polyphase codes with the phases
+% pi*r*m^2/N - pi*m (r coprime to N; r = 1: P4), the roots r chosen one after the other among the
+% first 16 so that the echo of any other code of the set through the mismatch filter of a code
+% stays as far as possible below its own peak (agile_codes below). A file of your own may hold fewer pairs (numbered from 1)
+% or only <pulse>Code and <pulse>Mismatch (one pair). Filter length K =
+% cfg.wave.<pulse>.mismatchLength (any K >= nChips, e.g. 3*nChips; the extra coefficients are
+% split between both ends), by default nChips + 2*pad with pad = min(5, nChips/2): more padding
+% gives little here (25 chips: PSL -25.9 dB with 5, -26.0 dB with 10). Any length works with the
+% rest of the chain: the range cells and the receive window do not depend on it (setup_radar.m).
+% The filter minimises the peak sidelobe for a unit main peak (mismatch_filter.m). A filter with
+% another sample rate (e.g. designed at the DDC output rate on the received pulse) can be given
+% with <pulse>MismatchRate_Hz (for all codes of the sub-pulse; setup_radar.m).
 if doAll || strcmpi(which, 'phaseCode')
     names = {'short', 'long'};
     madeFor = struct();
+    out = struct();
+    maxCodes = 1;
+    if isfield(cfg.wave, 'maxCodes') && ~isempty(cfg.wave.maxCodes), maxCodes = cfg.wave.maxCodes; end
     for i = 1:2
         wv = cfg.wave.(names{i});
         N = round(wv.width_s / wv.chip_s);
         m = (0:N-1)';
-        code = exp(1j*(pi*m.^2/N - pi*m));            % P4 polyphase code
         K = mismatch_length(wv);
         if isempty(K), K = N + 2*min(5, floor(N/2)); end
         if K < N || K ~= round(K)
@@ -153,11 +176,15 @@ if doAll || strcmpi(which, 'phaseCode')
                   names{i}, K, N);
         end
         pad = [floor((K - N)/2), K - N - floor((K - N)/2)];
-        out.([names{i} 'Code']) = code;
-        out.([names{i} 'Mismatch']) = mismatch_filter(code, pad);
+        [codes, filters] = agile_codes(N, pad, maxCodes);
+        for k = 1:maxCodes
+            out.(sprintf('%sCode_%d', names{i}, k)) = codes{k};
+            out.(sprintf('%sMismatch_%d', names{i}, k)) = filters{k};
+        end
         madeFor.([names{i} 'Chips']) = N;
         madeFor.([names{i} 'MismatchLength']) = mismatch_length(wv);
     end
+    madeFor.nCodes = maxCodes;
     out.madeFor = madeFor;
     save(cfg.files.phaseCode, '-struct', 'out', '-v7');
 end
@@ -190,6 +217,40 @@ k = (0:nTaps-1)';
 blackman = 0.42 - 0.5*cos(2*pi*k/(nTaps-1)) + 0.08*cos(4*pi*k/(nTaps-1));
 h = s .* blackman;
 h = h / sum(h);
+end
+
+function [codes, filters] = agile_codes(N, pad, n)
+% n polyphase codes of N chips (phases pi*r*m^2/N - pi*m, root r coprime to N) with their mismatch
+% filters: r = 1 (P4) first, then greedily the root (among the first 16 coprime to N) whose worst
+% cross-talk with the codes already chosen (peak of a code through the filter of another, relative
+% to the peak of the filter's own code, both ways) is the lowest.
+m = (0:N-1)';
+cand = find(gcd(1:max(N-1, 1), N) == 1);
+cand = cand(1:min(end, max(16, n)));
+C = cell(1, numel(cand));  H = C;  P = zeros(1, numel(cand));
+for i = 1:numel(cand)
+    C{i} = exp(1j*(pi*cand(i)*m.^2/N - pi*m));
+    H{i} = mismatch_filter(C{i}, pad);
+    P(i) = max(abs(conv(C{i}, H{i})));
+end
+X = zeros(numel(cand));                                   % X(i, j): code j through filter i [dB]
+for i = 1:numel(cand)
+    for j = 1:numel(cand)
+        if i ~= j, X(i, j) = 20*log10(max(abs(conv(C{j}, H{i}))) / P(i)); end
+    end
+end
+chosen = 1;
+while numel(chosen) < min(n, numel(cand))
+    best = -inf;  pick = 0;
+    for j = setdiff(1:numel(cand), chosen)
+        worst = max([X(chosen, j); X(j, chosen).']);
+        if -worst > best, best = -worst;  pick = j; end
+    end
+    chosen(end+1) = pick; %#ok<AGROW>
+end
+while numel(chosen) < n, chosen(end+1) = chosen(mod(numel(chosen), numel(cand)) + 1); end %#ok<AGROW>
+codes = C(chosen);
+filters = H(chosen);
 end
 
 function K = mismatch_length(wv)

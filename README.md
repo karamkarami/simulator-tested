@@ -173,9 +173,11 @@ processing chain**, not only the timing:
 |---|---|
 | waveforms of both sub-pulses | `cfg.wave.short`, `cfg.wave.long`: type, width, bandwidth, chip, compression filter, carrier, on/off |
 | timing | transmit time `tTx_s` and receive window `rxStart_s` / `rxEnd_s` of each sub-pulse (see "PRI timeline") |
+| DDC record | automatic, or set by hand (`cfg.rx.manualDdc = true`): `cfg.rx.nDdc` DDC samples per PRI, the first at `cfg.rx.ddcT0_s` |
+| phase codes (code agility) | `cfg.wave.maxCodes` (largest number of code / mismatch pairs per sub-pulse in `cfg.files.phaseCode`) and `cfg.wave.<pulse>.codeIndex` (the pair of each sub-pulse) |
 | single-pulse sub-mode | `cfg.wave.singlePulse` |
 | instrumented range | `cfg.rx.maxRange_m` |
-| PRF | `cfg.prf` (fixed, staggered, scan to scan) |
+| PRF | `cfg.prf` (fixed, staggered, scan to scan); staggered: `cfg.prf.maxStaggerSets` (largest number of (T, w) pairs in `cfg.files.stagger`) and `cfg.prf.staggerSet` (the pair of the mode) |
 | input files of the processing | `cfg.files.stagger` (staggered PRIs and MTI weights), `cfg.files.scan2scan`, `cfg.files.phaseCode`, `cfg.files.mtiFir`: each mode may have its own |
 | STC | `cfg.rx.stc` (curves of both windows) |
 | pulse compression, CPI buffer, Doppler | `cfg.proc`: Taylor window, CPI length (buffer), FFT length, Doppler window (`dopplerWindow`), update rate |
@@ -374,10 +376,10 @@ file was built for other values (for example after you change
 | `ddc_filters.mat` | DDC output 2 MHz: `h1` (stage 1 at 120 MHz, 70 taps), `h2` (stage 2 at 12 MHz, 66 taps, pass +-0.5 MHz, stop above 1.5 MHz): int16 with 13 fractional bits (coefficient = value / 8192), DC gain about 1 |
 | `ddc_filters_4MHz.mat` | DDC output 4 MHz (`cfg.ddc.outputRate_Hz = 4e6`): the same `h1`, `h2` with 66 taps passing +-1 MHz and stopping above 2 MHz (the Nyquist frequency of 4 MHz) |
 | `dbf_matrix.mat` | `W` [21 x nElements] (beam = W * x), `beamEl_deg` |
-| `stagger_prf.mat` | `priVector_s` [K x 1], `mtiCoeffs` [K x L] (row k = weights of an MTI output whose first pulse has stagger position k; one row = fixed weights) |
+| `stagger_prf.mat` | pairs of a staggered PRI sequence T and its MTI weights w: `priVector_s_<k>` [K x 1], `mtiCoeffs_<k>` [K x L] (row j = weights of an MTI output whose first pulse has stagger position j: time-varying weights; one row = fixed weights), k = 1 ... at most `cfg.prf.maxStaggerSets` (pairs may have different K and L); the mode uses pair `cfg.prf.staggerSet`. Default: 4 pairs (pair 1 = 920, 1000, 960, 1040 us as before; then 4, 5 and 4 PRIs of 920 - 1100 us) with 3-pulse weights that null DC and the linear phase of slow clutter. A file with only `priVector_s`, `mtiCoeffs` holds one pair |
 | `scan2scan_prf.mat` | `prf_Hz` [1 x N]: the PRFs of the antenna scans for `cfg.prf.mode = 'scan2scan'` (scan s uses `prf_Hz(mod(s-1, N) + 1)`); default 1000, 1040, 960 Hz. Every PRI must hold the receive window (896 us at 80 km) |
 | `mti_fir.mat` | `coeffs` [1 x L] or [K x L] (one row per stagger position): the FIR clutter filter used with `cfg.mti.type = 'fir'`, real, any length; output m = sum_l coeffs(l) x(m+l-1), oldest pulse first. Default: 5 taps, a double zero at zero Doppler and a zero pair at +-3% of the PRF (-88 dB at 2% of the PRF instead of -44 dB with the canceller, -6.5 dB instead of -1.8 dB at a quarter of the PRF) |
-| `phase_code.mat` | phase codes and mismatch filters of both sub-pulses (used when `cfg.wave.<pulse>.type = 'phasecode'`): `shortCode`, `longCode` [nChips x 1] complex chip values, first chip sent first (default P4, 25 and 150 chips of 1 us); `shortMismatch`, `longMismatch`: mismatch filter as a convolution filter (output = conv(code, filter)), by default one coefficient per chip (default: 10 coefficients longer than the code, or `cfg.wave.<pulse>.mismatchLength` coefficients, any length not shorter than the code; smallest peak sidelobe); optional `shortMismatchRate_Hz`, `longMismatchRate_Hz`: sample rate of the filter, when it is not one coefficient per chip (e.g. the DDC output rate) |
+| `phase_code.mat` | phase codes and mismatch filters of both sub-pulses (used when `cfg.wave.<pulse>.type = 'phasecode'`), several pairs per sub-pulse (code agility): `shortCode_<k>`, `longCode_<k>` [nChips x 1] complex chip values, first chip sent first, k = 1 ... at most `cfg.wave.maxCodes` (default: 4 pairs, 25 and 150 chips of 1 us; code 1 P4, the others polyphase codes pi*r*m^2/N - pi*m whose roots r are chosen so that another code of the set through the filter of a code stays at least 8.7 dB below its own peak); the mode uses pair `cfg.wave.<pulse>.codeIndex`; a file with only `shortCode`, `shortMismatch`, ... holds one pair; `shortMismatch_<k>`, `longMismatch_<k>`: mismatch filter as a convolution filter (output = conv(code, filter)), by default one coefficient per chip (default: 10 coefficients longer than the code, or `cfg.wave.<pulse>.mismatchLength` coefficients, any length not shorter than the code; smallest peak sidelobe); optional `shortMismatchRate_Hz`, `longMismatchRate_Hz`: sample rate of the filters of all codes of the sub-pulse, when it is not one coefficient per chip (e.g. the DDC output rate) |
 
 The default files also hold `madeFor`, the configuration values they were
 built for. User files simply leave it out.
@@ -460,6 +462,20 @@ a sub-pulse are the echoes that lie whole inside its window: delays
 31.8 km, long 31.8 - 200 km, handover without a gap). The C receiver accepts
 DDC records longer than the configured one (for example the DDC output of the
 whole PRI) and takes only the receive windows out of them.
+
+**Manual DDC record** (`cfg.rx.manualDdc = true` in the mode file): the
+record holds `cfg.rx.nDdc` DDC samples, the first at `cfg.rx.ddcT0_s` in the
+PRI (`[]` = the automatic time, half the input span of a DDC sample, 3.0 us
+at 2 MHz, after the PRI start). `ddcT0_s` is rounded to the ADC sample grid
+(1/120 MHz) and may lie before the PRI start (e.g. 0: the ADC record then
+starts 3 us before it). The receive windows are taken out of the record as
+with the automatic one; a set `rxEnd_s` after the last DDC sample, or a
+record that ends after the shortest PRI, stops with a message. The PRI header
+carries the time of the first DDC sample (`ddcT0_s`) and of the first ADC
+sample (`rxStart_s`); the exported configuration the record (`nDdc`, record
+`ddcRecord` = [manual, ddcT0_s]), which the C receiver prints at the start.
+Example: `nDdc = 1800`, `ddcT0_s = 0` gives the DDC samples at 0, 0.5, ...,
+899.5 us (automatic: 1770 samples from 3.0 us) and the same range cells.
 
 In modes 0 / 1 the short pulse covers 4.2 - 23.7 km and the long pulse 22.9 -
 80.6 km (the long pulse is blind up to c x 150 us / 2 = 22.5 km). The CFAR
@@ -666,7 +682,7 @@ there, at the same beam and Doppler, behind very strong far targets.
   cfg = radar_config;  cfg.wave.long.type = 'phasecode';  cfg.wave.long.compression = 'mismatch';
   sys = setup_radar(cfg);
   f = rmfield(load(cfg.files.phaseCode), 'madeFor');          % a user file: no 'madeFor'
-  f.longMismatch = mismatch_filter(ddc_pulse(sys, sys.wave.long, 0:0.25:0.75), 10, 3);
+  f.longMismatch_1 = mismatch_filter(ddc_pulse(sys, sys.wave.long, 0:0.25:0.75), 10, 3);   % (code 1)
   f.longMismatchRate_Hz = sys.fsOut;                           % one coefficient per DDC sample
   save('inputs/my_phase_code.mat', '-struct', 'f');
   cfg.files.phaseCode = fullfile(pwd, 'inputs', 'my_phase_code.mat');
@@ -725,8 +741,11 @@ there, at the same beam and Doppler, behind very strong far targets.
   does the same (`processor.c`, test `core` / `core_carriers`).
 * **Doppler:** fixed PRF: 3-pulse canceller (112 outputs), Hamming window
   and one FFT whose length is the next power of 2 of the number of pulses
-  (114 -> 128). Staggered PRF: the stagger MTI weights from the file, then
-  de-interleaving into 4 rows of 28 samples. Each row is sampled every
+  (114 -> 128). Staggered PRF: the MTI weights of the selected (T, w) pair of
+  the file (`cfg.prf.staggerSet`), applied time-varying (every output with
+  the row of the stagger position of its oldest pulse: on clutter moving at
+  0.3 m/s the residue is 32 dB below that of [1 -2 1] on the staggered
+  pulses), then de-interleaving into 4 rows of 28 samples (pair 1). Each row is sampled every
   sum(PRI); it gets a Hamming window and a 32-point FFT (the next power of 2
   of 28), and |X|^2 is averaged over the rows. The window is a setting of
   the mode (`cfg.proc.dopplerWindow`: `'hamming'` (default), `'hann'`,
@@ -1330,7 +1349,7 @@ budget.
 | Test | What it checks |
 |---|---|
 | `test_snr_budget(mode, pulse, type, nElements, ddcRate, compression)` | measured vs. expected SNR after each block (LFM or P4 with its matched or mismatch filter, 1 or 48 elements, 2 or 4 MHz DDC output); the noise power of every block is the mean over the pulses of the CPI (after the Doppler processing: over the Doppler bins outside the MTI notch) |
-| `test_phase_code` | phase codes from the file, matched and mismatch filters: a target through the whole chain lands on its range cell with both (2 and 4 MHz), the mismatch filter has lower sidelobes and less than 1.5 dB loss; a user filter at the DDC rate; 3x mismatch filters: the same DDC output and range cells as the matched filter, targets near the edges of both receive intervals on their cells with lower sidelobes; `run_radar_sim` with default and 3x mismatch filters gives the right plot; the C core test passes with both exported mismatch configurations |
+| `test_phase_code` | phase codes from the file, matched and mismatch filters: the default file with 4 code / mismatch pairs per sub-pulse (code agility), every pair on the target cell with lower sidelobes than its matched filter, another code through the filter of the selected one at least 8 dB down; a target through the whole chain lands on its range cell with both (2 and 4 MHz), the mismatch filter has lower sidelobes and less than 1.5 dB loss; a user filter at the DDC rate; 3x mismatch filters: the same DDC output and range cells as the matched filter, targets near the edges of both receive intervals on their cells with lower sidelobes; `run_radar_sim` with default and 3x mismatch filters gives the right plot; the C core test passes with both exported mismatch configurations |
 | `test_udp_stream` | the DDC output of a PRI sent over UDP to localhost is received bit-exact, with its header |
 | `test_ddc_replay` | a short run saves only the DDC files (no raw data); `replay_ddc_udp` sends them to localhost bit-exact, with the PRI timing (median delay below 10 % of the PRI); when built, the C sender `radar_stream_send` sends them (saved with `-v6` and `-v7`) bit-exact as well |
 | `test_generate_ddc` | `generate_ddc_files`: without noise its DDC files equal those of `run_radar_sim` bit by bit (2 and 4 MHz, header included); with noise a pulse gives the same file whatever other pulses are generated (order and number of workers do not matter) |
@@ -1350,8 +1369,8 @@ budget.
 | `test_tracker_tomht` | the cases of `test_tracker_pmbm` with the TOMHT tracker (`test_tracker_pmbm('tomht')`), and the C TOMHT tracker on the same calls |
 | `test_generate_ddc_c` | the C program `radar_generate_ddc` against `generate_ddc_files.m`: equal files without noise (2 / 4 MHz, other carriers, long pulse off, phase codes, radar mode 2 with its transmit times and receive windows), equal clutter with fixed reflectivities, the same power of random clutter and noise, reproducible with any number of threads, the six targets generated in C detected by the C receiver |
 | `test_mti_fir` | clutter filter option: the FIR file instead of [1 -2 1], CPI - (L - 1) outputs, deeper notch than the canceller, flat noise floor after the noise gain of every bin, one row for every stagger position or one row per position, invalid files refused, `mtiCoeffs` and `mtiType` exported |
-| `test_c_receiver(mode, ..., cfarMethod, cfarType, trackMethod, radarMode)` | the six-target scenario streamed over UDP to the C receiver (`radar_receiver_<os>/`) with the given PRF mode (`'fixed'`, `'staggered'`, `'scan2scan'`), CFAR window, detector, tracker and radar mode (default 1; 2: short pulse at 11 us, set receive windows): its plots and track updates must match MATLAB; the recorded stream is replayed to check repeatability and speed |
-| `test_modes` | radar modes: the defaults (modes 0, 1, 2, mode 0 active, dual); another mode and the single-pulse sub-mode; invalid modes refused; the scan-to-scan PRF (settings per PRF, schedule, header, a target in two scans); `cfg.cfar.maxPfa`; every mode file sets the same settings (the whole processing chain) and `radar_config.m` none; `apply_radar_mode` replaces changed settings; a mode of its own with another CFAR, tracker, model, Doppler window, stagger file, CPI and STC gives exactly these; mode 2: the DDC samples of the receive windows lie in them, the range cells follow from the windows and transmit times (no gap at the handover), the PRI header carries the windows, invalid windows refused, a simulation finds a target in each window at its true range and velocity; the Doppler windows (Hann, Blackman, rectangular) and their MTI notch widths |
+| `test_c_receiver(mode, ..., cfarMethod, cfarType, trackMethod, radarMode, overrides)` | the six-target scenario streamed over UDP to the C receiver (`radar_receiver_<os>/`) with the given PRF mode (`'fixed'`, `'staggered'`, `'scan2scan'`), CFAR window, detector, tracker, radar mode (default 1; 2: short pulse at 11 us, set receive windows) and further settings (`overrides`, e.g. a stagger pair, phase codes and a manual DDC record): its plots and track updates must match MATLAB; the recorded stream is replayed to check repeatability and speed |
+| `test_modes` | radar modes: the defaults (modes 0, 1, 2, mode 0 active, dual); another mode and the single-pulse sub-mode; invalid modes refused; the scan-to-scan PRF (settings per PRF, schedule, header, a target in two scans); `cfg.cfar.maxPfa`; every mode file sets the same settings (the whole processing chain) and `radar_config.m` none; `apply_radar_mode` replaces changed settings; a mode of its own with another CFAR, tracker, model, Doppler window, stagger file, CPI and STC gives exactly these; mode 2: the DDC samples of the receive windows lie in them, the range cells follow from the windows and transmit times (no gap at the handover), the PRI header carries the windows, invalid windows refused, a simulation finds a target in each window at its true range and velocity; the Doppler windows (Hann, Blackman, rectangular) and their MTI notch widths; the manual DDC record (1800 samples from 0 us: sizes, first sample on the ADC grid, header, the same range cells, a simulation with a target in each window, invalid settings refused); code agility (every `codeIndex` selects its pair, a one-pair file, too many pairs or a missing pair refused); stagger pairs (every `staggerSet` selects its T and w, invalid files refused); the time-varying MTI weights (each output with the row of its oldest pulse, 32 dB less residue than [1 -2 1] on slow clutter) |
 
 Results of this revision (Octave 8.4, 4 vCPUs): `test_new_options`,
 `test_tracker_tomht` (every case; the C TOMHT tracker equals MATLAB in all

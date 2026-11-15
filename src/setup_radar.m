@@ -75,9 +75,12 @@ switch lower(cfg.prf.mode)
         sys.pri = cfg.prf.pri_s;
         sys.mtiCoeffs = [1 -2 1];                             % three-pulse canceller
     case 'staggered'
-        st = load_input(cfg, 'stagger', []);
-        sys.pri = st.priVector_s(:);
-        sys.mtiCoeffs = st.mtiCoeffs;                         % one row per stagger position
+        % several (PRI sequence T, MTI weights w) pairs in cfg.files.stagger (code agility of the
+        % PRF): pair cfg.prf.staggerSet of at most cfg.prf.maxStaggerSets (stagger_set below)
+        [setIdx, maxSets] = stagger_choice(cfg);
+        st = load_input(cfg, 'stagger', struct('nSets', maxSets));
+        [sys.pri, sys.mtiCoeffs, sys.nStaggerSets] = stagger_set(st, setIdx, maxSets, cfg.files.stagger);
+        sys.staggerSet = setIdx;                              % weights: one row per stagger position
     case 'scan2scan'
         % one PRF per antenna scan (constant during the scan), used in turn: scan s has
         % prf_Hz(mod(s - 1, numel(prf_Hz)) + 1). Inside a scan as the fixed PRF.
@@ -99,6 +102,7 @@ switch lower(cfg.prf.mode)
         error('Unknown PRF mode "%s" (''fixed'', ''staggered'' or ''scan2scan'')', cfg.prf.mode);
 end
 sys.staggered = strcmpi(cfg.prf.mode, 'staggered');
+if ~sys.staggered, sys.staggerSet = 0; end                    % (no stagger pair in use)
 sys.nStagger  = numel(sys.pri);
 % Clutter filter: the canceller above, or an FIR filter from cfg.files.mtiFir
 sys.mti.type = 'canceller';
@@ -182,11 +186,15 @@ sys.N0ddc = sys.N0eff * (adcLevel + rounding) / adcLevel;      % noise density a
 % transmitter leakage (these samples are not used by the processing).
 names = {'short', 'long'};
 codes = [];                                                   % phase codes and mismatch filters
+% Code agility: cfg.files.phaseCode holds several code / mismatch-filter pairs per sub-pulse
+% (<pulse>Code_<k>, <pulse>Mismatch_<k>, k = 1 ... at most cfg.wave.maxCodes; a file with only
+% <pulse>Code, <pulse>Mismatch holds one pair); cfg.wave.<pulse>.codeIndex selects the pair.
+maxCodes = max_codes(cfg);
 if any(strcmpi({cfg.wave.short.type, cfg.wave.long.type}, 'phasecode'))
     nChips = [round(cfg.wave.short.width_s / cfg.wave.short.chip_s), round(cfg.wave.long.width_s / cfg.wave.long.chip_s)];
     codes = load_input(cfg, 'phaseCode', struct('shortChips', nChips(1), 'shortMismatchLength', ...
                        mismatch_length(cfg.wave.short), 'longChips', nChips(2), 'longMismatchLength', ...
-                       mismatch_length(cfg.wave.long)));
+                       mismatch_length(cfg.wave.long), 'nCodes', maxCodes));
 end
 for i = 1:2
     wv = cfg.wave.(names{i});
@@ -207,19 +215,24 @@ for i = 1:2
     wv.radarConst = sys.radarConst * (wv.lambda_m / sys.lambda)^2;   % received power ~ lambda^2
     wv.compression = lower(wv.compression);
     if strcmpi(wv.type, 'phasecode')
-        wv.code = codes.([names{i} 'Code'])(:);
+        [wv.code, wv.codeIndex, sfx, wv.nCodesFile] = code_pair(codes, names{i}, wv, maxCodes, cfg.files.phaseCode);
         if numel(wv.code) ~= round(wv.width_s / wv.chip_s)
-            error('The %s code of %s has %d chips, but width_s/chip_s = %d.', names{i}, cfg.files.phaseCode, ...
-                  numel(wv.code), round(wv.width_s / wv.chip_s));
+            error('The %s code %d of %s has %d chips, but width_s/chip_s = %d.', names{i}, wv.codeIndex, ...
+                  cfg.files.phaseCode, numel(wv.code), round(wv.width_s / wv.chip_s));
         end
         if strcmp(wv.compression, 'mismatch')
-            wv.mismatch = codes.([names{i} 'Mismatch'])(:);
+            if ~isfield(codes, [names{i} 'Mismatch' sfx])
+                error('%s has no mismatch filter ''%sMismatch%s'' for the %s code %d.', cfg.files.phaseCode, ...
+                      names{i}, sfx, names{i}, wv.codeIndex);
+            end
+            wv.mismatch = codes.([names{i} 'Mismatch' sfx])(:);
             wv.mismatchRate_Hz = 1 / wv.chip_s;                % one coefficient per chip (default)
             if isfield(codes, [names{i} 'MismatchRate_Hz'])
                 wv.mismatchRate_Hz = codes.([names{i} 'MismatchRate_Hz']);
             end
         end
     end
+    if ~strcmpi(wv.type, 'phasecode'), wv.codeIndex = 0; end   % (0: no phase code)
     % Pulse compression filter (unit noise gain) and the samples by which its
     % peak comes earlier than that of the matched filter
     [wv.mfTaps, wv.mfShift] = compression_filter(wv, cfg, sys);
@@ -254,13 +267,50 @@ if ~wl.enable, wLast = ws; end
                                      filterSpan/2 + 1/sys.fsOut);
 priMin = min(sys.pri);
 if sys.scan2scan, priMin = min(sys.priScan_s); end
-if rxEnd > priMin + 1e-12
+manualDdc = isfield(cfg.rx, 'manualDdc') && ~isempty(cfg.rx.manualDdc) && logical(cfg.rx.manualDdc);
+if ~manualDdc && rxEnd > priMin + 1e-12
     error(['Receive window (%.1f us) does not fit in the shortest PRI (%.1f us): reduce ', ...
            'cfg.rx.maxRange_m (or cfg.wave.%s.rxEnd_s) or start the long pulse earlier.'], ...
            rxEnd*1e6, priMin*1e6, wLast.name);
 end
 sys.nAdc = round((rxEnd - sys.rxStart_s) * fs);
-sys.tAdc = sys.rxStart_s + (0:sys.nAdc-1)' / fs;             % ADC sample times in the PRI [s]
+% Manual DDC record of the mode (cfg.rx.manualDdc): cfg.rx.nDdc DDC samples, the first one at
+% cfg.rx.ddcT0_s ([] = the automatic time, half the input span of a DDC sample after the PRI
+% start). The record then starts half that span before ddcT0_s (on the ADC sample grid: ddcT0_s
+% is rounded to it; before the PRI start too, e.g. ddcT0_s = 0) and holds the ADC samples of
+% exactly nDdc DDC samples. The receive windows are taken out of it as with the automatic record.
+m0 = 0;                                                       % first ADC sample of the record
+halfSpan = (L1-1)/2/fs + (L2-1)/2/fs1;                        % ddcT0_s of the automatic record
+sys.ddcRecord.manual = manualDdc;
+if sys.ddcRecord.manual
+    nSet = [];  if isfield(cfg.rx, 'nDdc'), nSet = cfg.rx.nDdc; end
+    if ~isscalar(nSet) || ~isreal(nSet) || nSet < 1 || nSet ~= round(nSet)
+        error('cfg.rx.manualDdc = true needs cfg.rx.nDdc: the number of DDC samples per PRI (a whole number >= 1).');
+    end
+    t0 = halfSpan;
+    if isfield(cfg.rx, 'ddcT0_s') && ~isempty(cfg.rx.ddcT0_s), t0 = cfg.rx.ddcT0_s; end
+    if ~isscalar(t0) || ~isreal(t0) || ~isfinite(t0)
+        error('cfg.rx.ddcT0_s must be the time of the first DDC sample in the PRI [s] (or [] = automatic).');
+    end
+    m0 = round((t0 - halfSpan) * fs);
+    sys.nAdc = (nSet - 1)*D1*D2 + (L2 - 1)*D1 + L1;
+    sys.rxStart_s = m0 / fs;
+    recEnd = (m0 + sys.nAdc) / fs;
+    if recEnd > priMin + 1e-12
+        error(['The manual DDC record (cfg.rx.nDdc = %d samples from cfg.rx.ddcT0_s = %.2f us) ends at %.1f us, ', ...
+               'after the shortest PRI (%.1f us).'], nSet, (m0/fs + halfSpan)*1e6, recEnd*1e6, priMin*1e6);
+    end
+    for i = 1:2
+        nm = {'short', 'long'};
+        iv = rxIv.(nm{i});
+        if sys.pulseOn(i) && rxSet.(nm{i})(2) && iv(2) > recEnd - halfSpan + 1e-12
+            error(['cfg.wave.%s.rxEnd_s = %.2f us is after the last DDC sample of the manual record ', ...
+                   '(%.2f us: cfg.rx.nDdc, cfg.rx.ddcT0_s).'], nm{i}, iv(2)*1e6, (recEnd - halfSpan)*1e6);
+        end
+    end
+end
+sys.ddcRecord.m0 = m0;                                        % (ADC samples before the PRI start: -m0)
+sys.tAdc = (m0 + (0:sys.nAdc-1)') / fs;                       % ADC sample times in the PRI [s]
 shortEnd = inf;  if wl.enable, shortEnd = wl.tTx_s; end      % (without the long pulse the short pulse
 sys.shortRxEnd_s = shortEnd;                                  %  is followed by no other one)
 sys.rxWindow_s.short = rxIv.short;                            % receive windows [start end) [s]
@@ -295,6 +345,7 @@ sys.ddc.minusSin = round(-sin(2*pi*sys.fIF*sys.tAdc) * 2^15) / 2^15;
 t1 = sys.tAdc(1:D1:sys.nAdc-L1+1) + (L1-1)/2/fs;
 sys.tDdc = t1(1:D2:numel(t1)-L2+1) + (L2-1)/2/fs1;
 sys.nDdc = numel(sys.tDdc);
+sys.ddcT0_s = sys.tDdc(1);                                    % time of the first DDC sample
 k = (0:sys.nDdc-1)';
 firstAdc = k*D2*D1 + 1;
 lastAdc  = (k*D2 + L2 - 1)*D1 + L1;
@@ -652,6 +703,82 @@ sys.dop.nLooks = min(nLooks(tested));
 % Median / mean of the noise power (used to estimate the noise floor of a beam)
 L = sys.dop.nLooks;
 sys.dop.medianToMean = fzero(@(x) gammainc(L*x, L) - 0.5, [0.1 2]);
+end
+
+function [k, maxSets] = stagger_choice(cfg)
+% cfg.prf.staggerSet (default 1) and cfg.prf.maxStaggerSets (default 1): the pair (T, w) of the
+% stagger file and the largest number of pairs the file may hold.
+k = 1;  maxSets = 1;
+if isfield(cfg.prf, 'maxStaggerSets') && ~isempty(cfg.prf.maxStaggerSets), maxSets = cfg.prf.maxStaggerSets; end
+if isfield(cfg.prf, 'staggerSet') && ~isempty(cfg.prf.staggerSet), k = cfg.prf.staggerSet; end
+if ~isscalar(maxSets) || ~isreal(maxSets) || maxSets < 1 || maxSets ~= round(maxSets)
+    error('cfg.prf.maxStaggerSets must be a whole number >= 1 (the largest number of (T, w) pairs).');
+end
+if ~isscalar(k) || ~isreal(k) || k < 1 || k ~= round(k) || k > maxSets
+    error('cfg.prf.staggerSet = %s must be a whole number 1 ... cfg.prf.maxStaggerSets = %d.', mat2str(k), maxSets);
+end
+end
+
+function [pri, w, n] = stagger_set(st, k, maxSets, file)
+% Pair k of a stagger file: priVector_s_<k> and mtiCoeffs_<k> (k = 1 ... n), or priVector_s and
+% mtiCoeffs (a file with one pair). The weights have one row per stagger position (or one row).
+n = 0;
+while isfield(st, sprintf('priVector_s_%d', n + 1)), n = n + 1; end
+sfx = sprintf('_%d', k);
+if n == 0 && isfield(st, 'priVector_s'), n = 1;  sfx = ''; end
+if n == 0
+    error('%s holds no staggered PRIs (priVector_s_1, mtiCoeffs_1, ... or priVector_s, mtiCoeffs).', file);
+end
+if n > maxSets
+    error('%s holds %d (T, w) pairs, more than cfg.prf.maxStaggerSets = %d.', file, n, maxSets);
+end
+if k > n
+    error('cfg.prf.staggerSet = %d: %s holds only %d (T, w) pair(s).', k, file, n);
+end
+if ~isfield(st, ['mtiCoeffs' sfx])
+    error('%s: the MTI weights ''mtiCoeffs%s'' of pair %d are missing.', file, sfx, k);
+end
+pri = double(st.(['priVector_s' sfx])(:));
+w = double(st.(['mtiCoeffs' sfx]));
+if isempty(pri) || any(~isfinite(pri)) || any(pri <= 0)
+    error('%s: the PRIs ''priVector_s%s'' must be positive [s].', file, sfx);
+end
+if size(w, 1) ~= 1 && size(w, 1) ~= numel(pri)
+    error('%s: ''mtiCoeffs%s'' needs 1 or %d rows (one per stagger position).', file, sfx, numel(pri));
+end
+end
+
+function m = max_codes(cfg)
+% cfg.wave.maxCodes (default 1): the largest number of code / mismatch pairs per sub-pulse.
+m = 1;
+if isfield(cfg.wave, 'maxCodes') && ~isempty(cfg.wave.maxCodes), m = cfg.wave.maxCodes; end
+if ~isscalar(m) || ~isreal(m) || m < 1 || m ~= round(m)
+    error('cfg.wave.maxCodes must be a whole number >= 1 (the largest number of phase codes per sub-pulse).');
+end
+end
+
+function [code, k, sfx, n] = code_pair(codes, name, wv, maxCodes, file)
+% Code cfg.wave.<name>.codeIndex (default 1) of the phase-code file: <name>Code_<k> (k = 1 ... n),
+% or <name>Code (a file with one code); sfx is the suffix of its variables.
+k = 1;
+if isfield(wv, 'codeIndex') && ~isempty(wv.codeIndex), k = wv.codeIndex; end
+if ~isscalar(k) || ~isreal(k) || k < 1 || k ~= round(k) || k > maxCodes
+    error('cfg.wave.%s.codeIndex = %s must be a whole number 1 ... cfg.wave.maxCodes = %d.', name, mat2str(k), maxCodes);
+end
+n = 0;
+while isfield(codes, sprintf('%sCode_%d', name, n + 1)), n = n + 1; end
+sfx = sprintf('_%d', k);
+if n == 0 && isfield(codes, [name 'Code']), n = 1;  sfx = ''; end
+if n == 0
+    error('%s holds no %s code (%sCode_1, ... or %sCode).', file, name, name, name);
+end
+if n > maxCodes
+    error('%s holds %d %s codes, more than cfg.wave.maxCodes = %d.', file, n, name, maxCodes);
+end
+if k > n
+    error('cfg.wave.%s.codeIndex = %d: %s holds only %d %s code(s).', name, k, file, n, name);
+end
+code = codes.([name 'Code' sfx])(:);
 end
 
 function [w, mainlobe] = doppler_window(cfg, N)

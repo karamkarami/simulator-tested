@@ -351,8 +351,19 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
      * outside the MTI notch, for any carrier frequency), 0.3 bins off a bin centre */
     const double dv = fabs(cfg.dopFreq_Hz[1] - cfg.dopFreq_Hz[0]) * pc->lambda_m / 2;   /* Doppler bin [m/s] */
     const double vr = -(cfg.nfft / 4 + 0.3) * dv;
-    /* PRI of the configuration (fixed PRF; 1 ms with a staggered PRF), amplitude per element (LSB) */
-    const double pri_s = cfg.staggered ? 1e-3 : cfg.meanPri_s, amp = 30.0;
+    /* staggered PRF: the rows are sampled every sum(PRI), so vr is folded; the echo gets vr plus whole
+     * row PRFs (round(0.4 nStagger) of them, near 0.4 x the PRF) so that it lies in the passband of the
+     * 3-pulse clutter filter of the whole pulse train (at a quarter of the row axis it would be at about
+     * 6% of the PRF, deep in the MTI notch); the plot gives the folded vr */
+    double vrEcho = vr;
+    if (cfg.staggered) {
+        const double rowPrf = 1.0 / (cfg.nStagger * cfg.meanPri_s);
+        vrEcho = vr - floor(0.4 * cfg.nStagger + 0.5) * rowPrf * pc->lambda_m / 2;
+    }
+    /* PRI of the configuration, amplitude per element (LSB). A staggered PRF: the pulses at the mean PRI
+     * with the stagger positions in turn, so that every de-interleaved row is sampled every sum(PRI), as
+     * its Doppler axis */
+    const double pri_s = cfg.meanPri_s, amp = 30.0;
     const int nPulses = cfg.cpiLength + 60, nWith = cfg.cpiLength + 30;
 
     PriData pri;
@@ -389,13 +400,13 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
         pri.scanNumber = 1;
         pri.az_deg = (float)fmod(k * cfg.rate_dps * pri_s, 360.0);
         pri.time_s = k * pri_s;
-        pri.staggerIndex = 1;
+        pri.staggerIndex = (uint16_t)(cfg.staggered ? k % cfg.nStagger + 1 : 1);
         for (int ch = 0; ch < cfg.nCh; ch++)            /* (the same noise with and without extra samples) */
             for (int n = 0; n < 2 * cfg.nDdc; n++) pri.iq[2 * (size_t)ch * nRec + n] = sat16(16.0 * gauss());
         for (int ch = 0; ch < cfg.nCh; ch++)
             for (int n = 2 * cfg.nDdc; n < 2 * nRec; n++) pri.iq[2 * (size_t)ch * nRec + n] = (int16_t)(n % 2 ? -30000 : 30000);
         if (k < nWith) {
-            const double ph = -4 * PI * vr * pri.time_s / pc->lambda_m;   /* baseband phase -4*pi*R/lambda */
+            const double ph = -4 * PI * vrEcho * pri.time_s / pc->lambda_m;   /* baseband phase -4*pi*R/lambda */
             const int first = pc->ddcFirst + r0 + pc->mfShift;
             for (int ch = 0; ch < cfg.nCh; ch++) {
                 const double cr = amp * (steerRe[ch] * cos(ph) - steerIm[ch] * sin(ph));

@@ -510,6 +510,42 @@ static const MatVar *mat_var(const MatFile *m, const char *name, const char *key
     return v;
 }
 
+/* A whole-number setting 1 ... hi (or >= 1 when hi = 0) with a default for a missing or empty field. */
+static int whole_setting(const char *path, int def, int hi, const char *what)
+{
+    const double v = num_or(path, def);
+    if (!(v >= 1) || v != floor(v) || (hi > 0 && v > hi)) {
+        if (hi > 0) fail("cfg.%s = %g must be a whole number 1 ... %d (%s).", path, v, hi, what);
+        fail("cfg.%s must be a whole number >= 1 (%s).", path, what);
+    }
+    return (int)v;
+}
+
+/* Numbered pairs of an input file: <base>_1, <base>_2, ... (n of them), or <base> alone (one pair,
+ * *numbered = 0). Returns n (0: none). */
+static int count_numbered(const MatFile *m, const char *base, int *numbered)
+{
+    char nm[96];
+    int n = 0;
+    for (;;) {
+        snprintf(nm, sizeof nm, "%s_%d", base, n + 1);
+        if (!mat_get(m, nm)) break;
+        n++;
+    }
+    *numbered = n > 0;
+    if (n == 0 && mat_get(m, base)) n = 1;
+    return n;
+}
+
+/* The variable of pair k (1-based) of a numbered set. */
+static const MatVar *pair_var(const MatFile *m, const char *base, int k, int numbered, const char *key)
+{
+    char nm[96];
+    if (numbered) snprintf(nm, sizeof nm, "%s_%d", base, k);
+    else snprintf(nm, sizeof nm, "%s", base);
+    return mat_var(m, nm, key);
+}
+
 /* ------------------------------------------------------------------------ */
 /* Waveforms and pulse compression (setup_radar.m: compression_filter)       */
 /* ------------------------------------------------------------------------ */
@@ -520,6 +556,7 @@ typedef struct {
     double fc_Hz, lambda_m;       /* its carrier (cfg.wave.<pulse>.fc_Hz)      */
     double *beamU;                /* beam directions on its carrier            */
     int    phaseCode, mismatch;
+    int    codeIndex;             /* code / mismatch pair of cfg.files.phaseCode (0: no phase code) */
     double width_s, bandwidth_Hz, chip_s, tTx_s;
     double rx0, rx1;              /* receive window [start end) in the PRI [s] (inf = end of record) */
     int    rx0Set, rx1Set;           /* rxStart_s / rxEnd_s set: DDC samples selected by their time */
@@ -1135,6 +1172,7 @@ static void export_config(void)
     /* PRI sequence and MTI weights */
     const char *prfMode = str("prf.mode");
     int nStagger, staggered, nTaps;
+    int staggerSet = 0, maxStaggerSets = 0;              /* staggered: the (T, w) pair of cfg.files.stagger */
     double *pri, *mti;
     int nScanPrf = 0;                                    /* scan-to-scan PRF: the PRFs of the scans */
     double *scanPrf = NULL;
@@ -1169,13 +1207,28 @@ static void export_config(void)
         mti[0] = 1; mti[1] = -2; mti[2] = 1;
     } else if (same_text(prfMode, "staggered")) {
         staggered = 1;
-        MatFile st = load_input("stagger", NULL, 0);
-        const MatVar *pv = mat_var(&st, "priVector_s", "stagger"), *mv = mat_var(&st, "mtiCoeffs", "stagger");
+        /* pair cfg.prf.staggerSet of at most cfg.prf.maxStaggerSets (T: priVector_s_<k>, w: mtiCoeffs_<k>) */
+        maxStaggerSets = whole_setting("prf.maxStaggerSets", 1, 0, "the largest number of (T, w) pairs");
+        staggerSet = whole_setting("prf.staggerSet", 1, maxStaggerSets, "pair (T, w) of cfg.files.stagger, at most cfg.prf.maxStaggerSets");
+        const MadeFor mfSt[1] = { { "nSets", { maxStaggerSets }, 1 } };
+        MatFile st = load_input("stagger", mfSt, 1);
+        int numbered = 0;
+        const int nSets = count_numbered(&st, "priVector_s", &numbered);
+        if (nSets == 0) fail("%s holds no staggered PRIs (priVector_s_1, mtiCoeffs_1, ... or priVector_s, mtiCoeffs).", str("files.stagger"));
+        if (nSets > maxStaggerSets)
+            fail("%s holds %d (T, w) pairs, more than cfg.prf.maxStaggerSets = %d.", str("files.stagger"), nSets, maxStaggerSets);
+        if (staggerSet > nSets)
+            fail("cfg.prf.staggerSet = %d: %s holds only %d (T, w) pair(s).", staggerSet, str("files.stagger"), nSets);
+        const MatVar *pv = pair_var(&st, "priVector_s", staggerSet, numbered, "stagger");
+        const MatVar *mv = pair_var(&st, "mtiCoeffs", staggerSet, numbered, "stagger");
         nStagger = (int)pv->numel;
+        for (int k = 0; k < nStagger; k++)
+            if (!(pv->re[k] > 0) || !isfinite(pv->re[k])) fail("%s: the PRIs of pair %d must be positive [s].", str("files.stagger"), staggerSet);
         pri = xcalloc((size_t)nStagger, sizeof(double));
         memcpy(pri, pv->re, sizeof(double) * (size_t)nStagger);
         nTaps = (int)mv->cols;
-        if ((int)mv->rows != 1 && (int)mv->rows != nStagger) fail("cfg.files.stagger: mtiCoeffs needs 1 or %d rows", nStagger);
+        if ((int)mv->rows != 1 && (int)mv->rows != nStagger)
+            fail("%s: the MTI weights of pair %d need 1 or %d rows (one per stagger position).", str("files.stagger"), staggerSet, nStagger);
         mti = xcalloc((size_t)(nStagger * nTaps), sizeof(double));      /* row-major [nStagger x nTaps] */
         for (int k = 0; k < nStagger; k++)
             for (int l = 0; l < nTaps; l++) mti[k * nTaps + l] = mv->re[(mv->rows == 1 ? 0 : k) + l * mv->rows];
@@ -1252,31 +1305,49 @@ static void export_config(void)
         if (same_text(comp, "mismatch")) w->mismatch = 1;
         else if (!same_text(comp, "matched")) fail("cfg.wave.%s.compression must be 'matched' or 'mismatch'.", names[i]);
     }
+    /* code agility: up to cfg.wave.maxCodes code / mismatch pairs per sub-pulse in cfg.files.phaseCode
+     * (<pulse>Code_<k>, <pulse>Mismatch_<k>, or <pulse>Code, <pulse>Mismatch: one pair); pair
+     * cfg.wave.<pulse>.codeIndex is used */
+    const int maxCodes = whole_setting("wave.maxCodes", 1, 0, "the largest number of phase codes per sub-pulse");
     if (wv[0].phaseCode || wv[1].phaseCode) {
-        MadeFor mf[4];
+        MadeFor mf[5];
         for (int i = 0; i < 2; i++) {
             snprintf(p, sizeof p, "wave.%s.mismatchLength", names[i]);
             const int hasLen = has(p) && !empty(p);
             mf[2 * i] = (MadeFor){ i ? "longChips" : "shortChips", { round(wv[i].width_s / wv[i].chip_s) }, 1 };
             mf[2 * i + 1] = (MadeFor){ i ? "longMismatchLength" : "shortMismatchLength", { hasLen ? num(p) : 0 }, hasLen };
         }
-        codes = load_input("phaseCode", mf, 4);
+        mf[4] = (MadeFor){ "nCodes", { maxCodes }, 1 };
+        codes = load_input("phaseCode", mf, 5);
         haveCodes = 1;
         for (int i = 0; i < 2; i++) {
             Wave *w = &wv[i];
             if (!w->phaseCode) continue;
+            snprintf(p, sizeof p, "wave.%s.codeIndex", names[i]);
+            w->codeIndex = whole_setting(p, 1, maxCodes, "code / mismatch pair of cfg.files.phaseCode, at most cfg.wave.maxCodes");
             snprintf(q, sizeof q, "%sCode", names[i]);
-            const MatVar *cv = mat_var(&codes, q, "phaseCode");
+            int numbered = 0;
+            const int nCodes = count_numbered(&codes, q, &numbered);
+            if (nCodes == 0) fail("%s holds no %s code (%sCode_1, ... or %sCode).", str("files.phaseCode"), names[i], names[i], names[i]);
+            if (nCodes > maxCodes)
+                fail("%s holds %d %s codes, more than cfg.wave.maxCodes = %d.", str("files.phaseCode"), nCodes, names[i], maxCodes);
+            if (w->codeIndex > nCodes)
+                fail("cfg.wave.%s.codeIndex = %d: %s holds only %d %s code(s).", names[i], w->codeIndex, str("files.phaseCode"),
+                     nCodes, names[i]);
+            const MatVar *cv = pair_var(&codes, q, w->codeIndex, numbered, "phaseCode");
             w->nCode = (int)cv->numel;
             if (w->nCode != (int)lround(w->width_s / w->chip_s))
-                fail("The %s code of %s has %d chips, but width_s/chip_s = %d.", names[i], str("files.phaseCode"),
+                fail("The %s code %d of %s has %d chips, but width_s/chip_s = %d.", names[i], w->codeIndex, str("files.phaseCode"),
                      w->nCode, (int)lround(w->width_s / w->chip_s));
             w->codeRe = xcalloc((size_t)w->nCode, sizeof(double));
             w->codeIm = xcalloc((size_t)w->nCode, sizeof(double));
             for (int k = 0; k < w->nCode; k++) { w->codeRe[k] = cv->re[k]; w->codeIm[k] = cv->im ? cv->im[k] : 0; }
             if (w->mismatch) {
-                snprintf(q, sizeof q, "%sMismatch", names[i]);
-                const MatVar *mv = mat_var(&codes, q, "phaseCode");
+                if (numbered) snprintf(q, sizeof q, "%sMismatch_%d", names[i], w->codeIndex);
+                else snprintf(q, sizeof q, "%sMismatch", names[i]);
+                const MatVar *mv = mat_get(&codes, q);
+                if (!mv || !mv->re)
+                    fail("%s has no mismatch filter '%s' for the %s code %d.", str("files.phaseCode"), q, names[i], w->codeIndex);
                 w->nMis = (int)mv->numel;
                 w->misRe = xcalloc((size_t)w->nMis, sizeof(double));
                 w->misIm = xcalloc((size_t)w->nMis, sizeof(double));
@@ -1328,15 +1399,37 @@ static void export_config(void)
             fail("cfg.wave.short.rxEnd_s = %.2f us: the short-pulse receive window ends at the transmission of the long "
                  "pulse (%.2f us) or earlier.", w->rx1 * 1e6, wl->tTx_s * 1e6);
     }
-    if (rxEnd > minPri + 1e-12)
+    /* manual DDC record (cfg.rx.manualDdc): cfg.rx.nDdc samples, the first at cfg.rx.ddcT0_s ([] = the
+     * automatic time, half the input span of a DDC sample), rounded to the ADC grid: the record starts
+     * m0 ADC samples after the PRI start (m0 < 0: before it) */
+    const int manualDdc = has("rx.manualDdc") && !empty("rx.manualDdc") && num("rx.manualDdc") != 0;
+    if (!manualDdc && rxEnd > minPri + 1e-12)
         fail("Receive window (%.1f us) does not fit in the shortest PRI (%.1f us): reduce cfg.rx.maxRange_m (or "
              "cfg.wave.%s.rxEnd_s) or start the long pulse earlier.", rxEnd * 1e6, minPri * 1e6, wLast->name);
-    const long nAdc = lround((rxEnd - 0.0) * fs);
+    long nAdc = lround((rxEnd - 0.0) * fs), m0 = 0;
+    const double halfSpan = (ddc.L1 - 1) / 2.0 / fs + (ddc.L2 - 1) / 2.0 / fs1;
+    if (manualDdc) {
+        const double nSet = num_or("rx.nDdc", NAN);
+        if (!(nSet >= 1) || nSet != floor(nSet))
+            fail("cfg.rx.manualDdc = true needs cfg.rx.nDdc: the number of DDC samples per PRI (a whole number >= 1).");
+        const double t0 = num_or("rx.ddcT0_s", halfSpan);
+        if (!isfinite(t0)) fail("cfg.rx.ddcT0_s must be the time of the first DDC sample in the PRI [s] (or [] = automatic).");
+        m0 = lround((t0 - halfSpan) * fs);
+        nAdc = ((long)nSet - 1) * ddc.D1 * ddc.D2 + (long)(ddc.L2 - 1) * ddc.D1 + ddc.L1;
+        const double recEnd = (double)(m0 + nAdc) / fs;
+        if (recEnd > minPri + 1e-12)
+            fail("The manual DDC record (cfg.rx.nDdc = %d samples from cfg.rx.ddcT0_s = %.2f us) ends at %.1f us, after the "
+                 "shortest PRI (%.1f us).", (int)nSet, ((double)m0 / fs + halfSpan) * 1e6, recEnd * 1e6, minPri * 1e6);
+        for (int i = 0; i < 2; i++)
+            if (wv[i].enable && wv[i].rx1Set && wv[i].rx1 > recEnd - halfSpan + 1e-12)
+                fail("cfg.wave.%s.rxEnd_s = %.2f us is after the last DDC sample of the manual record (%.2f us: cfg.rx.nDdc, "
+                     "cfg.rx.ddcT0_s).", names[i], wv[i].rx1 * 1e6, (recEnd - halfSpan) * 1e6);
+    }
     const long n1 = (nAdc - ddc.L1) / ddc.D1 + 1;
     const int nDdc = (int)((n1 - ddc.L2) / ddc.D2 + 1);
     double *tDdc = xcalloc((size_t)nDdc, sizeof(double));
     for (int k = 0; k < nDdc; k++) {
-        const double t1 = (double)((long)k * ddc.D2 * ddc.D1) / fs + (ddc.L1 - 1) / 2.0 / fs;
+        const double t1 = (double)(m0 + (long)k * ddc.D2 * ddc.D1) / fs + (ddc.L1 - 1) / 2.0 / fs;
         tDdc[k] = t1 + (ddc.L2 - 1) / 2.0 / fs1;
     }
 
@@ -1347,8 +1440,8 @@ static void export_config(void)
         const double iv0 = w->rx0, iv1 = w->rx1;
         int first = -1, count = 0;
         for (int k = 0; k < nDdc; k++) {
-            const double tFirst = (double)((long)k * ddc.D2 * ddc.D1) / fs;
-            const double tLast = (double)(((long)k * ddc.D2 + ddc.L2 - 1) * ddc.D1 + ddc.L1 - 1) / fs;
+            const double tFirst = (double)(m0 + (long)k * ddc.D2 * ddc.D1) / fs;
+            const double tLast = (double)(m0 + ((long)k * ddc.D2 + ddc.L2 - 1) * ddc.D1 + ddc.L1 - 1) / fs;
             /* a set start / end: the DDC samples by their time; else their whole input inside */
             const int in0 = w->rx0Set ? tDdc[k] >= iv0 : tFirst >= iv0, in1 = w->rx1Set ? tDdc[k] < iv1 : tLast < iv1;
             if (in0 && in1) {
@@ -1657,6 +1750,15 @@ static void export_config(void)
         const double md[2] = { radarMode, subSingle };
         rec_vec("radarMode", md, 2, 0);
     }
+    {   /* (information) DDC record [manual 1/0, time of the first DDC sample], code / mismatch pair of every
+         * sub-pulse (0: no phase code), (T, w) pair of the staggered PRF (0: not staggered) */
+        const double rec[2] = { manualDdc, tDdc[0] };
+        rec_vec("ddcRecord", rec, 2, 0);
+        const double ci[2] = { wv[0].codeIndex, wv[1].codeIndex };
+        rec_vec("codeIndex", ci, 2, 0);
+        rec_scalar("staggerSet", staggered ? staggerSet : 0);
+    }
+
     /* scan-to-scan PRF: the slow-time settings above are those of PRF 1; one set per PRF (prefix
      * s2s<j>_), selected by the receiver with the stagger index of the PRI header */
     rec_scalar("scan2scan", nScanPrf > 0);
@@ -1829,6 +1931,11 @@ static void export_config(void)
                has("modes.name") ? str("modes.name") : "", subSingle ? "single" : "dual",
                !ws->enable ? "off" : ws->phaseCode ? (ws->mismatch ? "phase code (mismatch)" : "phase code") : "LFM",
                !wl->enable ? "off" : wl->phaseCode ? (wl->mismatch ? "phase code (mismatch)" : "phase code") : "LFM");
+        printf("DDC record (%s): %d samples, the first at %.3f us", manualDdc ? "manual" : "automatic", nDdc, tDdc[0] * 1e6);
+        for (int i = 0; i < 2; i++)
+            if (wv[i].enable && wv[i].phaseCode) printf("; %s code %d of %d", names[i], wv[i].codeIndex, maxCodes);
+        if (staggered) printf("; stagger pair %d of %d (%d PRIs)", staggerSet, maxStaggerSets, nStagger);
+        printf("\n");
         if (nScanPrf > 0) {
             printf("Scan-to-scan PRF:");
             for (int j = 0; j < nScanPrf; j++) printf(" %.1f Hz (CPI %d, FFT %d)", scanPrf[j], s2s[j].cpiLength, s2s[j].nfft);

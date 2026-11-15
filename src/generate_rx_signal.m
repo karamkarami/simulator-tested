@@ -43,8 +43,8 @@ for i = 1:numel(targets)
         amp   = sqrt(2*power);                                            % [sqrt(W)]
         tau0 = 2*R/c;
         % ADC samples that contain the echo
-        first = max(1, ceil((wv.tTx_s + tau0 - sys.rxStart_s)*fs) + 1);
-        last  = min(sys.nAdc, floor((wv.tTx_s + tau0 + wv.width_s - sys.rxStart_s)*fs) + 1);
+        first = max(1, ceil((wv.tTx_s + tau0)*fs) - round(sys.rxStart_s*fs) + 1);
+        last  = min(sys.nAdc, floor((wv.tTx_s + tau0 + wv.width_s)*fs) - round(sys.rxStart_s*fs) + 1);
         if first > last, continue; end
         n  = (first:last)';
         t  = sys.tAdc(n);                           % time inside the PRI

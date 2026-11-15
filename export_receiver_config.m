@@ -120,6 +120,11 @@ r{end+1} = {'meanPri_s', mean(sys.pri)};
 if isfield(sys, 'mode')                               % radar mode (information): number, sub-mode 0 dual / 1 single
     r{end+1} = {'radarMode', [sys.mode.active, double(strcmp(sys.mode.subMode, 'single'))]};
 end
+% (information) the DDC record (manual: cfg.rx.manualDdc, nDdc, ddcT0_s), the code / mismatch pair of
+% every sub-pulse (0: no phase code) and the (T, w) pair of the staggered PRF (0: not staggered)
+r{end+1} = {'ddcRecord', [double(sys.ddcRecord.manual), sys.ddcT0_s]};
+r{end+1} = {'codeIndex', [sys.wave.short.codeIndex, sys.wave.long.codeIndex]};
+r{end+1} = {'staggerSet', sys.staggerSet};
 % Scan-to-scan PRF: the slow-time settings above are those of PRF 1; one set per PRF of the
 % scans (prefix s2s<j>_). The receiver selects set j with the stagger index of the PRI header
 % (= the number of the PRF of the scan) and restarts the CPIs when it changes.

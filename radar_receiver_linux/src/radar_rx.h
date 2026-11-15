@@ -156,6 +156,12 @@ typedef struct {
 
     /* radar mode (information; optional in the file): cfg.modes.active, sub-mode 1 single / 0 dual */
     int     radarMode, subModeSingle;
+    /* (information; optional) DDC record set by hand (cfg.rx.manualDdc) and the time of its first
+     * sample, code / mismatch pair of each sub-pulse (0: no phase code), (T, w) pair of the
+     * staggered PRF (0: not staggered) */
+    int     ddcManual;
+    double  ddcT0_s;
+    int     codeIndex[N_PULSES], staggerSet;
     /* scan-to-scan PRF (optional in the file: off): one set of slow-time settings per PRF of the
      * scans. The fields above (cpiLength, rowLen, nfft, dopWindow, noiseGain, noiseGainBypass,
      * dopFreq_Hz, notchBins, minHits, meanPri_s, trackVrSpan, pulse[].vrSpan_mps) hold those of

@@ -1,7 +1,11 @@
 function ok = test_phase_code()
 %TEST_PHASE_CODE  Phase codes from cfg.files.phaseCode, matched and mismatch filters.
-%   1. The default file holds the P4 codes of both sub-pulses and their
-%      mismatch filters (one coefficient per chip).
+%   1. The default file holds cfg.wave.maxCodes code / mismatch pairs of both
+%      sub-pulses (code agility; code 1 P4, one coefficient per chip). Every
+%      pair (cfg.wave.<pulse>.codeIndex) puts a target on its cell, its mismatch
+%      filter with lower sidelobes than its matched filter; the echo of another
+%      code through the filter of the selected one stays 8 dB or more below
+%      the peak of the matched code.
 %   2. A target without noise through signal generation, ADC, DDC and pulse
 %      compression (1 element, 2 and 4 MHz DDC output, both sub-pulses): with
 %      the matched and with the mismatch filter the peak is on the range cell
@@ -46,10 +50,47 @@ good = true;
 for p = {'short', 'long'}
     N = round(cfg.wave.(p{1}).width_s / cfg.wave.(p{1}).chip_s);
     m = (0:N-1)';
-    good = good && max(abs(f.([p{1} 'Code']) - exp(1j*(pi*m.^2/N - pi*m)))) < 1e-12 ...
-                && numel(f.([p{1} 'Mismatch'])) > N;
+    good = good && max(abs(f.([p{1} 'Code_1']) - exp(1j*(pi*m.^2/N - pi*m)))) < 1e-12 ...
+                && numel(f.([p{1} 'Mismatch_1'])) > N;
+    for k = 1:cfg.wave.maxCodes                         % code agility: maxCodes pairs per sub-pulse
+        good = good && isfield(f, sprintf('%sCode_%d', p{1}, k)) && isfield(f, sprintf('%sMismatch_%d', p{1}, k));
+    end
+    good = good && ~isfield(f, sprintf('%sCode_%d', p{1}, cfg.wave.maxCodes + 1));
 end
-ok = report('default file: P4 codes and mismatch filters of both sub-pulses', good) && ok;
+ok = report(sprintf('default file: %d code / mismatch pairs per sub-pulse, code 1 P4', cfg.wave.maxCodes), good) && ok;
+
+%% 1b) code agility: every pair on the target cell with lower sidelobes than its matched filter;
+% the echo of another code through the filter of the selected one stays well below the peak
+R = struct('short', 15e3, 'long', 45e3);
+good = true;
+txt = {};
+for k = 1:cfg.wave.maxCodes
+    cm = cfg;  cmm = cfg;
+    for p = {'short', 'long'}
+        cm.wave.(p{1}).codeIndex = k;  cmm.wave.(p{1}).codeIndex = k;  cmm.wave.(p{1}).compression = 'mismatch';
+    end
+    a = compress_target(cm, R);  b = compress_target(cmm, R);
+    for p = {'short', 'long'}
+        good = good && a.(p{1}).cellErr <= 0.5 && b.(p{1}).cellErr <= 0.5 && b.(p{1}).psl < a.(p{1}).psl;
+        txt{end+1} = sprintf('%s %d: PSL %.1f -> %.1f dB', p{1}, k, a.(p{1}).psl, b.(p{1}).psl); %#ok<AGROW>
+    end
+end
+ok = report(sprintf('code agility, codes 1 ... %d: target on its cell, mismatch filter lower sidelobes (%s)', ...
+            cfg.wave.maxCodes, strjoin(txt, '; ')), good) && ok;
+worst = -inf;
+for p = {'short', 'long'}
+    N = round(cfg.wave.(p{1}).width_s / cfg.wave.(p{1}).chip_s);
+    for j = 1:cfg.wave.maxCodes
+        for k = 1:cfg.wave.maxCodes
+            if j == k, continue; end
+            cj = f.(sprintf('%sCode_%d', p{1}, j));  hk = f.(sprintf('%sMismatch_%d', p{1}, k));
+            ck = f.(sprintf('%sCode_%d', p{1}, k));
+            worst = max(worst, 20*log10(max(abs(conv(cj, hk))) / max(abs(conv(ck, hk)))));
+        end
+    end
+end
+ok = report(sprintf('code agility: another code through the mismatch filter of the selected one at most %.1f dB', worst), ...
+            worst < -8) && ok;
 
 %% 2) a target through the chain, matched and mismatch filter
 R = struct('short', 15e3, 'long', 45e3);
@@ -75,7 +116,7 @@ cDef = cfg;                                           % mismatch filters of the 
 for p = {'short', 'long'}, cDef.wave.(p{1}).compression = 'mismatch'; end
 sys = setup_radar(cDef);
 u = rmfield(f, 'madeFor');
-u.longMismatch = mismatch_filter(ddc_pulse(sys, sys.wave.long, 0:0.25:0.75), round(5*sys.wave.long.chip_s*sys.fsOut), 3);
+u.longMismatch_1 = mismatch_filter(ddc_pulse(sys, sys.wave.long, 0:0.25:0.75), round(5*sys.wave.long.chip_s*sys.fsOut), 3);
 u.longMismatchRate_Hz = sys.fsOut;
 cUser = cDef;
 cUser.files.phaseCode = [tempname() '.mat'];

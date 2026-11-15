@@ -36,6 +36,24 @@ function ok = test_modes()
 %      true range and radial velocity.
 %  10. cfg.proc.dopplerWindow: Hann, Blackman and rectangular windows with
 %      their MTI notch widths; an unknown window stops with a message.
+%  11. Manual DDC record (cfg.rx.manualDdc): nDdc = 1800 samples, the first
+%      at ddcT0_s = 0 (the record starts before the PRI start): the sizes, the
+%      time of the first sample (rounded to the ADC grid), the PRI header, the
+%      range cells of both windows as with the automatic record (within one
+%      DDC sample), a simulation finds targets in both windows at their range;
+%      a missing nDdc, a record beyond the PRI and a set window end after the
+%      record stop with a message.
+%  12. Code agility: cfg.wave.<pulse>.codeIndex selects the code / mismatch
+%      pair of the file; a codeIndex above cfg.wave.maxCodes, a file with more
+%      pairs than maxCodes and a codeIndex above the pairs of the file stop
+%      with a message; a file with only <pulse>Code / <pulse>Mismatch is one pair.
+%  13. Stagger pairs: cfg.prf.staggerSet selects the pair (T, w) of the file
+%      (its PRIs and weights, CPI of whole periods); invalid choices and files
+%      stop with a message.
+%  14. Time-varying MTI weights of the staggered PRF: every output uses the
+%      row of the stagger position of its oldest pulse (direct sum); on slowly
+%      moving clutter (0.3 m/s) both null DC, but the time-varying weights
+%      leave a much smaller residue than [1 -2 1] on the staggered pulses.
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
 ok = true;
@@ -295,6 +313,158 @@ c.proc.dopplerWindow = 'kaiser';
 msg = '';
 try, setup_radar(c); catch err, msg = err.message; end
 ok = report('refused: cfg.proc.dopplerWindow = ''kaiser''', ~isempty(strfind(msg, 'cfg.proc.dopplerWindow'))) && ok;
+
+%% 11) manual DDC record
+sA = setup_radar(base);
+c = base;  c.rx.manualDdc = true;  c.rx.nDdc = 1800;  c.rx.ddcT0_s = 0;
+sM = setup_radar(c);
+hdr = pulse_header(sM, struct('scan', 1, 'time_s', 0, 'az_deg', 0, 'pri_s', sM.pri, 'staggerIdx', 1), 1);
+dt = 1 / sM.fsOut;
+cellsOk = true;
+for p = {'short', 'long'}
+    a = sA.wave.(p{1});  m = sM.wave.(p{1});
+    cellsOk = cellsOk && abs(m.range_m(1) - a.range_m(1)) <= c.const.c*dt/2 + 1 && ...
+              all(sM.tDdc(m.rxIdx) >= sA.tDdc(a.rxIdx(1)) - dt) && m.nRange > 0;
+end
+ok = report(sprintf(['manual DDC record: %d samples (automatic %d), the first at %.4f us (set 0, ADC grid), record ', ...
+                     '%.2f ... %.1f us, range %.2f / %.2f km as automatic'], sM.nDdc, sA.nDdc, sM.ddcT0_s*1e6, ...
+                     sM.rxStart_s*1e6, sM.tAdc(end)*1e6, sM.wave.short.range_m(1)/1e3, sM.wave.long.range_m(1)/1e3), ...
+            sM.nDdc == 1800 && abs(sM.ddcT0_s) <= 0.5/sM.fs + 1e-15 && sM.rxStart_s < 0 && sM.tAdc(end) < sM.pri && ...
+            sM.ddcRecord.manual && hdr.ddcT0_s == sM.ddcT0_s && hdr.rxStart_s == sM.rxStart_s && cellsOk) && ok;
+c.sim.nScans = 1;  c.sim.sectors_deg = [5 25];  c.clutter.enable = false;  c.display.enable = false;
+c.io.saveRaw = false;  c.track.enable = false;
+c.targets = [make_target('S', 10, 15e3, 13, 2000, -150, 0), make_target('L', 100, 60e3, 17, 4000, 200, 0)];
+r = run_radar_sim(c);
+found = find_targets(r, c);
+ok = report(sprintf('manual DDC record, simulation: S at 15 km (short) and L at 60 km (long) found: %s', found), ...
+            strcmp(found, 'SL')) && ok;
+bad = {'rx.nDdc', [], 'cfg.rx.nDdc';  'rx.nDdc', 2100, 'shortest PRI';  'rx.nDdc', 12.5, 'cfg.rx.nDdc'};
+for i = 1:size(bad, 1)
+    cb = base;  cb.rx.manualDdc = true;  cb.rx.nDdc = 1800;
+    f = strsplit(bad{i, 1}, '.');  cb.(f{1}).(f{2}) = bad{i, 2};
+    msg = '';
+    try, setup_radar(cb); catch err, msg = err.message; end
+    ok = report(sprintf('manual record refused: cfg.%s = %s', bad{i, 1}, mat2str(bad{i, 2})), ~isempty(strfind(msg, bad{i, 3}))) && ok;
+end
+cb = base;  cb.modes.active = 2;  cb = apply_radar_mode(cb);  cb.console.enable = false;  cb.ant.nElements = 1;
+cb.rx.manualDdc = true;  cb.rx.nDdc = 3000;
+msg = '';
+try, setup_radar(cb); catch err, msg = err.message; end
+ok = report('manual record refused: mode 2 window end (1780 us) after the record of 3000 samples', ...
+            ~isempty(strfind(msg, 'cfg.wave.long.rxEnd_s'))) && ok;
+
+%% 12) code agility
+tmpd = tempname();  mkdir(tmpd);
+cc = base;
+cc.files.phaseCode = fullfile(tmpd, 'codes.mat');            % (a default file of its own: the inputs stay)
+f = [];
+codesOk = true;
+for k = 1:cc.wave.maxCodes
+    cc.wave.short.codeIndex = k;  cc.wave.long.codeIndex = cc.wave.maxCodes + 1 - k;
+    sk = setup_radar(cc);
+    if isempty(f), f = load(cc.files.phaseCode); end
+    codesOk = codesOk && isequal(sk.wave.short.code, f.(sprintf('shortCode_%d', k))) && ...
+              isequal(sk.wave.long.code, f.(sprintf('longCode_%d', cc.wave.maxCodes + 1 - k))) && ...
+              isequal(sk.wave.short.mismatch, f.(sprintf('shortMismatch_%d', k))) && sk.wave.short.codeIndex == k;
+end
+ok = report(sprintf('code agility: codeIndex 1 ... %d selects the code / mismatch pair of the file (both sub-pulses)', ...
+            cc.wave.maxCodes), codesOk) && ok;
+u = rmfield(f, 'madeFor');
+two = struct('shortCode_1', u.shortCode_1, 'shortMismatch_1', u.shortMismatch_1, 'shortCode_2', u.shortCode_2, ...
+             'shortMismatch_2', u.shortMismatch_2, 'longCode_1', u.longCode_1, 'longMismatch_1', u.longMismatch_1, ...
+             'longCode_2', u.longCode_2, 'longMismatch_2', u.longMismatch_2);
+one = struct('shortCode', u.shortCode_3, 'shortMismatch', u.shortMismatch_3, 'longCode', u.longCode_1, 'longMismatch', u.longMismatch_1);
+save(fullfile(tmpd, 'all.mat'), '-struct', 'u');  save(fullfile(tmpd, 'two.mat'), '-struct', 'two');
+save(fullfile(tmpd, 'one.mat'), '-struct', 'one');
+c1 = base;  c1.files.phaseCode = fullfile(tmpd, 'one.mat');
+s1 = setup_radar(c1);
+ok = report('code agility: a file with only shortCode / shortMismatch holds one pair', ...
+            isequal(s1.wave.short.code, u.shortCode_3) && s1.wave.short.codeIndex == 1) && ok;
+bad = {'all.mat', 4, 5, 'cfg.wave.short.codeIndex';  'all.mat', 2, 1, 'more than cfg.wave.maxCodes';
+       'two.mat', 4, 3, 'holds only 2';  'one.mat', 4, 2, 'holds only 1'};
+for i = 1:size(bad, 1)
+    cb = base;  cb.files.phaseCode = fullfile(tmpd, bad{i, 1});
+    cb.wave.maxCodes = bad{i, 2};  cb.wave.short.codeIndex = bad{i, 3};
+    msg = '';
+    try, setup_radar(cb); catch err, msg = err.message; end
+    ok = report(sprintf('code agility refused: %s, maxCodes %d, codeIndex %d', bad{i, 1}, bad{i, 2}, bad{i, 3}), ...
+                ~isempty(strfind(msg, bad{i, 4}))) && ok;
+end
+
+%% 13) stagger pairs (T, w)
+cs = base;  cs.prf.mode = 'staggered';
+cs.files.stagger = fullfile(tmpd, 'stagger.mat');            % (a default file of its own)
+st = [];
+setsOk = true;
+for k = 1:cs.prf.maxStaggerSets
+    cs.prf.staggerSet = k;
+    sk = setup_radar(cs);
+    if isempty(st), st = load(cs.files.stagger); end
+    T = st.(sprintf('priVector_s_%d', k));  w = st.(sprintf('mtiCoeffs_%d', k));
+    setsOk = setsOk && isequal(sk.pri(:), T(:)) && isequal(sk.mtiCoeffs, w) && sk.staggerSet == k && ...
+             mod(sk.cpi.length, numel(T)) == 0 && sk.cpi.nRows == numel(T);
+end
+ok = report(sprintf('stagger pairs: staggerSet 1 ... %d selects T and w of the file (PRIs, weights, rows)', ...
+            cs.prf.maxStaggerSets), setsOk) && ok;
+v = rmfield(st, 'madeFor');
+sv = struct('priVector_s_1', v.priVector_s_1, 'mtiCoeffs_1', v.mtiCoeffs_1, 'priVector_s_2', v.priVector_s_2, ...
+            'mtiCoeffs_2', v.mtiCoeffs_2);
+save(fullfile(tmpd, 'st_all.mat'), '-struct', 'v');  save(fullfile(tmpd, 'st_two.mat'), '-struct', 'sv');
+bw = v;  bw.mtiCoeffs_2 = bw.mtiCoeffs_2(1:2, :);
+save(fullfile(tmpd, 'st_badw.mat'), '-struct', 'bw');
+bad = {'st_all.mat', 4, 5, 'cfg.prf.staggerSet';  'st_all.mat', 3, 1, 'more than cfg.prf.maxStaggerSets';
+       'st_two.mat', 4, 3, 'holds only 2';  'st_badw.mat', 4, 2, 'rows'};
+for i = 1:size(bad, 1)
+    cb = cs;  cb.files.stagger = fullfile(tmpd, bad{i, 1});
+    cb.prf.maxStaggerSets = bad{i, 2};  cb.prf.staggerSet = bad{i, 3};
+    msg = '';
+    try, setup_radar(cb); catch err, msg = err.message; end
+    ok = report(sprintf('stagger pairs refused: %s, maxStaggerSets %d, staggerSet %d', bad{i, 1}, bad{i, 2}, bad{i, 3}), ...
+                ~isempty(strfind(msg, bad{i, 4}))) && ok;
+end
+
+%% 14) time-varying MTI weights
+cs.prf.staggerSet = 1;
+s1 = setup_radar(cs);
+K = s1.nStagger;  n = 4*K + 2;
+pos = mod(0:n-1, K) + 1;                                      % stagger position of every pulse
+tP = [0, cumsum(s1.pri(pos(1:end-1)).')];                     % pulse times
+x = reshape(exp(1j*2*pi*(2*0.3/s1.lambda)*tP), 1, 1, n);      % clutter moving at 0.3 m/s
+y = squeeze(mti_filter(x, s1.mtiCoeffs, pos)).';
+L = size(s1.mtiCoeffs, 2);
+yRef = zeros(1, n - L + 1);
+for m = 1:n - L + 1
+    yRef(m) = s1.mtiCoeffs(pos(m), :) * squeeze(x(1, 1, m:m+L-1));   % the row of the oldest pulse
+end
+yFix = squeeze(mti_filter(x, repmat([1 -2 1], K, 1), pos)).';
+dc = squeeze(mti_filter(ones(1, 1, n), s1.mtiCoeffs, pos));
+ratio = 10*log10(mean(abs(y).^2) / mean(abs(yFix).^2));
+ok = report(sprintf(['time-varying MTI: every output with the weights of its oldest pulse''s stagger position; ', ...
+                     'clutter at 0.3 m/s: residue %.1f dB below [1 -2 1] on the staggered pulses, DC nulled'], -ratio), ...
+            max(abs(y - yRef)) < 1e-12 && max(abs(dc)) < 1e-12 && ratio < -20) && ok;
+rmdir(tmpd, 's');
+end
+
+function found = find_targets(r, c)
+% Names of the targets with a plot of their sub-pulse at their range (100 m) and radial velocity.
+found = '';
+p = r.plots;
+if isempty(p), return; end
+pulse = {'short', 'long'};
+for i = 1:numel(c.targets)
+    tg = c.targets(i);
+    q = p(strcmp({p.pulse}, pulse{i}));
+    for j = 1:numel(q)
+        [pos, vel] = target_state(tg, q(j).time_s);
+        R = norm(pos - [0 0 c.ant.height_m]);
+        vr = dot(vel, (pos - [0 0 c.ant.height_m]) / R);
+        bin = abs(diff(r.sys.dop.f_Hz(1:2))) * r.sys.wave.(pulse{i}).lambda_m / 2;
+        if abs(q(j).range_m - R) < 100 && abs(q(j).vr_mps - vr) < 1.5 * bin
+            found = [found tg.name]; %#ok<AGROW>
+            break
+        end
+    end
+end
 end
 
 function w = hann_ref(N)

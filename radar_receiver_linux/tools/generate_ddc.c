@@ -223,6 +223,40 @@ static const MatVar *mat_var(const MatFile *m, const char *name, const char *key
     return v;
 }
 
+/* A whole-number setting 1 ... hi (or >= 1 when hi = 0) with a default for a missing or empty field. */
+static int whole_setting(const char *path, int def, int hi, const char *what)
+{
+    const double v = num_or(path, def);
+    if (!(v >= 1) || v != floor(v) || (hi > 0 && v > hi)) {
+        if (hi > 0) fail("cfg.%s = %g must be a whole number 1 ... %d (%s).", path, v, hi, what);
+        fail("cfg.%s must be a whole number >= 1 (%s).", path, what);
+    }
+    return (int)v;
+}
+
+/* Numbered pairs <base>_1, <base>_2, ... of an input file (n), or <base> alone (one, *numbered = 0). */
+static int count_numbered(const MatFile *m, const char *base, int *numbered)
+{
+    char nm[96];
+    int n = 0;
+    for (;;) {
+        snprintf(nm, sizeof nm, "%s_%d", base, n + 1);
+        if (!mat_get(m, nm)) break;
+        n++;
+    }
+    *numbered = n > 0;
+    if (n == 0 && mat_get(m, base)) n = 1;
+    return n;
+}
+
+static const MatVar *pair_var(const MatFile *m, const char *base, int k, int numbered, const char *key)
+{
+    char nm[96];
+    if (numbered) snprintf(nm, sizeof nm, "%s_%d", base, k);
+    else snprintf(nm, sizeof nm, "%s", base);
+    return mat_var(m, nm, key);
+}
+
 static double *copy_var(const MatVar *v)
 {
     double *p = xcalloc(v->numel, sizeof(double));
@@ -397,6 +431,7 @@ typedef struct {
     double fracScale;                /* 2^coefFracBits */
     double fsOut, fs1;
     int    nAdc, nDdc;
+    int    m0;                       /* first ADC sample of the record (from the PRI start; < 0 before it) */
     double *cosNco, *msinNco;        /* 16-bit NCO values per ADC sample */
     double *loShift[2];              /* complex LO correction of sub-pulse p per ADC sample, NULL = 1 */
     float  *stc;                     /* STC amplitude gain per ADC sample */
@@ -642,8 +677,17 @@ static void setup(Radar *s)
         s->pri = xcalloc(1, sizeof(double));
         s->pri[0] = num("prf.pri_s");
     } else if (same_text(prf, "staggered")) {
-        MatFile st = load_input("stagger", NULL, 0);
-        const MatVar *pv = mat_var(&st, "priVector_s", "stagger");
+        /* pair cfg.prf.staggerSet of at most cfg.prf.maxStaggerSets (priVector_s_<k>, mtiCoeffs_<k>) */
+        const int maxSets = whole_setting("prf.maxStaggerSets", 1, 0, "the largest number of (T, w) pairs");
+        const int set = whole_setting("prf.staggerSet", 1, maxSets, "pair (T, w) of cfg.files.stagger");
+        const MadeFor mfSt[1] = { { "nSets", { maxSets }, 1 } };
+        MatFile st = load_input("stagger", mfSt, 1);
+        int numbered = 0;
+        const int nSets = count_numbered(&st, "priVector_s", &numbered);
+        if (nSets == 0 || nSets > maxSets || set > nSets)
+            fail("%s holds %d (T, w) pair(s): cfg.prf.staggerSet = %d and cfg.prf.maxStaggerSets = %d do not fit it.",
+                 str("files.stagger"), nSets, set, maxSets);
+        const MatVar *pv = pair_var(&st, "priVector_s", set, numbered, "stagger");
         s->nStagger = (int)pv->numel;
         s->pri = copy_var(pv);
         mat_free(&st);
@@ -735,20 +779,30 @@ static void setup(Radar *s)
     }
     if (!s->w[0].enable && !s->w[1].enable) fail("Both sub-pulses are switched off (cfg.wave.short.enable, cfg.wave.long.enable).");
     if (anyCode) {
-        MadeFor mf[4];
+        /* code agility: pair cfg.wave.<pulse>.codeIndex of at most cfg.wave.maxCodes (<pulse>Code_<k>) */
+        const int maxCodes = whole_setting("wave.maxCodes", 1, 0, "the largest number of phase codes per sub-pulse");
+        MadeFor mf[5];
         for (int i = 0; i < 2; i++) {
             snprintf(p, sizeof p, "wave.%s.mismatchLength", names[i]);
             const int hasLen = has(p) && !empty(p);
             mf[2 * i] = (MadeFor){ i ? "longChips" : "shortChips", { round(s->w[i].width / s->w[i].chip) }, 1 };
             mf[2 * i + 1] = (MadeFor){ i ? "longMismatchLength" : "shortMismatchLength", { hasLen ? num(p) : 0 }, hasLen };
         }
-        MatFile codes = load_input("phaseCode", mf, 4);
+        mf[4] = (MadeFor){ "nCodes", { maxCodes }, 1 };
+        MatFile codes = load_input("phaseCode", mf, 5);
         for (int i = 0; i < 2; i++) {
             Wave *w = &s->w[i];
             if (!w->phaseCode) continue;
             char q[64];
+            snprintf(p, sizeof p, "wave.%s.codeIndex", names[i]);
+            const int ci = whole_setting(p, 1, maxCodes, "code / mismatch pair of cfg.files.phaseCode");
             snprintf(q, sizeof q, "%sCode", names[i]);
-            const MatVar *cv = mat_var(&codes, q, "phaseCode");
+            int numbered = 0;
+            const int nCodes = count_numbered(&codes, q, &numbered);
+            if (nCodes == 0 || nCodes > maxCodes || ci > nCodes)
+                fail("%s holds %d %s code(s): cfg.wave.%s.codeIndex = %d and cfg.wave.maxCodes = %d do not fit it.",
+                     str("files.phaseCode"), nCodes, names[i], names[i], ci, maxCodes);
+            const MatVar *cv = pair_var(&codes, q, ci, numbered, "phaseCode");
             w->nCode = (int)cv->numel;
             if (w->nCode != (int)lround(w->width / w->chip))
                 fail("The %s code has %d chips, but width_s/chip_s = %d.", names[i], w->nCode, (int)lround(w->width / w->chip));
@@ -757,7 +811,7 @@ static void setup(Radar *s)
             for (int k = 0; k < w->nCode; k++) { w->codeRe[k] = cv->re[k]; w->codeIm[k] = cv->im ? cv->im[k] : 0; }
             if (w->compMismatch) {
                 snprintf(q, sizeof q, "%sMismatch", names[i]);
-                const MatVar *mv = mat_var(&codes, q, "phaseCode");
+                const MatVar *mv = pair_var(&codes, q, ci, numbered, "phaseCode");
                 w->nMis = (int)mv->numel;
                 w->misRe = xcalloc((size_t)w->nMis, sizeof(double));
                 w->misIm = xcalloc((size_t)w->nMis, sizeof(double));
@@ -805,10 +859,25 @@ static void setup(Radar *s)
             fail("cfg.wave.short.rxEnd_s = %.2f us: the short-pulse receive window ends at the transmission of the long "
                  "pulse (%.2f us) or earlier.", w->rx1 * 1e6, wl->tTx * 1e6);
     }
-    if (rxEnd > minPri + 1e-12)
+    /* manual DDC record (cfg.rx.manualDdc): nDdc samples, the first at ddcT0_s (rounded to the ADC grid):
+     * the record starts m0 ADC samples after the PRI start (setup_radar.m) */
+    const int manualDdc = has("rx.manualDdc") && !empty("rx.manualDdc") && num("rx.manualDdc") != 0;
+    if (!manualDdc && rxEnd > minPri + 1e-12)
         fail("Receive window (%.1f us) does not fit in the shortest PRI (%.1f us): reduce cfg.rx.maxRange_m (or "
              "cfg.wave.%s.rxEnd_s) or start the long pulse earlier.", rxEnd * 1e6, minPri * 1e6, wLast->name);
     s->nAdc = (int)lround(rxEnd * s->fs);
+    s->m0 = 0;
+    if (manualDdc) {
+        const double halfSpan = (s->L1 - 1) / 2.0 / s->fs + (s->L2 - 1) / 2.0 / s->fs1;
+        const double nSet = num_or("rx.nDdc", NAN);
+        if (!(nSet >= 1) || nSet != floor(nSet))
+            fail("cfg.rx.manualDdc = true needs cfg.rx.nDdc: the number of DDC samples per PRI (a whole number >= 1).");
+        const double t0 = num_or("rx.ddcT0_s", halfSpan);
+        s->m0 = (int)lround((t0 - halfSpan) * s->fs);
+        s->nAdc = ((int)nSet - 1) * s->D1 * s->D2 + (s->L2 - 1) * s->D1 + s->L1;
+        if ((double)(s->m0 + s->nAdc) / s->fs > minPri + 1e-12)
+            fail("The manual DDC record (cfg.rx.nDdc, cfg.rx.ddcT0_s) ends after the shortest PRI (%.1f us).", minPri * 1e6);
+    }
     const double shortEnd = wl->enable ? wl->tTx : INFINITY;
     s->cosNco = xcalloc((size_t)s->nAdc, sizeof(double));
     s->msinNco = xcalloc((size_t)s->nAdc, sizeof(double));
@@ -829,7 +898,7 @@ static void setup(Radar *s)
         }
     }
     for (int k = 0; k < s->nAdc; k++) {
-        const double t = k / s->fs;
+        const double t = (s->m0 + k) / s->fs;
         s->cosNco[k] = round(cos(2 * PI * s->fIF * t) * 32768.0) / 32768.0;
         s->msinNco[k] = round(-sin(2 * PI * s->fIF * t) * 32768.0) / 32768.0;
         if (s->loShift[0]) {          /* LO of the short pulse, from the long transmission on that of the long */
@@ -855,17 +924,17 @@ static void setup(Radar *s)
     }
     const int n1 = (s->nAdc - s->L1) / s->D1 + 1;
     s->nDdc = (n1 - s->L2) / s->D2 + 1;
-    s->ddcT0 = (s->L1 - 1) / 2.0 / s->fs + (s->L2 - 1) / 2.0 / s->fs1;
+    s->ddcT0 = (double)s->m0 / s->fs + (s->L1 - 1) / 2.0 / s->fs + (s->L2 - 1) / 2.0 / s->fs1;
     for (int i = 0; i < 2; i++) {
         Wave *w = &s->w[i];
         w->rxFirst = w->rxLast = 0;
         if (!w->enable) continue;
         const double iv0 = w->rx0, iv1 = w->rx1;
         for (int k = 0; k < s->nDdc; k++) {
-            const double tFirst = (double)((long)k * s->D2 * s->D1) / s->fs;
-            const double tLast = (double)(((long)k * s->D2 + s->L2 - 1) * s->D1 + s->L1 - 1) / s->fs;
+            const double tFirst = (double)(s->m0 + (long)k * s->D2 * s->D1) / s->fs;
+            const double tLast = (double)(s->m0 + ((long)k * s->D2 + s->L2 - 1) * s->D1 + s->L1 - 1) / s->fs;
             /* a set start / end: the DDC samples by their time; else their whole input inside */
-            const double tC = (double)((long)k * s->D2 * s->D1) / s->fs + (s->L1 - 1) / 2.0 / s->fs + (s->L2 - 1) / 2.0 / s->fs1;
+            const double tC = (double)(s->m0 + (long)k * s->D2 * s->D1) / s->fs + (s->L1 - 1) / 2.0 / s->fs + (s->L2 - 1) / 2.0 / s->fs1;
             const int in0 = w->rx0Set ? tC >= iv0 : tFirst >= iv0, in1 = w->rx1Set ? tC < iv1 : tLast < iv1;
             if (in0 && in1) {
                 if (!w->rxFirst) w->rxFirst = k + 1;
@@ -1353,7 +1422,7 @@ static void clutter_build(Clutter *C, Radar *s, Rng *rng, int taylorNbar, double
         int nFft = 1;
         while (nFft < s->nAdc + C->nTx[i] - 1) nFft <<= 1;
         C->nFft[i] = nFft;
-        C->start0[i] = (int)lround(w->tTx * fs);
+        C->start0[i] = (int)lround(w->tTx * fs) - s->m0;   /* (record start: ADC sample m0 of the PRI) */
         C->steer[i] = xcalloc((size_t)2 * s->nCh * C->G, sizeof(double));
         for (int g = 0; g < C->G; g++) {
             const double u = -sind(s->tilt) * cosd(C->groupEl[g]) + cosd(s->tilt) * sind(C->groupEl[g]);
@@ -1501,7 +1570,7 @@ static double simulate_pri(const Radar *s, const Clutter *C, const Target *tg, i
             if (!w->enable) continue;
             const double amp = sqrt(2 * w->radarConst * rcs / pow(R, 4) * gain);
             const double tau0 = 2 * R / c;
-            int first = (int)ceil((w->tTx + tau0) * fs) + 1, last = (int)floor((w->tTx + tau0 + w->width) * fs) + 1;
+            int first = (int)ceil((w->tTx + tau0) * fs) - s->m0 + 1, last = (int)floor((w->tTx + tau0 + w->width) * fs) - s->m0 + 1;
             if (first < 1) first = 1;
             if (last > nAdc) last = nAdc;
             if (first > last) continue;
@@ -1512,7 +1581,7 @@ static double simulate_pri(const Radar *s, const Clutter *C, const Target *tg, i
                 vim[ch] = sin(ph);
             }
             for (int n = first; n <= last; n++) {
-                const double t = (n - 1) / fs, tau = 2 * (R + vr * t) / c;
+                const double t = (s->m0 + n - 1) / fs, tau = 2 * (R + vr * t) / c;
                 double er, ei;
                 envelope(w, t - w->tTx - tau0, &er, &ei);
                 const double ph = 2 * PI * (w->fIF * (t - w->tTx - tau) - w->fLO * tau);
@@ -1558,7 +1627,7 @@ static double simulate_pri(const Radar *s, const Clutter *C, const Target *tg, i
             const Wave *w = &s->w[p];
             if (!w->enable) continue;
             for (int k = 0; k < nAdc; k++) {
-                const double t = k / fs;
+                const double t = (s->m0 + k) / fs;
                 if (!(t >= w->tTx && t < w->tTx + w->width)) continue;
                 double er, ei;
                 envelope(w, t - w->tTx, &er, &ei);
@@ -1646,7 +1715,7 @@ static void write_file(const char *folder, const char *prefix, int compressed, c
     if (varB) mat_write_int16(w, varB, b, rows, (size_t)s->nCh);
     const Wave *ws = &s->w[0], *wl = &s->w[1];
     const double v_pulse = pr->pulse, v_scan = pr->scan, v_t = pr->t, v_az = pr->az, v_pri = pr->pri, v_st = pr->staggerIdx;
-    const double v_fs = s->fs, v_fif = s->fIF, v_fc = s->fc, v_rx0 = 0.0;
+    const double v_fs = s->fs, v_fif = s->fIF, v_fc = s->fc, v_rx0 = (double)s->m0 / s->fs;
     const double sTx[2] = { ws->tTx, ws->width }, lTx[2] = { wl->tTx, wl->width };
     const double v_dfs = s->fsOut, v_t0 = s->ddcT0;
     const double sIdx[2] = { ws->rxFirst, ws->rxLast }, lIdx[2] = { wl->rxFirst, wl->rxLast };
