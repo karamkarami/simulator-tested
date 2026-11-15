@@ -635,10 +635,10 @@ static void test_cfar_pfa(const char *configPath)
                cfg.alpha, 10 * log10(cfg.alpha), cfg.nTrain, cfg.nLooks, pfa);
         CHECK(fabs(pfa / 1e-8 - 1.0) < 1e-3, "Pfa of the configured threshold %.4e (expected 1e-8)", pfa);
         CHECK(cfar_pfa(&cfg, cfg.alpha * 2.0) < pfa, "a higher threshold has a lower Pfa");
-        if (cfg.alphaMin > 0.0) {                      /* lowest threshold: cfg.cfar.maxPfa = 1e-3 */
+        if (cfg.alphaMin > 0.0) {                      /* lowest threshold: cfg.cfar.maxPfa = 1e-4 */
             const double pmax = cfar_pfa(&cfg, cfg.alphaMin);
-            CHECK(fabs(pmax / 1e-3 - 1.0) < 1e-3 && cfg.alphaMin < cfg.alpha,
-                  "Pfa of the lowest threshold %.4e (expected 1e-3)", pmax);
+            CHECK(fabs(pmax / 1e-4 - 1.0) < 1e-3 && cfg.alphaMin < cfg.alpha,
+                  "Pfa of the lowest threshold %.4e (expected 1e-4)", pmax);
         }
     } else {
         printf("configuration without nLooks: Pfa check skipped\n");
@@ -697,6 +697,107 @@ static void test_video(const char *configPath)
     radar_config_free(&cfg);
 }
 
+/* Scan-to-scan PRF (cfg.prf.mode = 'scan2scan'): a target in a scan with PRF 1 and in the next
+ * scan with PRF 2 (stagger index of the header 1, then 2). The processor switches the slow-time
+ * settings once (CPI length, FFT, Doppler axis of PRF 2) and finds the target in both scans with
+ * its radial velocity on the Doppler axis of each PRF. */
+static void test_scan2scan(const char *configPath)
+{
+    RadarConfig cfg;
+    char err[256];
+    if (radar_config_load(configPath, &cfg, err, sizeof err) != 0) {
+        CHECK(0, "configuration %s: %s", configPath, err);
+        return;
+    }
+    if (!cfg.scan2scan || cfg.nPrf < 2) {
+        radar_config_free(&cfg);
+        return;
+    }
+    CHECK(cfg.prfIndex == 0 && cfg.cpiLength == cfg.prf[0].cpiLength, "scan-to-scan PRF: PRF 1 in use at the start");
+    const int TP = test_pulse(&cfg);
+    const PulseConfig *pc = &cfg.pulse[TP];
+    const int beam = cfg.nBeams > 4 ? cfg.nBeams / 3 : 0, r0 = pc->nRange / 2;
+    double pulseNorm = 0.0;
+    for (int m = 0; m < pc->nPulse; m++) pulseNorm += pc->pulseRe[m] * pc->pulseRe[m] + pc->pulseIm[m] * pc->pulseIm[m];
+    pulseNorm = pulseNorm > 0.0 ? sqrt(pulseNorm) : 1.0;
+    const double vr = -60.0;                             /* inside +-PRF/4 of every PRF, outside the notch */
+    PriData pri;
+    memset(&pri, 0, sizeof pri);
+    pri.nCh = cfg.nCh;
+    pri.nSamples = cfg.nDdc;
+    pri.ddcFs_Hz = (float)cfg.fsOut_Hz;
+    set_header_intervals(&cfg, &pri);
+    pri.iq = malloc(sizeof(int16_t) * 2 * (size_t)cfg.nCh * cfg.nDdc);
+    Processor *proc = processor_create(&cfg, 0);
+    Sink sink;
+    memset(&sink, 0, sizeof sink);
+    ProcessorCallbacks cb = { on_detections, on_plot, NULL, &sink, NULL, NULL, NULL };
+    srand(7);
+    double t = 0;
+    uint32_t pulse = 1;
+    int plotsAfter[2] = { 0, 0 };
+    double tScan2 = 0;                                  /* start of the second scan */
+    for (int scan = 0; scan < 2; scan++) {
+        const double pri_s = cfg.prf[scan].pri_s;
+        if (scan == 1) tScan2 = t;
+        const int nPulses = cfg.prf[scan].cpiLength + 60, nWith = cfg.prf[scan].cpiLength + 30;
+        for (int k = 0; k < nPulses; k++, pulse++) {
+            pri.pulseNumber = pulse;
+            pri.scanNumber = (uint32_t)scan + 1;
+            pri.az_deg = (float)fmod(t * cfg.rate_dps, 360.0);
+            pri.time_s = t;
+            pri.staggerIndex = (uint16_t)(scan + 1);
+            for (size_t i = 0; i < 2 * (size_t)cfg.nCh * cfg.nDdc; i++) pri.iq[i] = sat16(16.0 * gauss());
+            if (k < nWith) {
+                const double ph = -4 * PI * vr * t / pc->lambda_m;
+                const int first = pc->ddcFirst + r0 + pc->mfShift;
+                for (int ch = 0; ch < cfg.nCh; ch++) {
+                    double sr0 = 1, si0 = 0;
+                    if (cfg.dbfEnabled) {
+                        const double wr = cfg.wRe[beam * cfg.nCh + ch], wi = cfg.wIm[beam * cfg.nCh + ch], mg = hypot(wr, wi);
+                        sr0 = mg > 0 ? wr / mg : 1;  si0 = mg > 0 ? -wi / mg : 0;
+                    }
+                    const double cr = 30.0 * (sr0 * cos(ph) - si0 * sin(ph)), ci = 30.0 * (sr0 * sin(ph) + si0 * cos(ph));
+                    for (int m = 0; m < (pc->nPulse ? pc->nPulse : pc->nTaps); m++) {
+                        const double sr = pc->nPulse ? pc->pulseRe[m] / pulseNorm : pc->tapsRe[pc->nTaps - 1 - m];
+                        const double si = pc->nPulse ? pc->pulseIm[m] / pulseNorm : -pc->tapsIm[pc->nTaps - 1 - m];
+                        int16_t *v = pri.iq + 2 * ((size_t)ch * cfg.nDdc + first + m);
+                        v[0] = sat16(v[0] + cr * sr - ci * si);
+                        v[1] = sat16(v[1] + cr * si + ci * sr);
+                    }
+                }
+            }
+            processor_process(proc, &pri, &cb);
+            t += pri_s;
+        }
+        if (scan == 0) {
+            CHECK(cfg.prfIndex == 0, "scan-to-scan PRF: still PRF 1 in the first scan");
+        } else {
+            processor_flush(proc, &cb);
+            CHECK(cfg.prfIndex == 1 && cfg.cpiLength == cfg.prf[1].cpiLength && cfg.nfft == cfg.prf[1].nfft &&
+                  cfg.dopFreq_Hz[1] == cfg.prf[1].dopFreq_Hz[1], "scan-to-scan PRF: the settings of PRF 2 in the second scan");
+        }
+        plotsAfter[scan] = sink.plots.n;
+    }
+    ProcessorTiming tm;
+    processor_timing(proc, &tm);
+    CHECK(tm.prfSwitches == 1, "scan-to-scan PRF: %llu PRF changes (expected 1)", (unsigned long long)tm.prfSwitches);
+    int found[2] = { 0, 0 };
+    for (int i = 0; i < sink.plots.n; i++) {
+        const Detection *d = &sink.plots.plots[i];
+        const int sc = d->time_s < tScan2 ? 0 : 1;   /* (the plots of scan 1 close at the PRF change) */
+        if (d->pulse == TP && abs(d->rIdx - r0) <= 1 && fabs(d->vr_mps - vr) < 2 * fabs(cfg.prf[sc].dopFreq_Hz[1] - cfg.prf[sc].dopFreq_Hz[0]) * pc->lambda_m / 2)
+            found[sc] = 1;
+    }
+    CHECK(found[0] && found[1], "scan-to-scan PRF: the target in the scan of PRF 1 (%d) and of PRF 2 (%d)", found[0], found[1]);
+    printf("scan-to-scan PRF: %d PRFs, %d plots, PRF changes %llu\n", cfg.nPrf, sink.plots.n,
+           (unsigned long long)tm.prfSwitches);
+    (void)plotsAfter;
+    processor_destroy(proc);
+    free(pri.iq);
+    radar_config_free(&cfg);
+}
+
 int main(int argc, char **argv)
 {
     test_fft();
@@ -720,14 +821,24 @@ int main(int argc, char **argv)
         if (test_end_to_end(argv[1], 0, NAN, &c, SNR_NOISE_CFAR) && test_end_to_end(argv[1], 0, NAN, &a, SNR_NOISE_MEDIAN)) {
             CHECK(a.rIdx == c.rIdx && a.dIdx == c.dIdx && a.beam == c.beam && a.hits == c.hits && a.power == c.power,
                   "the SNR noise changes the plot");
-            CHECK(fabs(a.snr_dB - c.snr_dB) < 1.5, "SNR with the median %.2f dB, with the CFAR noise %.2f dB",
-                  a.snr_dB, c.snr_dB);
+            /* within 1.5 dB with LFM; a phase code (25 chips when the short pulse is the test pulse)
+             * puts range sidelobes of the strong target into the CFAR training cells: 2.5 dB */
+            double tol = 1.5;
+            RadarConfig cc;
+            char e2[256];
+            if (radar_config_load(argv[1], &cc, e2, sizeof e2) == 0) {
+                if (cc.pulse[test_pulse(&cc)].waveform == WAVE_PHASE_CODE) tol = 2.5;
+                radar_config_free(&cc);
+            }
+            CHECK(fabs(a.snr_dB - c.snr_dB) < tol, "SNR with the median %.2f dB, with the CFAR noise %.2f dB (limit %.1f dB)",
+                  a.snr_dB, c.snr_dB, tol);
             printf("SNR of the target: %.2f dB with the median of the map, %.2f dB with the CFAR noise\n",
                    a.snr_dB, c.snr_dB);
         }
         test_cfar_pfa(argv[1]);
         test_video(argv[1]);
         test_mti_range(argv[1]);
+        test_scan2scan(argv[1]);
     } else {
         printf("no configuration file given: end-to-end test skipped\n");
     }

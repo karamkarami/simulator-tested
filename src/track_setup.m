@@ -52,8 +52,18 @@ p.sigmaV0 = t.maxSpeed_mps / sqrt(3);              % velocity std of a new track
 p.sigmaA0 = t.maxAccel_mps2 / sqrt(3);             % acceleration std of a new track ('ca')
 p.gate = 2 * gammaincinv(t.gateProb, p.dim/2);     % chi-square gate with dim degrees of freedom
 p.useVr = logical(t.useRadialVelocity);
+% scan-to-scan PRF (sys.prfProfiles): the Doppler axis changes from scan to scan; the
+% radial velocity error and the decision "unambiguous" hold for every scan (the widest Doppler
+% bin, the longest PRI); the spans of the plots follow the PRF of their scan
+% (select_prf_profile.m sets p.vrSpanPulse, p.vrSpan of the scan)
+binW = abs(diff(sys.dop.v_mps(1:2)));
+rowPriMax = sys.dop.rowPri_s;
+if isfield(sys, 'scan2scan') && sys.scan2scan
+    binW = max(arrayfun(@(q) abs(diff(q.dop.v_mps(1:2))), sys.prfProfiles));
+    rowPriMax = max(arrayfun(@(q) q.dop.rowPri_s, sys.prfProfiles));
+end
 sigmaVr = t.sigmaVr_mps;
-if isempty(sigmaVr), sigmaVr = 0.4 * abs(diff(sys.dop.v_mps(1:2))); end   % 0.4 Doppler bins
+if isempty(sigmaVr), sigmaVr = 0.4 * binW; end   % 0.4 Doppler bins
 p.Rvr = sigmaVr^2;
 % the plot velocity is known modulo the span of the Doppler axis on the carrier of its sub-pulse
 % (cfg.wave.<pulse>.fc_Hz); unambiguous when no target is faster than half the smallest span
@@ -62,7 +72,9 @@ p.vrSpanPulse.short = p.vrSpanPulse.short / (2 * sys.dop.rowPri_s);
 p.vrSpanPulse.long  = p.vrSpanPulse.long / (2 * sys.dop.rowPri_s);
 spans = [p.vrSpanPulse.short, p.vrSpanPulse.long];
 p.vrSpan = min(spans(sys.pulseOn));
-p.vrUnambiguous = t.maxSpeed_mps < p.vrSpan / 2;
+lam = [sys.wave.short.lambda_m, sys.wave.long.lambda_m];
+p.vrSpanMin = min(lam(sys.pulseOn)) / (2 * rowPriMax);   % the smallest span of all scans (= vrSpan
+p.vrUnambiguous = t.maxSpeed_mps < p.vrSpanMin / 2;      %  without the scan-to-scan PRF)
 p.gateVr = 2 * gammaincinv(t.gateProb, (p.dim + 1)/2);
 p.confirmHits = t.confirmHits;
 p.maxMissTentative = t.maxMissTentative;
@@ -135,7 +147,7 @@ if p.dim == 3
 end
 m.logLambdaC = log(s.falsePlotsPerScan / vol);     % false plots per scan and unit volume
 m.logLambdaU = log(s.undetectedTargets / vol);     % undetected targets per unit volume
-m.logVrDensity = -log(p.vrSpan);                   % uniform radial velocity of the plot (when used)
+m.logVrDensity = -log(p.vrSpanMin);                % uniform radial velocity of the plot (when used)
 m.maxHyp = s.maxHypotheses;
 m.logHypPrune = log(s.hypPrune);
 m.rPrune = s.rPrune;  m.rConfirm = s.rConfirm;  m.rDelete = s.rDelete;

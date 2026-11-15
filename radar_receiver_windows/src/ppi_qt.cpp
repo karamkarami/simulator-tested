@@ -237,7 +237,6 @@ QRgb video_colour(int i)
 std::atomic<int> g_videoWanted(0);   /* the PPI shows the video: the worker computes it */
 std::atomic<int> g_profileKind(0);   /* PROFILE_DBF / PROFILE_MF while the PPI shows that output */
 std::atomic<int> g_beam(0);          /* the beam of the DBF / MF output and the range-Doppler map */
-std::atomic<int> g_rdWanted(0);      /* the range-Doppler tab is shown */
 std::vector<double> &beam_elevations()   /* the beams of the beam selector (ppi_set_beams) */
 {
     static std::vector<double> el(1, NAN);
@@ -2514,7 +2513,6 @@ public:
         if (i == 1) pageLayout2_->addWidget(ppi_, 2);
         else pageLayout1_->addWidget(ppi_, 1);
         ppi_->setMinimumSize(i == 1 ? 200 : 300, i == 1 ? 200 : 300);
-        g_rdWanted.store(i == 1);
         if (tabs_->currentIndex() != i) tabs_->setCurrentIndex(i);
         ppi_->setFocus();
     }
@@ -2558,7 +2556,8 @@ public:
             {
                 Shared &s = shared();
                 std::lock_guard<std::mutex> lock(s.mutex);
-                if (s.rdSerial != rdSerial_ && tabs_->currentIndex() == 1 && !ppi_->paused()) {   /* paused: kept */
+                if (s.rdSerial != rdSerial_ && !ppi_->paused()) {   /* in both tabs (the map is ready when
+                                                                         the tab is opened); paused: kept */
                     rdSerial_ = s.rdSerial;
                     if (s.rd.beam == ppi_->beam()) { f = s.rd; fresh = true; }
                 }
@@ -2861,7 +2860,8 @@ extern "C" void ppi_post_profile(int kind, const float *row, int nBins, double d
 extern "C" int ppi_rdmap_wanted(int *beam)
 {
     if (beam) *beam = g_beam.load();
-    return g_rdWanted.load();
+    return 1;                                           /* always: the range-Doppler tab and the plot
+                                                           below its map are always up to date */
 }
 
 extern "C" void ppi_post_rdmap(const RdMap *map)

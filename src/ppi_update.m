@@ -14,8 +14,9 @@ function [sys, want] = ppi_update(ppi, sys, az_deg, t_s, scan, plots, dets, trac
 %   range-Doppler map of the selected beam (ppi_rd_map.m; [] = the one stored)
 %   (all optional). want says what the display needs from the caller:
 %   want.raw = 'video', 'dbf', 'mf' (fill the map every PRI with that data of
-%   beam want.beam) or '' (none), want.rd = true while the range-Doppler tab
-%   is shown (pass the map of beam want.beam).
+%   beam want.beam) or '' (none), want.rd = true: pass the range-Doppler map
+%   of beam want.beam (always, also while the PPI tab is shown, so the
+%   range-Doppler tab and the plot below its map are always up to date).
 %   While the display is paused (space key or the Pause button) the data is
 %   kept aside and not drawn (the display, its data tips and the range-Doppler
 %   map stay as they were); Resume shows the newest data.
@@ -54,7 +55,7 @@ else
 end
 if any(strcmp(S.opt.showMode, {'video', 'dbf', 'mf'})), want.raw = S.opt.showMode; end
 want.beam = S.opt.beam;
-want.rd = S.opt.tab == 2;
+want.rd = true;                                          % range-Doppler map always computed (not only in its tab)
 setappdata(ppi.fig, 'ppi', S);
 if ~isempty(dB)
     ppi_callbacks('cfarApplied', ppi.fig, dB);

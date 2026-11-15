@@ -34,7 +34,7 @@ function ok = test_vhf_challenges()
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
 ok = true;
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.console.enable = false;  cfg.display.enable = false;  cfg.io.saveRaw = false;
 cfg.rx.maxRange_m = 50e3;
 fprintf('fc = %.0f MHz, receiver gain %g dB\n', cfg.fc/1e6, cfg.rx.gain_dB);

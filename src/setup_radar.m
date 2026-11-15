@@ -65,7 +65,11 @@ sys.adc.sigmaAdc = sqrt(max(adcNoise2 - 2/12, 0));            % [LSB]
 sys.adc.sigmaTh  = sys.rx.sigmaTh * sys.rx.voltGain * sys.adc.lsbPerUnit;   % thermal noise at the ADC [LSB]
 sys.N0eff = sys.N0 * (sys.adc.sigmaTh^2 + adcNoise2) / sys.adc.sigmaTh^2;    % incl. ADC noise
 
+%% Radar mode (cfg.modes, apply_radar_mode.m)
+sys.mode = radar_mode_check(cfg);
+
 %% PRI sequence and MTI weights
+sys.scan2scan = false;
 switch lower(cfg.prf.mode)
     case 'fixed'
         sys.pri = cfg.prf.pri_s;
@@ -74,8 +78,25 @@ switch lower(cfg.prf.mode)
         st = load_input(cfg, 'stagger', []);
         sys.pri = st.priVector_s(:);
         sys.mtiCoeffs = st.mtiCoeffs;                         % one row per stagger position
+    case 'scan2scan'
+        % one PRF per antenna scan (constant during the scan), used in turn: scan s has
+        % prf_Hz(mod(s - 1, numel(prf_Hz)) + 1). Inside a scan as the fixed PRF.
+        if ~isfield(cfg.files, 'scan2scan')
+            error('cfg.prf.mode = ''scan2scan'' needs the PRF file cfg.files.scan2scan.');
+        end
+        s2 = load_input(cfg, 'scan2scan', []);
+        if ~isfield(s2, 'prf_Hz') || isempty(s2.prf_Hz) || ~isnumeric(s2.prf_Hz) || ~isreal(s2.prf_Hz) || ...
+                any(~isfinite(s2.prf_Hz(:))) || any(s2.prf_Hz(:) <= 0)
+            error('%s must hold the PRFs of the scans [Hz] in the variable ''prf_Hz'' (positive, finite).', ...
+                  cfg.files.scan2scan);
+        end
+        sys.prfScan_Hz = double(s2.prf_Hz(:)).';
+        sys.priScan_s = 1 ./ sys.prfScan_Hz;
+        sys.pri = sys.priScan_s(1);                          % the slow-time settings below: of scan 1
+        sys.mtiCoeffs = [1 -2 1];
+        sys.scan2scan = true;
     otherwise
-        error('Unknown PRF mode "%s"', cfg.prf.mode);
+        error('Unknown PRF mode "%s" (''fixed'', ''staggered'' or ''scan2scan'')', cfg.prf.mode);
 end
 sys.staggered = strcmpi(cfg.prf.mode, 'staggered');
 sys.nStagger  = numel(sys.pri);
@@ -223,9 +244,11 @@ sys.rxStart_s = 0;                                            % the record start
 wLast = wl;                                                   % the last transmitted sub-pulse ends the record
 if ~wl.enable, wLast = ws; end
 rxEnd = wLast.tTx_s + wLast.width_s + 2*cfg.rx.maxRange_m/c + filterSpan + 2/sys.fsOut;
-if rxEnd > min(sys.pri)
+priMin = min(sys.pri);
+if sys.scan2scan, priMin = min(sys.priScan_s); end
+if rxEnd > priMin
     error(['Receive window (%.1f us) does not fit in the shortest PRI (%.1f us): reduce ', ...
-           'cfg.rx.maxRange_m or start the long pulse earlier.'], rxEnd*1e6, min(sys.pri)*1e6);
+           'cfg.rx.maxRange_m or start the long pulse earlier.'], rxEnd*1e6, priMin*1e6);
 end
 sys.nAdc = round((rxEnd - sys.rxStart_s) * fs);
 sys.tAdc = sys.rxStart_s + (0:sys.nAdc-1)' / fs;             % ADC sample times in the PRI [s]
@@ -422,7 +445,83 @@ for i = 1:2                                                   % on the carrier o
     sys.wave.(names{i}) = wv;
 end
 
-%% CPI buffer and Doppler processing
+%% CPI buffer and Doppler processing (slow_time_setup below; with the scan-to-scan PRF one
+% set per PRF of the scans: sys.prfProfiles, select_prf_profile.m)
+sys = slow_time_setup(sys, cfg);
+if sys.scan2scan
+    prof = struct('pri', {}, 'cpi', {}, 'dop', {}, 'v_mps', {});
+    for j = 1:numel(sys.priScan_s)
+        sj = sys;
+        sj.pri = sys.priScan_s(j);
+        sj = slow_time_setup(sj, cfg);
+        prof(j).pri = sj.pri;
+        prof(j).cpi = sj.cpi;
+        prof(j).dop = sj.dop;
+        prof(j).v_mps = {sj.wave.short.v_mps, sj.wave.long.v_mps};
+    end
+    sys.prfProfiles = prof;
+    sys.prfProfile = 1;
+end
+
+%% CFAR threshold of the selected detector and window
+c = sys.cfar;
+nOuter = (2*(c.guardRange + c.trainRange) + 1) * (2*(c.guardDoppler + c.trainDoppler) + 1);
+nGuard = (2*c.guardRange + 1) * (2*c.guardDoppler + 1);
+sys.cfar.nTrain = nOuter - nGuard;
+% GO / SO: cells per half window (2-D and range: leading / lagging in range,
+% without the training cells on the range of the cell; Doppler: below / above)
+oR = c.guardRange + c.trainRange;  oD = c.guardDoppler + c.trainDoppler;
+if strcmp(c.method, 'doppler')
+    sys.cfar.nHalf = c.trainDoppler;
+else
+    sys.cfar.nHalf = oR * (2*oD + 1) - c.guardRange * (2*c.guardDoppler + 1);
+end
+sys.cfar.osK = min(sys.cfar.nTrain, max(1, round(c.osRank * sys.cfar.nTrain)));   % OS: rank of the statistic
+if any(strcmp(c.type, {'go', 'so'})) && sys.cfar.nHalf < 1
+    error('cfg.cfar.type = ''%s'' needs training cells on both sides of the cell (cfg.cfar.%s).', c.type, c.method);
+end
+if isempty(c.threshold_dB)
+    sys.cfar.alpha = cfar_alpha(c.pfa, sys.cfar, sys.dop.nLooks);
+else
+    sys.cfar.alpha = 10^(c.threshold_dB/10);
+end
+sys.cfar.pfa = cfar_pfa(sys.cfar.alpha, sys.cfar, sys.dop.nLooks);   % of the threshold in use
+% lowest threshold: the factor of the largest allowed Pfa (cfg.cfar.maxPfa)
+maxPfa = 1e-4;
+if isfield(cfg.cfar, 'maxPfa') && ~isempty(cfg.cfar.maxPfa), maxPfa = cfg.cfar.maxPfa; end
+if ~isscalar(maxPfa) || ~isreal(maxPfa) || ~(maxPfa > 0 && maxPfa < 1)
+    error('cfg.cfar.maxPfa must be a scalar in (0, 1).');
+end
+sys.cfar.maxPfa = maxPfa;
+sys.cfar.alphaMin = cfar_alpha(maxPfa, sys.cfar, sys.dop.nLooks);
+if sys.cfar.alpha < sys.cfar.alphaMin * (1 - 1e-9)
+    error(['CFAR threshold %.2f dB (Pfa %.2e) is below the lowest threshold %.2f dB of ' ...
+           'cfg.cfar.maxPfa = %.1e.'], 10*log10(sys.cfar.alpha), sys.cfar.pfa, ...
+          10*log10(sys.cfar.alphaMin), maxPfa);
+end
+% mean of the statistic for noise of mean 1: the noise estimate of a cell is statistic / noiseScale
+sys.cfar.noiseScale = 1;
+if ~strcmp(c.type, 'ca')
+    [zq, wq] = cfar_quadrature(sys.dop.nLooks);
+    sys.cfar.noiseScale = sum(wq .* (1 - cfar_statistic(zq, sys.cfar, sys.dop.nLooks)));
+end
+nfftMin = sys.dop.nfft;
+if sys.scan2scan, nfftMin = min(arrayfun(@(q) q.dop.nfft, sys.prfProfiles)); end
+if 2*(c.guardDoppler + c.trainDoppler) + 1 > nfftMin
+    error('CFAR Doppler window (%d bins) is larger than the FFT length (%d).', ...
+          2*(c.guardDoppler + c.trainDoppler) + 1, nfftMin);
+end
+
+%% Tracking
+sys.track = track_setup(cfg, sys);
+end
+
+function sys = slow_time_setup(sys, cfg)
+% CPI length, MTI output, Doppler rows, FFT length, window, Doppler and velocity axes, noise
+% gain and looks of every Doppler bin, MTI notch and median / mean of the noise: everything that
+% depends on the PRI (sys.pri). setup_radar runs it once, and with the scan-to-scan PRF once per
+% PRF of the scans (sys.prfProfiles).
+names = {'short', 'long'};
 % CPI = time a target stays inside the 3 dB azimuth beam; the buffer holds
 % the pulses that arrive during one CPI.
 sys.cpi.time_s = sys.ant.azBeamwidth_deg / sys.ant.rate_dps;
@@ -535,56 +634,33 @@ sys.dop.nLooks = min(nLooks(tested));
 % Median / mean of the noise power (used to estimate the noise floor of a beam)
 L = sys.dop.nLooks;
 sys.dop.medianToMean = fzero(@(x) gammainc(L*x, L) - 0.5, [0.1 2]);
-
-%% CFAR threshold of the selected detector and window
-c = sys.cfar;
-nOuter = (2*(c.guardRange + c.trainRange) + 1) * (2*(c.guardDoppler + c.trainDoppler) + 1);
-nGuard = (2*c.guardRange + 1) * (2*c.guardDoppler + 1);
-sys.cfar.nTrain = nOuter - nGuard;
-% GO / SO: cells per half window (2-D and range: leading / lagging in range,
-% without the training cells on the range of the cell; Doppler: below / above)
-oR = c.guardRange + c.trainRange;  oD = c.guardDoppler + c.trainDoppler;
-if strcmp(c.method, 'doppler')
-    sys.cfar.nHalf = c.trainDoppler;
-else
-    sys.cfar.nHalf = oR * (2*oD + 1) - c.guardRange * (2*c.guardDoppler + 1);
-end
-sys.cfar.osK = min(sys.cfar.nTrain, max(1, round(c.osRank * sys.cfar.nTrain)));   % OS: rank of the statistic
-if any(strcmp(c.type, {'go', 'so'})) && sys.cfar.nHalf < 1
-    error('cfg.cfar.type = ''%s'' needs training cells on both sides of the cell (cfg.cfar.%s).', c.type, c.method);
-end
-if isempty(c.threshold_dB)
-    sys.cfar.alpha = cfar_alpha(c.pfa, sys.cfar, sys.dop.nLooks);
-else
-    sys.cfar.alpha = 10^(c.threshold_dB/10);
-end
-sys.cfar.pfa = cfar_pfa(sys.cfar.alpha, sys.cfar, sys.dop.nLooks);   % of the threshold in use
-% lowest threshold: the factor of the largest allowed Pfa (cfg.cfar.maxPfa)
-maxPfa = 1e-3;
-if isfield(cfg.cfar, 'maxPfa') && ~isempty(cfg.cfar.maxPfa), maxPfa = cfg.cfar.maxPfa; end
-if ~isscalar(maxPfa) || ~isreal(maxPfa) || ~(maxPfa > 0 && maxPfa < 1)
-    error('cfg.cfar.maxPfa must be a scalar in (0, 1).');
-end
-sys.cfar.maxPfa = maxPfa;
-sys.cfar.alphaMin = cfar_alpha(maxPfa, sys.cfar, sys.dop.nLooks);
-if sys.cfar.alpha < sys.cfar.alphaMin * (1 - 1e-9)
-    error(['CFAR threshold %.2f dB (Pfa %.2e) is below the lowest threshold %.2f dB of ' ...
-           'cfg.cfar.maxPfa = %.1e.'], 10*log10(sys.cfar.alpha), sys.cfar.pfa, ...
-          10*log10(sys.cfar.alphaMin), maxPfa);
-end
-% mean of the statistic for noise of mean 1: the noise estimate of a cell is statistic / noiseScale
-sys.cfar.noiseScale = 1;
-if ~strcmp(c.type, 'ca')
-    [zq, wq] = cfar_quadrature(sys.dop.nLooks);
-    sys.cfar.noiseScale = sum(wq .* (1 - cfar_statistic(zq, sys.cfar, sys.dop.nLooks)));
-end
-if 2*(c.guardDoppler + c.trainDoppler) + 1 > nfft
-    error('CFAR Doppler window (%d bins) is larger than the FFT length (%d).', ...
-          2*(c.guardDoppler + c.trainDoppler) + 1, nfft);
 end
 
-%% Tracking
-sys.track = track_setup(cfg, sys);
+function m = radar_mode_check(cfg)
+% Checks cfg.modes (radar_config.m, apply_radar_mode.m): at most 6 modes, numbers 0 ... 5, the
+% active one among them, sub-mode 'dual' or 'single', cfg.wave.singlePulse 'short' or 'long'.
+% Without cfg.modes (older configurations): mode 0, 'dual'.
+m = struct('available', 0, 'active', 0, 'subMode', 'dual', 'name', '');
+if ~isfield(cfg, 'modes'), return; end
+md = cfg.modes;
+if isfield(md, 'available'), m.available = md.available; end
+if isfield(md, 'active'), m.active = md.active; end
+if isfield(md, 'subMode'), m.subMode = lower(md.subMode); end
+if isfield(md, 'name'), m.name = md.name; end
+a = m.available;
+if isempty(a) || ~isnumeric(a) || numel(a) > 6 || any(a(:) ~= round(a(:))) || any(a(:) < 0 | a(:) > 5) || ...
+        numel(unique(a)) ~= numel(a)
+    error('cfg.modes.available must hold 1 to 6 different mode numbers 0 ... 5.');
+end
+if ~isscalar(m.active) || ~any(a == m.active)
+    error('cfg.modes.active = %s is not one of cfg.modes.available = [%s].', mat2str(m.active), num2str(a(:).'));
+end
+if ~any(strcmp(m.subMode, {'dual', 'single'}))
+    error('cfg.modes.subMode must be ''dual'' or ''single''.');
+end
+if isfield(cfg.wave, 'singlePulse') && ~any(strcmpi(cfg.wave.singlePulse, {'short', 'long'}))
+    error('cfg.wave.singlePulse (mode %d) must be ''short'' or ''long''.', m.active);
+end
 end
 
 function [taps, shift] = compression_filter(wv, cfg, sys)

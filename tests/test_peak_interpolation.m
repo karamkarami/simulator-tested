@@ -9,7 +9,7 @@ function ok = test_peak_interpolation()
 
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.clutter.enable = false;
 cfg.report.dopplerInterp = true;
 cfg.report.elevationInterp = true;

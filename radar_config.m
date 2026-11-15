@@ -10,8 +10,11 @@ function cfg = radar_config()
 %       cfg.clutter.enable = false;
 %       results = run_radar_sim(cfg);
 %
+%   The waveforms and the PRF belong to the radar modes: the files
+%   modes/radar_config_mode_<k>.m (section "Radar modes" below).
+%
 %   Quantities that come from input .mat files (antenna patterns, DDC
-%   filters, DBF matrix, staggered PRIs and MTI weights) are listed under
+%   filters, DBF matrix, staggered PRIs and MTI weights, PRFs per scan) are listed under
 %   "Input files". Default files are created by make_input_files.m when they
 %   are missing.
 
@@ -29,6 +32,7 @@ cfg.files.ddc     = fullfile(root, 'inputs', 'ddc_filters.mat');     % low-pass 
 cfg.files.ddc4MHz = fullfile(root, 'inputs', 'ddc_filters_4MHz.mat'); % the same for the 4 MHz output
 cfg.files.dbf     = fullfile(root, 'inputs', 'dbf_matrix.mat');      % elevation beamforming matrix
 cfg.files.stagger = fullfile(root, 'inputs', 'stagger_prf.mat');     % staggered PRIs + MTI weights
+cfg.files.scan2scan = fullfile(root, 'inputs', 'scan2scan_prf.mat'); % PRFs of the scans (cfg.prf.mode = 'scan2scan')
 cfg.files.phaseCode = fullfile(root, 'inputs', 'phase_code.mat');    % phase codes + mismatch filters of both sub-pulses
 cfg.files.mtiFir  = fullfile(root, 'inputs', 'mti_fir.mat');        % coefficients of the FIR clutter filter (cfg.mti.type = 'fir')
 
@@ -89,7 +93,25 @@ cfg.adc.fIF_Hz           = 30e6;   % IF carrier of the received signal (receiver
 cfg.adc.overloadWarn     = 0.01;   % warn when more than this fraction of the receive samples of a PRI
                                    % is at full scale (cfg.rx.gain_dB too high for the echoes)
 
-%% Waveforms: every PRI holds a short and a long sub-pulse (short first)
+%% Radar modes: waveforms and PRF
+% The radar has at most 6 modes (numbers 0 ... 5). Each mode has its own
+% settings in its mode file modes/radar_config_mode_<k>.m: the waveforms of
+% both sub-pulses (cfg.wave.short, cfg.wave.long), the sub-pulse of its
+% single-pulse sub-mode (cfg.wave.singlePulse) and the PRF (cfg.prf). A
+% program uses some of them (cfg.modes.available, e.g. [0 1 2]: modes 0, 1
+% and 2) and runs one of them (cfg.modes.active). Every mode has two
+% sub-modes: 'dual' (both sub-pulses in every PRI) and 'single' (only the
+% sub-pulse cfg.wave.singlePulse of the mode; the other one is switched off).
+%   mode 0 'medium_mode'  both sub-pulses phase codes (P4, mismatch filters), fixed PRF 1 kHz
+%   mode 1 'lfm_mode'     both sub-pulses LFM (Taylor-windowed matched filter), fixed PRF 1 kHz
+%   modes 2 ... 5         not yet defined (the settings of mode 1): edit their files
+% apply_radar_mode.m (called below) runs the mode file of cfg.modes.active and
+% applies the sub-mode. Another mode in a script: set cfg.modes.active /
+% cfg.modes.subMode and call cfg = apply_radar_mode(cfg) again (C receiver:
+% radar_export_config --set "cfg.modes.active = 1; cfg = apply_radar_mode(cfg);").
+% Changes of cfg.wave / cfg.prf after that (as the tests do) are kept.
+%
+% Waveforms: every PRI holds a short and a long sub-pulse (short first).
 % PRI timeline: short pulse at its tTx -> receive (near range) -> long pulse
 % at its tTx -> receive (far range) until the end of the record. While a
 % pulse is transmitted the receiver sees the transmitter leakage. Both
@@ -111,30 +133,21 @@ cfg.adc.overloadWarn     = 0.01;   % warn when more than this fraction of the re
 % axis, received power (~ lambda^2), element phases (beam directions) and clutter Doppler. Carriers
 % more than the pulse bandwidth apart also keep the short-pulse echo of far targets out of the
 % long window (the DDC filters reject it).
-cfg.wave.short.enable       = true;     % short sub-pulse on/off
-cfg.wave.short.fc_Hz        = [];       % its carrier [Hz] ([] = cfg.fc)
-cfg.wave.short.type         = 'lfm';    % 'lfm' or 'phasecode' (code from cfg.files.phaseCode)
-cfg.wave.short.width_s      = 25e-6;    % pulse width [s]
-cfg.wave.short.bandwidth_Hz = 1e6;      % LFM sweep bandwidth [Hz]
-cfg.wave.short.chip_s       = 1e-6;     % phase-code chip length [s] (width_s/chip_s chips)
-cfg.wave.short.compression  = 'matched'; % phase code: 'matched' or 'mismatch' filter (LFM: 'matched')
-cfg.wave.short.mismatchLength = [];     % coefficients (one per chip) of the mismatch filter in the default
-                                        % phase-code file, e.g. 3*25 ([] = chips + 10, at most 2x the chips)
-cfg.wave.short.tTx_s        = 0;        % transmit time inside the PRI [s]
-
-cfg.wave.long.enable        = true;     % long sub-pulse on/off
-cfg.wave.long.fc_Hz         = [];       % its carrier [Hz] ([] = cfg.fc)
-cfg.wave.long.type          = 'lfm';
-cfg.wave.long.width_s       = 150e-6;
-cfg.wave.long.bandwidth_Hz  = 1e6;
-cfg.wave.long.chip_s        = 1e-6;
-cfg.wave.long.compression   = 'matched';
-cfg.wave.long.mismatchLength = [];
-cfg.wave.long.tTx_s         = 200e-6;
-
-%% PRF
-cfg.prf.mode  = 'fixed';   % 'fixed' or 'staggered' (staggered PRIs come from cfg.files.stagger)
-cfg.prf.pri_s = 1e-3;      % PRI in fixed mode [s]
+%
+% PRF (cfg.prf.mode in the mode file):
+%   'fixed'     the same PRI cfg.prf.pri_s in every PRI
+%   'staggered' the PRIs of cfg.files.stagger in turn (with their MTI weights)
+%   'scan2scan' one PRF per antenna scan, constant during the scan: the PRFs
+%               of cfg.files.scan2scan (variable prf_Hz, one per scan, used in
+%               turn and repeated). Inside a scan the processing is that of the
+%               fixed PRF (MTI canceller or FIR filter, Doppler FFT, CFAR, notch);
+%               the CPI length ('auto'), the FFT length, the Doppler axis and the
+%               blind speeds follow the PRF of the scan.
+cfg.modes.available = [0 1 2];  % modes of this program (at most 6 of the numbers 0 ... 5)
+cfg.modes.active    = 0;        % mode the radar runs in (one of cfg.modes.available)
+cfg.modes.subMode   = 'dual';   % 'dual' (both sub-pulses) or 'single' (only cfg.wave.singlePulse of the mode)
+addpath(fullfile(root, 'modes'));
+cfg = apply_radar_mode(cfg);    % the waveforms and the PRF of the active mode (modes/radar_config_mode_<k>.m)
 
 %% DDC (filters come from cfg.files.ddc for 2 MHz, cfg.files.ddc4MHz for 4 MHz)
 cfg.ddc.outputRate_Hz = 2e6;   % DDC output sample rate: 2e6 or 4e6 [Hz]. Stage 1 decimates by 10
@@ -210,7 +223,7 @@ cfg.mti.maxRange_m = Inf;      % the clutter filter is applied to the range cell
 % so every range cell can be tested.
 cfg.cfar.type   = 'ca';   % 'ca', 'go', 'so' or 'os'
 cfg.cfar.method = '2d';   % '2d', 'range' or 'doppler'
-cfg.cfar.maxPfa = 1e-3;   % largest Pfa allowed (per cell and CPI): the lowest threshold that can be set
+cfg.cfar.maxPfa = 1e-4;   % largest Pfa allowed (per cell and CPI): the lowest threshold that can be set
                           % (pfa / threshold_dB of the window and the PPI threshold field, MATLAB and C)
 cfg.cfar.osRank = 0.9;    % OS: rank of the statistic as a fraction of the training cells (0 ... 1]. The
                           % textbook 0.75 suits isolated interfering targets; here the eclipsed long-pulse
@@ -571,7 +584,8 @@ cfg.display.showMode          = 'plots';  % PPI shows 'plots' (after the plot ex
 cfg.display.beam              = 1;        % beam after the DBF shown by 'dbf', 'mf' and the range-Doppler
                                           % tab (also in the panel: Beam)
 cfg.display.tab               = 'ppi';    % tab at the start: 'ppi', or 'rd' (range-Doppler map of the
-                                          % selected beam next to a small PPI; computed only in this tab)
+                                          % selected beam next to a small PPI). The map and the plot below
+                                          % it are always computed, whichever tab is shown
 cfg.display.rdLowerPlot       = 'spectrum'; % range-Doppler tab, the plot below the map: 'spectrum' (Doppler
                                           % spectrum of a range bin) or 'range' (range profile of a Doppler
                                           % bin); also in the panel (C receiver: --ppi-rd-plot)

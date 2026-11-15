@@ -105,6 +105,8 @@ typedef struct {                /* work buffers of one thread                   
 
 struct Processor {
     const RadarConfig *cfg;
+    RadarConfig *cfgPrf;        /* the same configuration: its slow-time settings follow the PRF of the
+                                   scan (scan-to-scan PRF, radar_config_select_prf)                 */
     FftPlan fft;
     PulseState ps[N_PULSES];
     int nThreads;
@@ -260,6 +262,10 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
 #endif
     Processor *p = xcalloc(1, sizeof(Processor));
     p->cfg = cfg;
+    p->cfgPrf = (RadarConfig *)cfg;
+    /* buffers for the largest slow-time settings (scan-to-scan PRF: of all PRFs) */
+    const int maxCpi = cfg->maxCpiLength > cfg->cpiLength ? cfg->maxCpiLength : cfg->cpiLength;
+    const int maxNfft = cfg->maxNfft > cfg->nfft ? cfg->maxNfft : cfg->nfft;
     if (fft_plan_init(&p->fft, cfg->nfft) != 0) { free(p); return NULL; }
     int maxNR = 1;
     for (int i = 0; i < N_PULSES; i++) {
@@ -278,15 +284,15 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
         s->nMtiOut = cfg->cpiLength - cfg->nMtiTaps + 1;
         size_t seg = (size_t)cfg->nCh * pc->ddcCount, beams = (size_t)cfg->nBeams * pc->ddcCount;
         size_t cpi = (size_t)cfg->nMtiTaps * s->nCells;
-        size_t mti = (size_t)(s->nCells + CELL_BLOCK - 1) / CELL_BLOCK * s->nMtiOut * CELL_BLOCK;
-        size_t map = (size_t)cfg->nfft * s->nCells;
+        size_t mti = (size_t)(s->nCells + CELL_BLOCK - 1) / CELL_BLOCK * (maxCpi - cfg->nMtiTaps + 1) * CELL_BLOCK;
+        size_t map = (size_t)maxNfft * s->nCells;
         s->segRe = xcalloc(seg, sizeof(float));   s->segIm = xcalloc(seg, sizeof(float));
         s->beamRe = xcalloc(beams, sizeof(float)); s->beamIm = xcalloc(beams, sizeof(float));
         s->cpiRe = xcalloc(cpi, sizeof(float));   s->cpiIm = xcalloc(cpi, sizeof(float));
         s->mtiRe = xcalloc(mti, sizeof(float));   s->mtiIm = xcalloc(mti, sizeof(float));
-        s->staggerIdx = xcalloc(s->nSlots, sizeof(uint16_t));
-        s->az = xcalloc(s->nSlots, sizeof(double));
-        s->time = xcalloc(s->nSlots, sizeof(double));
+        s->staggerIdx = xcalloc(maxCpi, sizeof(uint16_t));
+        s->az = xcalloc(maxCpi, sizeof(double));
+        s->time = xcalloc(maxCpi, sizeof(double));
         s->P = xcalloc(map, sizeof(float));
         s->det = xcalloc(map, 1);
         s->cntInv = xcalloc(s->nR, sizeof(double));
@@ -315,10 +321,10 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
     p->scratch = xcalloc(nThr, sizeof(Scratch));
     for (int t = 0; t < nThr; t++) {
         Scratch *w = &p->scratch[t];
-        w->xr = xcalloc((size_t)cfg->nfft * CELL_BLOCK, sizeof(float));
-        w->xi = xcalloc((size_t)cfg->nfft * CELL_BLOCK, sizeof(float));
+        w->xr = xcalloc((size_t)maxNfft * CELL_BLOCK, sizeof(float));
+        w->xi = xcalloc((size_t)maxNfft * CELL_BLOCK, sizeof(float));
         cfar_scratch_init(&w->cfar, cfg, maxNR);
-        w->work = xcalloc((size_t)cfg->nfft * maxNR + 8, sizeof(float));
+        w->work = xcalloc((size_t)maxNfft * maxNR + 8, sizeof(float));
     }
     return p;
 }
@@ -936,13 +942,15 @@ static void blank_dense(const Processor *p, PulseState *s, const Cell *cells, in
     const int nfft = cfg->nfft, nB = cfg->nBeams, nR = s->nR;
     const size_t nCells = (size_t)s->nCells, map = (size_t)nfft * nCells;
     const int rows = nfft > nB ? nfft : nB;
-    if (!s->pkM) {
-        s->pkM = xcalloc(map, sizeof(float));
-        s->pkA = xcalloc(map, sizeof(float));
-        s->pkE = xcalloc((size_t)nfft * nR, sizeof(float));
+    if (!s->pkM) {                                  /* (room for the largest FFT of all PRFs) */
+        const int nfftMax = cfg->maxNfft > nfft ? cfg->maxNfft : nfft, rowsMax = nfftMax > nB ? nfftMax : nB;
+        s->pkM = xcalloc((size_t)nfftMax * nCells, sizeof(float));
+        s->pkA = xcalloc((size_t)nfftMax * nCells, sizeof(float));
+        s->pkE = xcalloc((size_t)nfftMax * nR, sizeof(float));
         s->pkD = xcalloc((size_t)nB * nR, sizeof(float));
-        s->pkT = xcalloc((size_t)rows * nR, sizeof(float));
+        s->pkT = xcalloc((size_t)rowsMax * nR, sizeof(float));
     }
+    (void)map;  (void)rows;
     float *M = s->pkM, *A = s->pkA, *E = s->pkE, *D = s->pkD, *T = s->pkT;
     memset(M, 0, sizeof(float) * map);
     for (int i = 0; i < n; i++) M[(size_t)cells[i].d * nCells + (size_t)cells[i].b * nR + cells[i].r] = cells[i].pw;
@@ -1204,9 +1212,10 @@ static void taps_alloc(Processor *p)
     if (p->nBins < 1) p->nBins = 1;
     p->profile = xcalloc((size_t)p->nBins, sizeof(float));
     p->profileCnt = xcalloc((size_t)p->nBins, sizeof(int));
-    p->rd = xcalloc((size_t)p->nBins * cfg->nfft, sizeof(float));
-    p->rdVel = xcalloc((size_t)cfg->nfft, sizeof(double));
-    p->rdWork = xcalloc((size_t)p->nBins * cfg->nfft + 1, sizeof(float));
+    const int nfftMax = cfg->maxNfft > cfg->nfft ? cfg->maxNfft : cfg->nfft;   /* (scan-to-scan PRF: the largest) */
+    p->rd = xcalloc((size_t)p->nBins * nfftMax, sizeof(float));
+    p->rdVel = xcalloc((size_t)nfftMax, sizeof(double));
+    p->rdWork = xcalloc((size_t)p->nBins * nfftMax + 1, sizeof(float));
     const int vp = cfg->pulse[PULSE_LONG].enable ? PULSE_LONG : PULSE_SHORT;   /* velocity on its carrier */
     for (int d = 0; d < cfg->nfft; d++) p->rdVel[d] = -cfg->dopFreq_Hz[d] * cfg->pulse[vp].lambda_m / 2;
 }
@@ -1417,6 +1426,44 @@ void processor_flush(Processor *p, const ProcessorCallbacks *cb)
     if (p->havePulse) run_tracker(p, p->lastTime, 1, cb);   /* at the newest PRI, as run_radar_sim.m */
 }
 
+/* Scan-to-scan PRF: the PRI belongs to a scan with PRF k (0-based, the stagger index of its
+ * header). The open plots are closed and go to the tracker (with the Doppler axis of their
+ * scan), then the slow-time settings of PRF k are put into the configuration and the CPI
+ * buffers, extractors and the FFT start anew (as run_radar_sim.m). */
+static void prf_switch(Processor *p, int k, const ProcessorCallbacks *cb)
+{
+    if (p->havePulse) {
+        for (int i = 0; i < N_PULSES; i++) {
+            extractor_update(&p->ps[i].ext, NULL, 0, 1, plot_callback, p);
+            plots_out(p, cb);
+        }
+        if (p->nTrackPlots > 0) run_tracker(p, p->lastTime, 0, cb);   /* (as run_radar_sim.m) */
+    }
+    if (!radar_config_select_prf(p->cfgPrf, k)) return;
+    const RadarConfig *cfg = p->cfg;
+    fft_plan_free(&p->fft);
+    if (fft_plan_init(&p->fft, cfg->nfft) != 0) abort();
+    for (int i = 0; i < N_PULSES; i++) {
+        PulseState *s = &p->ps[i];
+        extractor_free(&s->ext);
+        extractor_init(&s->ext, cfg->nfft, cfg->minHits, cfg->maxMiss);
+        s->ext.nBeams = cfg->nBeams;
+        if (!cfg->pulse[i].enable) continue;
+        s->nSlots = cfg->cpiLength;
+        s->nMtiOut = cfg->cpiLength - cfg->nMtiTaps + 1;
+        reset_buffers(s);
+    }
+    if (cfg->trackEnable) tracker_set_vr_span(&p->tracker, cfg);
+    if (p->rd) {                                        /* range-Doppler map: the new Doppler axis */
+        const int vp = cfg->pulse[PULSE_LONG].enable ? PULSE_LONG : PULSE_SHORT;
+        for (int d = 0; d < cfg->nfft; d++) p->rdVel[d] = -cfg->dopFreq_Hz[d] * cfg->pulse[vp].lambda_m / 2;
+        memset(p->rd, 0, sizeof(float) * (size_t)p->nBins * cfg->nfft);
+        p->nRdDets = 0;
+        p->rdLast = -1e300;
+    }
+    p->timing.prfSwitches++;
+}
+
 void processor_process(Processor *p, const PriData *pri, const ProcessorCallbacks *cb)
 {
     const RadarConfig *cfg = p->cfg;
@@ -1429,6 +1476,10 @@ void processor_process(Processor *p, const PriData *pri, const ProcessorCallback
     if (p->havePulse && pri->pulseNumber != p->lastPulse + 1) {
         processor_flush(p, cb);
         for (int i = 0; i < N_PULSES; i++) reset_buffers(&p->ps[i]);
+    }
+    if (cfg->scan2scan) {                                   /* scan-to-scan PRF: the PRF of this scan */
+        const int k = pri->staggerIndex >= 1 && pri->staggerIndex <= cfg->nPrf ? pri->staggerIndex - 1 : 0;
+        if (k != cfg->prfIndex) prf_switch(p, k, cb);
     }
     p->lastPulse = pri->pulseNumber;
     p->lastTime = pri->time_s;

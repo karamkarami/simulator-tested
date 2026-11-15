@@ -629,12 +629,23 @@ int main(int argc, char **argv)
         const double step_deg = app.cfg.rate_dps * app.cfg.meanPri_s * app.cfg.updateEvery;
         const int minHits = (int)ceil(app.cfg.minExtent_deg / step_deg);     /* as run_radar_sim.m */
         app.cfg.minHits = minHits > 1 ? minHits : 1;
+        for (int j = 0; j < app.cfg.nPrf; j++) {                              /* every PRF of the scans */
+            const int h = (int)ceil(app.cfg.minExtent_deg / (app.cfg.rate_dps * app.cfg.prf[j].pri_s * app.cfg.updateEvery));
+            app.cfg.prf[j].minHits = h > 1 ? h : 1;
+        }
     }
     app.detArc_deg = app.cfg.rate_dps * app.cfg.meanPri_s * app.cfg.updateEvery;
     fprintf(stderr, "Configuration: %d element(s), %d beam(s), DDC %d samples, short %d / long %d range cells, "
             "CPI %d pulses, FFT %d x %d row(s), update every %d pulse(s), plots need %d update(s)\n", app.cfg.nCh,
             app.cfg.nBeams, app.cfg.nDdc, app.cfg.pulse[0].nRange, app.cfg.pulse[1].nRange, app.cfg.cpiLength,
             app.cfg.nfft, app.cfg.nRows, app.cfg.updateEvery, app.cfg.minHits);
+    fprintf(stderr, "Radar mode %d (%s sub-mode)\n", app.cfg.radarMode, app.cfg.subModeSingle ? "single" : "dual");
+    if (app.cfg.scan2scan) {
+        fprintf(stderr, "Scan-to-scan PRF (selected by the stagger index of the PRI header):");
+        for (int j = 0; j < app.cfg.nPrf; j++)
+            fprintf(stderr, " %.1f Hz (CPI %d, FFT %d)", 1.0 / app.cfg.prf[j].pri_s, app.cfg.prf[j].cpiLength, app.cfg.prf[j].nfft);
+        fprintf(stderr, "\n");
+    }
     for (int i = 0; i < N_PULSES; i++) {
         const PulseConfig *pc = &app.cfg.pulse[i];
         if (!pc->enable) {

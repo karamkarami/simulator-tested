@@ -14,7 +14,7 @@ function ok = test_short_pulse_ghost()
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
 
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.clutter.enable = false;
 cfg.io.saveRaw = false;
 cfg.display.enable = false;

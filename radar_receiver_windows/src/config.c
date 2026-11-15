@@ -485,6 +485,74 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             set_error(&rs, "the Doppler FFT length %d is not a power of 2", cfg->nfft);
         if (!rs.failed && cfg->nRows * cfg->rowLen + cfg->nMtiTaps - 1 > cfg->cpiLength)
             set_error(&rs, "the CPI buffer is shorter than the Doppler processing needs");
+        /* radar mode (information) */
+        {
+            const Record *r = find_optional(&rs, "radarMode");
+            if (r && r->rows * r->cols >= 2) { cfg->radarMode = (int)lround(r->data[0]); cfg->subModeSingle = r->data[1] != 0; }
+        }
+        cfg->maxCpiLength = cfg->cpiLength;
+        cfg->maxNfft = cfg->nfft;
+        cfg->maxRowLen = cfg->rowLen;
+        /* scan-to-scan PRF: the slow-time settings of every PRF */
+        if (!rs.failed && find_optional(&rs, "scan2scan") && get_int(&rs, "scan2scan")) {
+            int nPrf = 0;
+            double *prfHz = get_doubles(&rs, "prfScan_Hz", 0, &nPrf);
+            free(prfHz);
+            if (!rs.failed && (nPrf < 1 || cfg->staggered || cfg->nRows != 1))
+                set_error(&rs, "invalid scan-to-scan PRF in the configuration");
+            if (!rs.failed) {
+                cfg->scan2scan = 1;
+                cfg->nPrf = nPrf;
+                cfg->prf = calloc((size_t)nPrf, sizeof(PrfProfile));
+                if (!cfg->prf) set_error(&rs, "out of memory");
+            }
+            for (int j = 0; j < cfg->nPrf && !rs.failed; j++) {
+                PrfProfile *q = &cfg->prf[j];
+                char nm[48];
+#define S2S(f) (snprintf(nm, sizeof nm, "s2s%d_%s", j + 1, f), nm)
+                q->pri_s = get_scalar(&rs, S2S("pri_s"));
+                q->cpiLength = get_int(&rs, S2S("cpiLength"));
+                q->rowLen = get_int(&rs, S2S("rowLen"));
+                q->nfft = get_int(&rs, S2S("nfft"));
+                q->notchBins = get_int(&rs, S2S("notchBins"));
+                q->minHits = get_int(&rs, S2S("minHits"));
+                if (rs.failed || q->nfft < 1 || (q->nfft & (q->nfft - 1)) != 0 || q->rowLen < 1 || q->rowLen > q->nfft ||
+                    q->rowLen + cfg->nMtiTaps - 1 > q->cpiLength || q->minHits < 1 || q->notchBins < 0 ||
+                    2 * (cfg->guardDoppler + cfg->trainDoppler) + 1 > q->nfft || !(q->pri_s > 0)) {
+                    set_error(&rs, "invalid settings of PRF %d of the scan-to-scan PRF in the configuration", j + 1);
+                    break;
+                }
+                q->dopWindow = get_floats(&rs, S2S("dopWindow"), q->rowLen);
+                q->noiseGain = get_floats(&rs, S2S("noiseGain"), q->nfft);
+                q->noiseGainBypass = get_floats(&rs, S2S("noiseGainBypass"), q->nfft);
+                q->dopFreq_Hz = get_doubles(&rs, S2S("dopFreq_Hz"), q->nfft, NULL);
+                q->trackVrSpan = get_scalar(&rs, S2S("trackVrSpan"));
+                {
+                    const Record *r = find(&rs, S2S("trackVrSpanPulse"));
+                    for (int p = 0; p < N_PULSES; p++)
+                        q->trackVrSpanPulse[p] = r && r->rows * r->cols == N_PULSES ? r->data[p] : q->trackVrSpan;
+                }
+#undef S2S
+                if (q->cpiLength > cfg->maxCpiLength) cfg->maxCpiLength = q->cpiLength;
+                if (q->nfft > cfg->maxNfft) cfg->maxNfft = q->nfft;
+                if (q->rowLen > cfg->maxRowLen) cfg->maxRowLen = q->rowLen;
+            }
+            if (!rs.failed) {                              /* room for the largest set, PRF 1 in use */
+                float *w = realloc(cfg->dopWindow, sizeof(float) * (size_t)cfg->maxRowLen);
+                if (w) cfg->dopWindow = w;
+                float *g = realloc(cfg->noiseGain, sizeof(float) * (size_t)cfg->maxNfft);
+                if (g) cfg->noiseGain = g;
+                float *gb = realloc(cfg->noiseGainBypass, sizeof(float) * (size_t)cfg->maxNfft);
+                if (gb) cfg->noiseGainBypass = gb;
+                double *f = realloc(cfg->dopFreq_Hz, sizeof(double) * (size_t)cfg->maxNfft);
+                if (f) cfg->dopFreq_Hz = f;
+                if (!w || !g || !gb || !f) set_error(&rs, "out of memory");
+                else {
+                    cfg->prfIndex = -1;
+                    radar_config_select_prf(cfg, 0);
+                }
+            }
+        }
     }
     free_records(&rs);
     if (!ok || rs.failed) {
@@ -504,7 +572,32 @@ void radar_config_free(RadarConfig *cfg)
     }
     free(cfg->mtiCoeffs);  free(cfg->dopWindow);  free(cfg->noiseGain);  free(cfg->dopFreq_Hz);
     free(cfg->noiseGainBypass);
+    for (int j = 0; j < cfg->nPrf && cfg->prf; j++) {
+        PrfProfile *q = &cfg->prf[j];
+        free(q->dopWindow);  free(q->noiseGain);  free(q->noiseGainBypass);  free(q->dopFreq_Hz);
+    }
+    free(cfg->prf);
     memset(cfg, 0, sizeof(*cfg));
+}
+
+int radar_config_select_prf(RadarConfig *cfg, int k)
+{
+    if (!cfg->scan2scan || k < 0 || k >= cfg->nPrf || k == cfg->prfIndex) return 0;
+    const PrfProfile *q = &cfg->prf[k];
+    cfg->cpiLength = q->cpiLength;
+    cfg->rowLen = q->rowLen;
+    cfg->nfft = q->nfft;
+    cfg->notchBins = q->notchBins;
+    cfg->minHits = q->minHits;
+    cfg->meanPri_s = q->pri_s;
+    memcpy(cfg->dopWindow, q->dopWindow, sizeof(float) * (size_t)q->rowLen);
+    memcpy(cfg->noiseGain, q->noiseGain, sizeof(float) * (size_t)q->nfft);
+    memcpy(cfg->noiseGainBypass, q->noiseGainBypass, sizeof(float) * (size_t)q->nfft);
+    memcpy(cfg->dopFreq_Hz, q->dopFreq_Hz, sizeof(double) * (size_t)q->nfft);
+    cfg->trackVrSpan = q->trackVrSpan;
+    for (int p = 0; p < N_PULSES; p++) cfg->pulse[p].vrSpan_mps = q->trackVrSpanPulse[p];
+    cfg->prfIndex = k;
+    return 1;
 }
 
 const char *cfar_method_name(int method)

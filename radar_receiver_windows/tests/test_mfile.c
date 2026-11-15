@@ -94,6 +94,39 @@ int main(void)
     CHECK(!strcmp(text(cfg, "set1"), "staggered") && scalar(cfg, "c") == 3e8);
     mvalue_free(cfg);
 
+    /* function files (mode files): in the directory of the caller and on the addpath directories,
+     * input arguments, feval and sprintf; a file with an if block gives an unevaluated value */
+    write_file("test_mfile_mode_1.m",
+        "function cfg = test_mfile_mode_1(cfg, x)\n"
+        "cfg.name = 'mode one';\n"
+        "cfg.val = cfg.val + x;\n"
+        "end\n");
+    write_file("test_mfile_bad.m", "function y = test_mfile_bad(x)\nif x\n y = 1;\nend\n");
+    write_file(path,
+        "function cfg = test_mfile_config()\n"
+        "cfg.val = 2;\n"
+        "cfg.k = 1;\n"
+        "cfg.f = sprintf('test_mfile_mode_%d', cfg.k);\n"
+        "cfg.g = sprintf('%s-%03d %.2f %g%%', 'a', 7, pi, 0.5);\n"
+        "cfg = feval(cfg.f, cfg, 3);\n"
+        "cfg.direct = test_mfile_mode_1(struct('val', 10), 1);\n"
+        "cfg.bad = test_mfile_bad(1);\n");
+    cfg = mfile_eval(path, NULL, 0, err, sizeof err);
+    CHECK(cfg != NULL);
+    if (cfg) {
+        CHECK(scalar(cfg, "val") == 5 && !strcmp(text(cfg, "name"), "mode one"));
+        CHECK(!strcmp(text(cfg, "f"), "test_mfile_mode_1") && !strcmp(text(cfg, "g"), "a-007 3.14 0.5%"));
+        CHECK(scalar(cfg, "direct.val") == 11);
+        CHECK(mvalue_get(cfg, "bad")->type == MV_UNEVAL && strstr(mvalue_get(cfg, "bad")->str, "'if' is not supported"));
+        mvalue_free(cfg);
+    } else {
+        printf("%s\n", err);
+    }
+    write_file(path, "function cfg = test_mfile_config()\ncfg.val = 1;\ncfg = test_mfile_mode_1(cfg, 1, 2);\ncfg.x = 1;\n");
+    CHECK(mfile_eval(path, NULL, 0, err, sizeof err) == NULL && strstr(err, "too many input arguments") != NULL);
+    remove("test_mfile_mode_1.m");
+    remove("test_mfile_bad.m");
+
     /* errors name the line */
     write_file(path, "cfg.a = 1;\ncfg.b = [1 2; 3];\n");
     CHECK(mfile_eval(path, NULL, 0, err, sizeof err) == NULL && strstr(err, ":2:") != NULL);

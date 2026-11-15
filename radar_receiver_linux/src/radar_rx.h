@@ -74,6 +74,18 @@ typedef struct {
     float  *pulseRe, *pulseIm;
 } PulseConfig;
 
+/* Slow-time settings of one PRF of the scan-to-scan PRF (cfg.prf.mode = 'scan2scan'):
+ * records s2s<j>_... of the configuration file */
+typedef struct {
+    double  pri_s;
+    int     cpiLength, rowLen, nfft, notchBins, minHits;
+    float  *dopWindow;       /* [rowLen] */
+    float  *noiseGain;       /* [nfft]   */
+    float  *noiseGainBypass; /* [nfft]   */
+    double *dopFreq_Hz;      /* [nfft]   */
+    double  trackVrSpan, trackVrSpanPulse[N_PULSES];
+} PrfProfile;
+
 typedef struct {
     /* antenna and beamforming */
     int     nCh;           /* receive elements                                        */
@@ -142,6 +154,20 @@ typedef struct {
     double  minExtent_deg;  /* azimuth extent of a plot (minHits = this / azimuth step per update) */
     double  meanPri_s;      /* mean PRI                                               */
 
+    /* radar mode (information; optional in the file): cfg.modes.active, sub-mode 1 single / 0 dual */
+    int     radarMode, subModeSingle;
+    /* scan-to-scan PRF (optional in the file: off): one set of slow-time settings per PRF of the
+     * scans. The fields above (cpiLength, rowLen, nfft, dopWindow, noiseGain, noiseGainBypass,
+     * dopFreq_Hz, notchBins, minHits, meanPri_s, trackVrSpan, pulse[].vrSpan_mps) hold those of
+     * the PRF in use: radar_config_select_prf() (the processor calls it when the stagger index of
+     * the PRI header, the number of the PRF of the scan, changes). The arrays have room for the
+     * largest set (maxCpiLength, maxNfft, maxRowLen). */
+    int     scan2scan;
+    int     nPrf;
+    PrfProfile *prf;        /* [nPrf]                                                 */
+    int     prfIndex;       /* the PRF in use (0-based)                               */
+    int     maxCpiLength, maxNfft, maxRowLen;
+
     /* tracker (optional in the file: off if missing); the common settings, the
      * EKF ones (trackModel ... trackSigmaA0) and the PMBM ones (pmbm...) */
     int     trackEnable, trackDim;   /* dimension 2 (range, azimuth) or 3 (+ elevation)  */
@@ -194,6 +220,9 @@ typedef struct {
 /* Loads the file written by export_receiver_config.m. Returns 0 on success. */
 int  radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errLen);
 void radar_config_free(RadarConfig *cfg);
+/* Scan-to-scan PRF: puts the slow-time settings of PRF k (0-based) into cfg. Returns 1 when
+ * the PRF changed, 0 when it was in use already or cfg has no scan-to-scan PRF. */
+int  radar_config_select_prf(RadarConfig *cfg, int k);
 
 /* ------------------------------------------------------------------------ */
 /* DDC output of one PRI (udp_input.c)                                       */
@@ -346,6 +375,7 @@ typedef struct {
     uint64_t rejected;   /* PRIs whose layout (channels, DDC samples, sub-pulse samples,
                             DDC rate) differs from the configuration: not processed */
     uint64_t skipped;    /* CPI updates skipped (processor_set_slow_time(p, 0))      */
+    uint64_t prfSwitches; /* scan-to-scan PRF: changes of the PRF (CPIs restarted)    */
 } ProcessorTiming;     /* accumulated times */
 
 typedef struct Processor Processor;
@@ -463,7 +493,7 @@ void ppi_set_rd_plot(int plot);
 /* Display modes PPI_SHOW_DBF / PPI_SHOW_MF: ppi_profile_wanted() returns
  * PROFILE_DBF / PROFILE_MF (else PROFILE_NONE) and the selected beam; the worker
  * then hands the profile of every PRI to ppi_post_profile(). The range-Doppler
- * tab: ppi_rdmap_wanted() is 1 while it is shown (with the selected beam), the
+ * tab: ppi_rdmap_wanted() is always 1 (with the selected beam), whichever tab is shown, the
  * worker hands the maps to ppi_post_rdmap() (which copies them). */
 int  ppi_profile_wanted(int *beam);
 void ppi_post_profile(int kind, const float *row, int nBins, double dR_m, double az_deg, double time_s);

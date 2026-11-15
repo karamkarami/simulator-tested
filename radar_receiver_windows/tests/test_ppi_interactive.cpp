@@ -525,8 +525,8 @@ int main(int argc, char **argv)
     /* the range-Doppler tab: the map of the selected beam next to a small PPI */
     {
         int bm = -1;
-        check(win.tabs()->count() == 2 && win.tabs()->currentIndex() == 0 && ppi_rdmap_wanted(&bm) == 0 &&
-              pw.parentWidget() == win.tabs()->widget(0), "two tabs; the map is computed only in the second");
+        check(win.tabs()->count() == 2 && win.tabs()->currentIndex() == 0 && ppi_rdmap_wanted(&bm) == 1 &&
+              pw.parentWidget() == win.tabs()->widget(0), "two tabs; the map is computed also in the first");
         win.resize(1400, 800);
         win.tabs()->setCurrentIndex(1);
         QCoreApplication::processEvents();
@@ -661,7 +661,8 @@ int main(int argc, char **argv)
                   "screenshot of the second tab: the whole window (map, plot below it, small PPI, panel)");
         }
         win.tabs()->setCurrentIndex(0);
-        check(ppi_rdmap_wanted(nullptr) == 0 && pw.parentWidget() == win.tabs()->widget(0), "back to the PPI tab");
+        check(ppi_rdmap_wanted(nullptr) == 1 && pw.parentWidget() == win.tabs()->widget(0),
+              "back to the PPI tab (the map is still computed)");
     }
 
     if (!folder.empty()) {

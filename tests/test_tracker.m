@@ -67,7 +67,7 @@ end
 function [ok, e] = run_case(dim, model, useVr, prfMode)
 % e.vel, e.vr: mean velocity / radial velocity error of the tracks on the
 % targets after 2 and after 5 scans [m/s]; e.nFalse: confirmed tracks not on a target
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.console.enable = false;
 cfg.track.dim = sprintf('%dd', dim);
 cfg.track.model = model;
@@ -200,7 +200,7 @@ function ok = gnn_case()
 % Two targets 200 m apart in range, receding at 100 m/s, plots without errors.
 % Scan 2: plot 1 is 800 m from track 2 and 1000 m from track 1 (both still at
 % the first plot, velocity unknown): nearest neighbour would give it to track 2.
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.console.enable = false;
 cfg.ant.nElements = 1;
 cfg.track.dim = '2d';
@@ -240,7 +240,7 @@ for useVr = [false true]
     err = zeros(2, 3);
     names = {'cv', 'ca'};
     for mi = 1:2
-        cfg = radar_config();
+        cfg = lfm_mode_config();
         cfg.console.enable = false;
         cfg.ant.nElements = 1;
         cfg.track.dim = '2d';
@@ -289,7 +289,7 @@ function ok = min_speed_case()
 ok = true;
 speed = [3 100];  az = [30 120];  R0 = 20e3;
 for gate = [false true]
-    cfg = radar_config();
+    cfg = lfm_mode_config();
     cfg.console.enable = false;
     cfg.ant.nElements = 1;
     cfg.track.dim = '2d';

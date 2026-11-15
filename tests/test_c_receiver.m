@@ -2,7 +2,8 @@ function [ok, cmp] = test_c_receiver(prfMode, receiverBin, port, targetIdx, repl
 %TEST_C_RECEIVER  The C receiver (radar_receiver_<os>/, <os> = windows or linux: receiver_dir.m) against the MATLAB processing.
 %
 %   [ok, cmp] = TEST_C_RECEIVER(prfMode, receiverBin, port) runs the
-%   six-target scenario of test_six_targets ('fixed' or 'staggered' PRF) and
+%   six-target scenario of test_six_targets ('fixed', 'staggered' or 'scan2scan'
+%   PRF; 'scan2scan' simulates two scans, so the PRF changes once) and
 %   streams the DDC output of every PRI over UDP (int16, 1400-byte payloads)
 %   to the C receiver, which processes it live and records the datagrams.
 %   Every plot of the MATLAB processing must have a C plot in the same
@@ -43,7 +44,7 @@ if ~exist(receiverBin, 'file')
 end
 
 %% Configuration: the six-target scenario, DDC output streamed over UDP
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.prf.mode        = prfMode;
 cfg.cfar.method     = cfarMethod;
 cfg.cfar.type       = cfarType;
@@ -51,6 +52,7 @@ cfg.track.method    = trackMethod;
 cfg.clutter.enable  = true;
 cfg.rx.maxRange_m   = 50e3;
 cfg.targets         = six_targets_scenario();
+if strcmp(prfMode, 'scan2scan'), cfg.sim.nScans = 2; end   % the second scan has the second PRF
 cfg.io.outFolder    = fullfile(root, 'output', ['c_receiver_' prfMode '_' cfarType '_' cfarMethod '_' trackMethod]);
 cfg.io.saveRaw      = false;
 cfg.display.enable  = false;

@@ -325,7 +325,7 @@ end
 
 %% ------------------------------------------------------------------ helpers
 function [cfg, sys] = make_cfg(dim, method, prf, pmbm, minSpeed)
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.console.enable = false;
 cfg.track.method = method;
 cfg.track.dim = sprintf('%dd', dim);

@@ -1,7 +1,7 @@
 function make_input_files(cfg, which)
 %MAKE_INPUT_FILES  Create the default input .mat files of the simulator.
 %
-%   MAKE_INPUT_FILES(cfg) writes the six input files named in radar_config.m:
+%   MAKE_INPUT_FILES(cfg) writes the input files named in radar_config.m:
 %     antenna_pattern.mat : element spacing, azimuth pattern, elevation element
 %                           pattern, transmit elevation pattern, peak gains
 %     ddc_filters.mat     : low-pass FIR filters of the two DDC stages (h1, h2) for
@@ -11,13 +11,15 @@ function make_input_files(cfg, which)
 %     dbf_matrix.mat      : elevation DBF matrix W [nBeams x cfg.ant.nElements]
 %                           and beam elevations
 %     stagger_prf.mat     : staggered PRI vector and the matching MTI weights
+%     scan2scan_prf.mat   : PRFs of the antenna scans (prf_Hz, used in turn) for
+%                           cfg.prf.mode = 'scan2scan'
 %     phase_code.mat      : phase codes of the short and the long sub-pulse
 %                           (P4, width_s/chip_s chips) and their mismatch
 %                           filters (one coefficient per chip)
 %     mti_fir.mat         : FIR clutter filter along slow time (coeffs), used with
 %                           cfg.mti.type = 'fir'
 %   MAKE_INPUT_FILES(cfg, which) writes only one of them: which = 'antenna',
-%   'ddc', 'ddc4MHz', 'dbf', 'stagger', 'phaseCode' or 'mtiFir'.
+%   'ddc', 'ddc4MHz', 'dbf', 'stagger', 'scan2scan', 'phaseCode' or 'mtiFir'.
 %
 %   Every default file stores in 'madeFor' the configuration values it was
 %   built for. setup_radar.m rebuilds a default file when they no longer match
@@ -114,6 +116,12 @@ if doAll || strcmpi(which, 'stagger')
         mtiCoeffs(k, :) = 2 * [T2, -(T1 + T2), T1] / (T1 + T2);
     end
     save(cfg.files.stagger, 'priVector_s', 'mtiCoeffs', '-v7');
+end
+
+%% 4b) Scan-to-scan PRF: one PRF per antenna scan (used in turn, cfg.prf.mode = 'scan2scan')
+if (doAll || strcmpi(which, 'scan2scan')) && isfield(cfg.files, 'scan2scan')
+    prf_Hz = [1000 1040 960];                     %#ok<NASGU> PRFs of the scans [Hz] (PRIs 1000, 962, 1042 us)
+    save(cfg.files.scan2scan, 'prf_Hz', '-v7');
 end
 
 %% 5) Phase codes (P4) and their mismatch filters

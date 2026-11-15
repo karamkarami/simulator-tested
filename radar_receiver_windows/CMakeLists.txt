@@ -293,16 +293,26 @@ if(RADAR_BUILD_TESTS)
     set_tests_properties(export_config PROPERTIES FIXTURES_SETUP exported_config)
     set_tests_properties(core_exported PROPERTIES FIXTURES_REQUIRED exported_config)
     # options of radar_config.m exported and processed: one sub-pulse off, the sub-pulses on their
-    # own carriers with the clutter filter up to 50 km and a CPI of 96 pulses, the TOMHT tracker
-    foreach(variant IN ITEMS short_off long_off carriers tomht)
+    # own carriers with the clutter filter up to 50 km and a CPI of 96 pulses, the TOMHT tracker,
+    # the scan-to-scan PRF, radar mode 1 and the single-pulse sub-mode
+    foreach(variant IN ITEMS short_off long_off carriers tomht scan2scan lfm_mode single)
         if(variant STREQUAL "short_off")
             set(stmt "cfg.wave.short.enable = false;")
         elseif(variant STREQUAL "long_off")
             set(stmt "cfg.wave.long.enable = false;")
         elseif(variant STREQUAL "carriers")
             set(stmt "cfg.wave.short.fc_Hz = 165e6; cfg.wave.long.fc_Hz = 175e6; cfg.mti.maxRange_m = 50e3; cfg.proc.cpiMode = 'manual'; cfg.proc.cpiLength = 96;")
-        else()
+        elseif(variant STREQUAL "tomht")
             set(stmt "cfg.track.method = 'tomht';")
+        elseif(variant STREQUAL "scan2scan")
+            # scan-to-scan PRF: one set of slow-time settings per PRF, the switch (test_core)
+            set(stmt "cfg.prf.mode = 'scan2scan';")
+        elseif(variant STREQUAL "lfm_mode")
+            # radar mode 1 (LFM sub-pulses) selected after radar_config.m
+            set(stmt "cfg.modes.active = 1; cfg = apply_radar_mode(cfg);")
+        else()
+            # the single-pulse sub-mode of mode 0 (only its cfg.wave.singlePulse)
+            set(stmt "cfg.modes.subMode = 'single'; cfg = apply_radar_mode(cfg);")
         endif()
         add_test(NAME export_${variant} COMMAND radar_export_config --quiet --set "${stmt}"
                  --out ${CMAKE_CURRENT_BINARY_DIR}/radar_config_${variant}.bin)

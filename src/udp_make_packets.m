@@ -10,7 +10,7 @@ function packets = udp_make_packets(hdr, I, Q, payloadBytes)
 %     bytes  8-11  uint32  scan number
 %     bytes 12-15  single  antenna azimuth [deg]
 %     bytes 16-19  uint16  packet index (0-based), packet count
-%     bytes 20-23  uint16  number of channels, stagger index
+%     bytes 20-23  uint16  number of channels, stagger index (scan-to-scan PRF: number of the PRF of the scan)
 %     bytes 24-31  uint32  samples per channel, first sample in this packet (0-based)
 %     bytes 32-39  double  PRI start time [s]
 %     bytes 40-47  single  DDC sample rate [Hz], time of the first DDC sample in the PRI [s]

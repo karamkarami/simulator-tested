@@ -39,7 +39,7 @@ if ~exist(receiver, 'file') || ~exist(sender, 'file')
     error('C receiver not built in %s (radar_receiver_<os>/README.md)', buildDir);
 end
 
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.prf.mode = prfMode;
 cfg.sim.nScans = nScans;
 cfg.console.enable = false;

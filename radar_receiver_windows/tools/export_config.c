@@ -779,6 +779,181 @@ static void build_dbf(int nEl, double spacing, double tilt, double lambda, doubl
 /* The export (setup_radar.m + export_receiver_config.m)                     */
 /* ------------------------------------------------------------------------ */
 
+typedef struct {
+    double cpiTime;           /* 3 dB beam dwell [s]                                       */
+    double meanPri;           /* mean PRI [s]                                              */
+    int    staggered, nStagger, nTaps;
+    const double *mti;        /* [nStagger x nTaps] row-major                              */
+    double sumPri, pri0;      /* sum of the stagger PRIs, the (first) PRI [s]              */
+    const Wave *wv;           /* the sub-pulses (range cells beyond cfg.mti.maxRange_m)     */
+    double maxRange;          /* cfg.rx.maxRange_m                                         */
+} SlowIn;
+
+typedef struct {
+    int cpiLength, nRows, rowLen, nfft, notchBins;
+    double rowPri, notchMaxRange_m, nLooks, medianToMean, mtiMaxRange;
+    double *win;              /* [rowLen] Hamming window, unit energy                      */
+    double *fHz;              /* [nfft] Doppler axis                                       */
+    double *noiseGain;        /* [2 nfft]: filtered cells, then the cells beyond mtiMaxRange */
+} SlowTime;
+
+/* CPI length, Doppler rows, FFT length, window, Doppler axis, noise gain and looks of every
+ * Doppler bin, MTI notch and median/mean of the noise: everything that depends on the PRI
+ * (slow_time_setup of setup_radar.m). */
+static SlowTime slow_time(const SlowIn *in)
+{
+    const double meanPri = in->meanPri, sumPri = in->sumPri, maxRange = in->maxRange;
+    const int staggered = in->staggered, nStagger = in->nStagger, nTaps = in->nTaps;
+    const double *mti = in->mti, *pri = &in->pri0;
+    const Wave *wv = in->wv;
+    const double cpiTime = in->cpiTime;
+    /* cfg.proc.cpiMode: 'auto' (beam dwell) or 'manual' (cfg.proc.cpiLength); without the field
+     * (older configurations) cpiLength = [] means auto */
+    int cpiAuto = !has("proc.cpiLength") || empty("proc.cpiLength");
+    if (has("proc.cpiMode") && !empty("proc.cpiMode")) {
+        const char *m = str("proc.cpiMode");
+        if (same_text(m, "auto")) cpiAuto = 1;
+        else if (same_text(m, "manual")) cpiAuto = 0;
+        else fail("cfg.proc.cpiMode must be 'auto' or 'manual'.");
+    }
+    int cpiLength;
+    if (cpiAuto) cpiLength = (int)lround(cpiTime / meanPri);
+    else {
+        if (!has("proc.cpiLength") || empty("proc.cpiLength")) fail("cfg.proc.cpiMode = 'manual' needs cfg.proc.cpiLength: a whole number of pulses.");
+        const double v = num("proc.cpiLength");
+        if (v < 1 || v != floor(v)) fail("cfg.proc.cpiMode = 'manual' needs cfg.proc.cpiLength: a whole number of pulses.");
+        cpiLength = (int)v;
+    }
+    if (staggered) cpiLength = nStagger * (cpiLength / nStagger);
+    const int nOut = cpiLength - (nTaps - 1);
+    int nRows, rowLen;
+    double rowPri;
+    if (staggered) { nRows = nStagger; rowLen = nOut >= 0 ? nOut / nRows : -1; rowPri = sumPri; }
+    else { nRows = 1; rowLen = nOut; rowPri = pri[0]; }
+    int nfft;
+    if (!empty("proc.nfft")) nfft = (int)num("proc.nfft");
+    else nfft = staggered ? 1 << nextpow2(rowLen) : 1 << nextpow2(cpiLength);
+    if (rowLen > nfft) rowLen = nfft;
+    if (rowLen < 2)
+        fail("The CPI of %d pulses is too short for the MTI and the Doppler processing (cfg.proc.cpiLength).", cpiLength);
+    double *win = xcalloc((size_t)rowLen, sizeof(double)), wn = 0;
+    for (int j = 0; j < rowLen; j++) {
+        win[j] = rowLen == 1 ? 1.0 : 0.54 - 0.46 * cos(2 * PI * j / (rowLen - 1));
+        wn += win[j] * win[j];
+    }
+    wn = sqrt(wn);
+    for (int j = 0; j < rowLen; j++) win[j] /= wn;
+    double *fHz = xcalloc((size_t)nfft, sizeof(double));
+    for (int k = 0; k < nfft; k++) fHz[k] = (k - nfft / 2) / (nfft * rowPri);
+
+    /* clutter filter only up to cfg.mti.maxRange_m: the cells beyond get the bypass weights (the last tap) */
+    double mtiMaxRange = INFINITY;
+    if (has("mti.maxRange_m") && !empty("mti.maxRange_m")) mtiMaxRange = num("mti.maxRange_m");
+    if (isnan(mtiMaxRange) || mtiMaxRange < 0)
+        fail("cfg.mti.maxRange_m must be a non-negative scalar range in metres (Inf is allowed).");
+    int bypassUsed = 0;
+    for (int i = 0; i < 2; i++)
+        for (int k = 0; k < wv[i].nRange; k++) bypassUsed |= wv[i].range_m[k] > mtiMaxRange;
+    double *bypass = xcalloc((size_t)(nStagger * nTaps), sizeof(double));
+    for (int k = 0; k < nStagger; k++) bypass[k * nTaps + nTaps - 1] = 1.0;
+
+    /* noise gain and looks of every Doppler bin: white noise (impulses) through MTI, window, FFT
+     * (pass 1: the same without the clutter filter, for the cells beyond mtiMaxRange) */
+    double *noiseGain = xcalloc((size_t)(2 * nfft), sizeof(double));
+    double *noiseGainB = noiseGain + nfft;
+    double *Cre = xcalloc((size_t)(2 * nfft * nRows * nRows), sizeof(double));
+    double *Cim = xcalloc((size_t)(2 * nfft * nRows * nRows), sizeof(double));
+    for (int pass = 0; pass < 1 + bypassUsed; pass++) {
+        const double *co = pass ? bypass : mti;
+        double *gainP = pass ? noiseGainB : noiseGain;
+        double *CreP = Cre + (size_t)pass * nfft * nRows * nRows, *CimP = Cim + (size_t)pass * nfft * nRows * nRows;
+        double *y = xcalloc((size_t)(nOut > 0 ? nOut : 1), sizeof(double));
+        double *Yr = xcalloc((size_t)(nRows * nfft), sizeof(double)), *Yi = xcalloc((size_t)(nRows * nfft), sizeof(double));
+        double *cosT = xcalloc((size_t)nfft, sizeof(double)), *sinT = xcalloc((size_t)nfft, sizeof(double));
+        for (int k = 0; k < nfft; k++) { cosT[k] = cos(2 * PI * k / nfft); sinT[k] = sin(2 * PI * k / nfft); }
+        const int used = nRows * rowLen, off = nOut - used;
+        for (int imp = 0; imp < cpiLength; imp++) {
+            for (int m = 0; m < nOut; m++) {
+                const int l = imp - m, st = m % nStagger;
+                y[m] = (l >= 0 && l < nTaps) ? co[st * nTaps + l] : 0.0;
+            }
+            for (int r = 0; r < nRows; r++)
+                for (int i = 0; i < nfft; i++) {
+                    const int kf = ((i - nfft / 2) % nfft + nfft) % nfft;
+                    double sr = 0, si = 0;
+                    for (int j = 0; j < rowLen; j++) {
+                        const int qq = staggered ? j * nRows + r : r * rowLen + j;
+                        const double x = y[off + qq] * win[j];
+                        if (x == 0) continue;
+                        const int ph = (int)(((long)kf * j) % nfft);
+                        sr += x * cosT[ph];
+                        si -= x * sinT[ph];
+                    }
+                    Yr[r * nfft + i] = sr;
+                    Yi[r * nfft + i] = si;
+                }
+            for (int i = 0; i < nfft; i++) {
+                double pw = 0;
+                for (int r = 0; r < nRows; r++) pw += Yr[r * nfft + i] * Yr[r * nfft + i] + Yi[r * nfft + i] * Yi[r * nfft + i];
+                gainP[i] += pw / nRows;
+                for (int r1 = 0; r1 < nRows; r1++)            /* C = Yk' * Yk */
+                    for (int r2 = 0; r2 < nRows; r2++) {
+                        const double ar = Yr[r1 * nfft + i], ai = -Yi[r1 * nfft + i];
+                        const double br = Yr[r2 * nfft + i], bi = Yi[r2 * nfft + i];
+                        CreP[(i * nRows + r1) * nRows + r2] += ar * br - ai * bi;
+                        CimP[(i * nRows + r1) * nRows + r2] += ar * bi + ai * br;
+                    }
+            }
+        }
+        free(y); free(Yr); free(Yi); free(cosT); free(sinT);
+    }
+    if (!bypassUsed) memcpy(noiseGainB, noiseGain, sizeof(double) * (size_t)nfft);
+    free(bypass);
+    const double notchWidth = num("cfar.notchWidth");
+    const double notchMaxRange_m = num("cfar.notchMaxRange_m");
+    const int notchBins = (int)lround(notchWidth * 2 * nfft / rowLen);
+    const int zeroBin = nfft / 2 + 1;
+    double nLooks = INFINITY;
+    int anyTested = 0;
+    {
+        const int m = 2 * nRows;
+        double *A = xcalloc((size_t)(m * m), sizeof(double));
+        for (int ii = 0; ii < nfft * (1 + bypassUsed); ii++) {
+            const int i = ii % nfft;
+            const double *CreP = Cre + (size_t)(ii / nfft) * nfft * nRows * nRows;
+            const double *CimP = Cim + (size_t)(ii / nfft) * nfft * nRows * nRows;
+            if (notchMaxRange_m >= maxRange && !(abs(i + 1 - zeroBin) > notchBins)) continue;
+            anyTested = 1;
+            double tr = 0;
+            for (int r1 = 0; r1 < nRows; r1++) {
+                tr += CreP[(i * nRows + r1) * nRows + r1];
+                for (int r2 = 0; r2 < nRows; r2++) {       /* [Re -Im; Im Re]: the eigenvalues of C, twice */
+                    const double re = CreP[(i * nRows + r1) * nRows + r2], im = CimP[(i * nRows + r1) * nRows + r2];
+                    A[r1 * m + r2] = re;
+                    A[(r1 + nRows) * m + (r2 + nRows)] = re;
+                    A[r1 * m + (r2 + nRows)] = -im;
+                    A[(r1 + nRows) * m + r2] = im;
+                }
+            }
+            const double lmax = nRows == 1 ? tr : max_eig_sym(A, m);
+            const double looks = tr / lmax;
+            if (looks < nLooks) nLooks = looks;
+        }
+        free(A);
+    }
+    if (!anyTested)
+        fail("The MTI notch (cfg.cfar.notchWidth = %g: +-%d bins) covers every Doppler bin (FFT length %d).",
+             notchWidth, notchBins, nfft);
+    MedianCtx mc = { nLooks };
+    const double medianToMean = fzero_brent(median_f, &mc, 0.1, 2.0);
+
+    SlowTime st = { cpiLength, nRows, rowLen, nfft, notchBins, rowPri, notchMaxRange_m, nLooks, medianToMean,
+                    mtiMaxRange, win, fHz, noiseGain };
+    free(Cre);
+    free(Cim);
+    return st;
+}
+
 static void export_config(void)
 {
     const char *names[2] = { "short", "long" };
@@ -913,11 +1088,59 @@ static void export_config(void)
     ddc.fsOut = fs1 / ddc.D2;
     const double fsOut = ddc.fsOut;
 
+    /* radar mode (cfg.modes, apply_radar_mode.m): checked as in setup_radar.m */
+    int radarMode = 0, subSingle = 0;
+    if (has("modes")) {
+        const MValue *av = field("modes.available", 1);
+        if (av->type != MV_NUM || av->rows * av->cols < 1 || av->rows * av->cols > 6)
+            fail("cfg.modes.available must hold 1 to 6 different mode numbers 0 ... 5.");
+        const int nAv = av->rows * av->cols;
+        for (int i = 0; i < nAv; i++) {
+            const double m = av->re[i];
+            int dup = 0;
+            for (int k = 0; k < i; k++) dup |= av->re[k] == m;
+            if (m != floor(m) || m < 0 || m > 5 || dup) fail("cfg.modes.available must hold 1 to 6 different mode numbers 0 ... 5.");
+        }
+        const double act = num("modes.active");
+        int found = 0;
+        for (int i = 0; i < nAv; i++) found |= av->re[i] == act;
+        if (!found) fail("cfg.modes.active = %g is not one of cfg.modes.available.", act);
+        radarMode = (int)act;
+        const char *sm = str("modes.subMode");
+        if (same_text(sm, "single")) subSingle = 1;
+        else if (!same_text(sm, "dual")) fail("cfg.modes.subMode must be 'dual' or 'single'.");
+        if (has("wave.singlePulse") && !same_text(str("wave.singlePulse"), "short") && !same_text(str("wave.singlePulse"), "long"))
+            fail("cfg.wave.singlePulse (mode %d) must be 'short' or 'long'.", radarMode);
+    }
+
     /* PRI sequence and MTI weights */
     const char *prfMode = str("prf.mode");
     int nStagger, staggered, nTaps;
     double *pri, *mti;
-    if (same_text(prfMode, "fixed")) {
+    int nScanPrf = 0;                                    /* scan-to-scan PRF: the PRFs of the scans */
+    double *scanPrf = NULL;
+    if (same_text(prfMode, "scan2scan")) {               /* inside a scan as the fixed PRF (of scan 1 here) */
+        if (!has("files.scan2scan")) fail("cfg.prf.mode = 'scan2scan' needs the PRF file cfg.files.scan2scan.");
+        MatFile sf = load_input("scan2scan", NULL, 0);
+        const MatVar *pv = mat_get(&sf, "prf_Hz");
+        if (!pv || !pv->re || pv->numel == 0 || pv->im)
+            fail("%s must hold the PRFs of the scans [Hz] in the variable 'prf_Hz' (positive, finite).", str("files.scan2scan"));
+        nScanPrf = (int)pv->numel;
+        scanPrf = xcalloc((size_t)nScanPrf, sizeof(double));
+        for (int j = 0; j < nScanPrf; j++) {
+            scanPrf[j] = pv->re[j];
+            if (!(scanPrf[j] > 0) || !isfinite(scanPrf[j]))
+                fail("%s must hold the PRFs of the scans [Hz] in the variable 'prf_Hz' (positive, finite).", str("files.scan2scan"));
+        }
+        mat_free(&sf);
+        staggered = 0;
+        nStagger = 1;
+        pri = xcalloc(1, sizeof(double));
+        pri[0] = 1.0 / scanPrf[0];
+        nTaps = 3;
+        mti = xcalloc(3, sizeof(double));
+        mti[0] = 1; mti[1] = -2; mti[2] = 1;
+    } else if (same_text(prfMode, "fixed")) {
         staggered = 0;
         nStagger = 1;
         pri = xcalloc(1, sizeof(double));
@@ -939,7 +1162,7 @@ static void export_config(void)
             for (int l = 0; l < nTaps; l++) mti[k * nTaps + l] = mv->re[(mv->rows == 1 ? 0 : k) + l * mv->rows];
         mat_free(&st);
     } else {
-        fail("Unknown PRF mode \"%s\"", prfMode);
+        fail("Unknown PRF mode \"%s\" ('fixed', 'staggered' or 'scan2scan')", prfMode);
     }
     int mtiFir = 0;
     if (has("mti.type")) {
@@ -974,6 +1197,7 @@ static void export_config(void)
     double meanPri = 0, minPri = pri[0], sumPri = 0;
     for (int i = 0; i < nStagger; i++) { sumPri += pri[i]; minPri = pri[i] < minPri ? pri[i] : minPri; }
     meanPri = sumPri / nStagger;
+    for (int j = 0; j < nScanPrf; j++) minPri = 1.0 / scanPrf[j] < minPri ? 1.0 / scanPrf[j] : minPri;
 
     /* waveforms */
     Wave wv[2];
@@ -1188,147 +1412,25 @@ static void export_config(void)
         }
     }
 
-    /* CPI and Doppler processing */
+    /* CPI and Doppler processing (slow_time below; scan-to-scan PRF: once per PRF of the scans) */
+    SlowIn sin_ = { azBeamwidth / rate, meanPri, staggered, nStagger, nTaps, mti, sumPri, pri[0], wv, maxRange };
+    SlowTime stv = slow_time(&sin_);
+    const int cpiLength = stv.cpiLength, nRows = stv.nRows, rowLen = stv.rowLen, nfft = stv.nfft;
+    const double rowPri = stv.rowPri;
+    double *win = stv.win, *fHz = stv.fHz, *noiseGain = stv.noiseGain, *noiseGainB = stv.noiseGain + stv.nfft;
+    const int notchBins = stv.notchBins;
+    const double notchMaxRange_m = stv.notchMaxRange_m;
+    const double nLooks = stv.nLooks, medianToMean = stv.medianToMean, mtiMaxRange = stv.mtiMaxRange;
     const double cpiTime = azBeamwidth / rate;
-    /* cfg.proc.cpiMode: 'auto' (beam dwell) or 'manual' (cfg.proc.cpiLength); without the field
-     * (older configurations) cpiLength = [] means auto */
-    int cpiAuto = !has("proc.cpiLength") || empty("proc.cpiLength");
-    if (has("proc.cpiMode") && !empty("proc.cpiMode")) {
-        const char *m = str("proc.cpiMode");
-        if (same_text(m, "auto")) cpiAuto = 1;
-        else if (same_text(m, "manual")) cpiAuto = 0;
-        else fail("cfg.proc.cpiMode must be 'auto' or 'manual'.");
+    SlowTime *s2s = NULL;                                /* scan-to-scan PRF: the settings of every PRF */
+    for (int j = 0; j < nScanPrf; j++) {
+        if (!s2s) s2s = xcalloc((size_t)nScanPrf, sizeof(SlowTime));
+        SlowIn sj = sin_;
+        sj.meanPri = sj.pri0 = sj.sumPri = 1.0 / scanPrf[j];
+        s2s[j] = slow_time(&sj);
+        if (2 * (guardD + trainD) + 1 > s2s[j].nfft)
+            fail("CFAR Doppler window (%d bins) is larger than the FFT length (%d).", 2 * (guardD + trainD) + 1, s2s[j].nfft);
     }
-    int cpiLength;
-    if (cpiAuto) cpiLength = (int)lround(cpiTime / meanPri);
-    else {
-        if (!has("proc.cpiLength") || empty("proc.cpiLength")) fail("cfg.proc.cpiMode = 'manual' needs cfg.proc.cpiLength: a whole number of pulses.");
-        const double v = num("proc.cpiLength");
-        if (v < 1 || v != floor(v)) fail("cfg.proc.cpiMode = 'manual' needs cfg.proc.cpiLength: a whole number of pulses.");
-        cpiLength = (int)v;
-    }
-    if (staggered) cpiLength = nStagger * (cpiLength / nStagger);
-    const int nOut = cpiLength - (nTaps - 1);
-    int nRows, rowLen;
-    double rowPri;
-    if (staggered) { nRows = nStagger; rowLen = nOut >= 0 ? nOut / nRows : -1; rowPri = sumPri; }
-    else { nRows = 1; rowLen = nOut; rowPri = pri[0]; }
-    int nfft;
-    if (!empty("proc.nfft")) nfft = (int)num("proc.nfft");
-    else nfft = staggered ? 1 << nextpow2(rowLen) : 1 << nextpow2(cpiLength);
-    if (rowLen > nfft) rowLen = nfft;
-    if (rowLen < 2)
-        fail("The CPI of %d pulses is too short for the MTI and the Doppler processing (cfg.proc.cpiLength).", cpiLength);
-    double *win = xcalloc((size_t)rowLen, sizeof(double)), wn = 0;
-    for (int j = 0; j < rowLen; j++) {
-        win[j] = rowLen == 1 ? 1.0 : 0.54 - 0.46 * cos(2 * PI * j / (rowLen - 1));
-        wn += win[j] * win[j];
-    }
-    wn = sqrt(wn);
-    for (int j = 0; j < rowLen; j++) win[j] /= wn;
-    double *fHz = xcalloc((size_t)nfft, sizeof(double));
-    for (int k = 0; k < nfft; k++) fHz[k] = (k - nfft / 2) / (nfft * rowPri);
-
-    /* clutter filter only up to cfg.mti.maxRange_m: the cells beyond get the bypass weights (the last tap) */
-    double mtiMaxRange = INFINITY;
-    if (has("mti.maxRange_m") && !empty("mti.maxRange_m")) mtiMaxRange = num("mti.maxRange_m");
-    if (isnan(mtiMaxRange) || mtiMaxRange < 0)
-        fail("cfg.mti.maxRange_m must be a non-negative scalar range in metres (Inf is allowed).");
-    int bypassUsed = 0;
-    for (int i = 0; i < 2; i++)
-        for (int k = 0; k < wv[i].nRange; k++) bypassUsed |= wv[i].range_m[k] > mtiMaxRange;
-    double *bypass = xcalloc((size_t)(nStagger * nTaps), sizeof(double));
-    for (int k = 0; k < nStagger; k++) bypass[k * nTaps + nTaps - 1] = 1.0;
-
-    /* noise gain and looks of every Doppler bin: white noise (impulses) through MTI, window, FFT
-     * (pass 1: the same without the clutter filter, for the cells beyond mtiMaxRange) */
-    double *noiseGain = xcalloc((size_t)(2 * nfft), sizeof(double));
-    double *noiseGainB = noiseGain + nfft;
-    double *Cre = xcalloc((size_t)(2 * nfft * nRows * nRows), sizeof(double));
-    double *Cim = xcalloc((size_t)(2 * nfft * nRows * nRows), sizeof(double));
-    for (int pass = 0; pass < 1 + bypassUsed; pass++) {
-        const double *co = pass ? bypass : mti;
-        double *gainP = pass ? noiseGainB : noiseGain;
-        double *CreP = Cre + (size_t)pass * nfft * nRows * nRows, *CimP = Cim + (size_t)pass * nfft * nRows * nRows;
-        double *y = xcalloc((size_t)(nOut > 0 ? nOut : 1), sizeof(double));
-        double *Yr = xcalloc((size_t)(nRows * nfft), sizeof(double)), *Yi = xcalloc((size_t)(nRows * nfft), sizeof(double));
-        double *cosT = xcalloc((size_t)nfft, sizeof(double)), *sinT = xcalloc((size_t)nfft, sizeof(double));
-        for (int k = 0; k < nfft; k++) { cosT[k] = cos(2 * PI * k / nfft); sinT[k] = sin(2 * PI * k / nfft); }
-        const int used = nRows * rowLen, off = nOut - used;
-        for (int imp = 0; imp < cpiLength; imp++) {
-            for (int m = 0; m < nOut; m++) {
-                const int l = imp - m, st = m % nStagger;
-                y[m] = (l >= 0 && l < nTaps) ? co[st * nTaps + l] : 0.0;
-            }
-            for (int r = 0; r < nRows; r++)
-                for (int i = 0; i < nfft; i++) {
-                    const int kf = ((i - nfft / 2) % nfft + nfft) % nfft;
-                    double sr = 0, si = 0;
-                    for (int j = 0; j < rowLen; j++) {
-                        const int qq = staggered ? j * nRows + r : r * rowLen + j;
-                        const double x = y[off + qq] * win[j];
-                        if (x == 0) continue;
-                        const int ph = (int)(((long)kf * j) % nfft);
-                        sr += x * cosT[ph];
-                        si -= x * sinT[ph];
-                    }
-                    Yr[r * nfft + i] = sr;
-                    Yi[r * nfft + i] = si;
-                }
-            for (int i = 0; i < nfft; i++) {
-                double pw = 0;
-                for (int r = 0; r < nRows; r++) pw += Yr[r * nfft + i] * Yr[r * nfft + i] + Yi[r * nfft + i] * Yi[r * nfft + i];
-                gainP[i] += pw / nRows;
-                for (int r1 = 0; r1 < nRows; r1++)            /* C = Yk' * Yk */
-                    for (int r2 = 0; r2 < nRows; r2++) {
-                        const double ar = Yr[r1 * nfft + i], ai = -Yi[r1 * nfft + i];
-                        const double br = Yr[r2 * nfft + i], bi = Yi[r2 * nfft + i];
-                        CreP[(i * nRows + r1) * nRows + r2] += ar * br - ai * bi;
-                        CimP[(i * nRows + r1) * nRows + r2] += ar * bi + ai * br;
-                    }
-            }
-        }
-        free(y); free(Yr); free(Yi); free(cosT); free(sinT);
-    }
-    if (!bypassUsed) memcpy(noiseGainB, noiseGain, sizeof(double) * (size_t)nfft);
-    free(bypass);
-    const double notchWidth = num("cfar.notchWidth");
-    const double notchMaxRange_m = num("cfar.notchMaxRange_m");
-    const int notchBins = (int)lround(notchWidth * 2 * nfft / rowLen);
-    const int zeroBin = nfft / 2 + 1;
-    double nLooks = INFINITY;
-    int anyTested = 0;
-    {
-        const int m = 2 * nRows;
-        double *A = xcalloc((size_t)(m * m), sizeof(double));
-        for (int ii = 0; ii < nfft * (1 + bypassUsed); ii++) {
-            const int i = ii % nfft;
-            const double *CreP = Cre + (size_t)(ii / nfft) * nfft * nRows * nRows;
-            const double *CimP = Cim + (size_t)(ii / nfft) * nfft * nRows * nRows;
-            if (notchMaxRange_m >= maxRange && !(abs(i + 1 - zeroBin) > notchBins)) continue;
-            anyTested = 1;
-            double tr = 0;
-            for (int r1 = 0; r1 < nRows; r1++) {
-                tr += CreP[(i * nRows + r1) * nRows + r1];
-                for (int r2 = 0; r2 < nRows; r2++) {       /* [Re -Im; Im Re]: the eigenvalues of C, twice */
-                    const double re = CreP[(i * nRows + r1) * nRows + r2], im = CimP[(i * nRows + r1) * nRows + r2];
-                    A[r1 * m + r2] = re;
-                    A[(r1 + nRows) * m + (r2 + nRows)] = re;
-                    A[r1 * m + (r2 + nRows)] = -im;
-                    A[(r1 + nRows) * m + r2] = im;
-                }
-            }
-            const double lmax = nRows == 1 ? tr : max_eig_sym(A, m);
-            const double looks = tr / lmax;
-            if (looks < nLooks) nLooks = looks;
-        }
-        free(A);
-    }
-    if (!anyTested)
-        fail("The MTI notch (cfg.cfar.notchWidth = %g: +-%d bins) covers every Doppler bin (FFT length %d).",
-             notchWidth, notchBins, nfft);
-    MedianCtx mc = { nLooks };
-    const double medianToMean = fzero_brent(median_f, &mc, 0.1, 2.0);
 
     /* CFAR threshold */
     const int nOuter = (2 * (guardR + trainR) + 1) * (2 * (guardD + trainD) + 1);
@@ -1346,7 +1448,7 @@ static void export_config(void)
              cfarType == 1 ? "go" : "so", method);
     cfar_quadrature(nLooks);
     const double alpha = isnan(thr_dB) ? cfar_alpha(pfa, &det) : pow(10.0, thr_dB / 10.0);
-    const double maxPfa = num_or("cfar.maxPfa", 1e-3);    /* lowest threshold: the factor of maxPfa */
+    const double maxPfa = num_or("cfar.maxPfa", 1e-4);    /* lowest threshold: the factor of maxPfa */
     if (!(maxPfa > 0 && maxPfa < 1)) fail("cfg.cfar.maxPfa must be a scalar in (0, 1).");
     const double alphaMin = cfar_alpha(maxPfa, &det);
     if (alpha < alphaMin * (1 - 1e-9))
@@ -1385,13 +1487,22 @@ static void export_config(void)
     const double sig[3] = { num("track.sigmaRange_m"), PI / 180 * num("track.sigmaAz_deg"), PI / 180 * num("track.sigmaEl_deg") };
     const double maxSpeed = num("track.maxSpeed_mps");
     const double gateProb = num("track.gateProb");
-    double sigmaVr = empty("track.sigmaVr_mps") ? 0.4 * fabs((-fHz[1] * lambda / 2) - (-fHz[0] * lambda / 2))
-                                                : num("track.sigmaVr_mps");
+    /* scan-to-scan PRF: the widest Doppler bin and the longest PRI of all scans (track_setup.m) */
+    double binHz = fabs(fHz[1] - fHz[0]), rowPriMax = rowPri;
+    for (int j = 0; j < nScanPrf; j++) {
+        if (fabs(s2s[j].fHz[1] - s2s[j].fHz[0]) > binHz) binHz = fabs(s2s[j].fHz[1] - s2s[j].fHz[0]);
+        if (s2s[j].rowPri > rowPriMax) rowPriMax = s2s[j].rowPri;
+    }
+    double sigmaVr = empty("track.sigmaVr_mps") ? 0.4 * binHz * lambda / 2 : num("track.sigmaVr_mps");
     const double Rvr = sigmaVr * sigmaVr;
     /* the plot velocity is known modulo the Doppler span on the carrier of its sub-pulse */
     const double vrSpanPulse[2] = { wv[0].lambda_m / (2 * rowPri), wv[1].lambda_m / (2 * rowPri) };
     const double vrSpan = !ws->enable ? vrSpanPulse[1] : !wl->enable ? vrSpanPulse[0]
                         : vrSpanPulse[0] < vrSpanPulse[1] ? vrSpanPulse[0] : vrSpanPulse[1];
+    const double lamMin = !ws->enable ? wl->lambda_m : !wl->enable ? ws->lambda_m
+                        : ws->lambda_m < wl->lambda_m ? ws->lambda_m : wl->lambda_m;
+    const double vrSpanMin = lamMin / (2 * rowPriMax);   /* the smallest span of all scans (= vrSpan without
+                                                            the scan-to-scan PRF) */
     double minSpeed = 0;
     if (has("track.minSpeedEnable") && num("track.minSpeedEnable") != 0) {
         minSpeed = num("track.minSpeed_mps");
@@ -1496,6 +1607,36 @@ static void export_config(void)
     rec_scalar("rdRate_Hz", num_or("display.rdRate_Hz", 10));   /* range-Doppler maps per second */
     rec_scalar("minExtent_deg", minExtent);
     rec_scalar("meanPri_s", meanPri);
+    {                                                    /* radar mode (information): number, 0 dual / 1 single */
+        const double md[2] = { radarMode, subSingle };
+        rec_vec("radarMode", md, 2, 0);
+    }
+    /* scan-to-scan PRF: the slow-time settings above are those of PRF 1; one set per PRF (prefix
+     * s2s<j>_), selected by the receiver with the stagger index of the PRI header */
+    rec_scalar("scan2scan", nScanPrf > 0);
+    if (nScanPrf > 0) {
+        rec_vec("prfScan_Hz", scanPrf, nScanPrf, 0);
+        for (int j = 0; j < nScanPrf; j++) {
+            const SlowTime *q = &s2s[j];
+            char pre[64];
+#define S2S(f) (snprintf(pre, sizeof pre, "s2s%d_%s", j + 1, f), pre)
+            rec_scalar(S2S("pri_s"), 1.0 / scanPrf[j]);
+            rec_scalar(S2S("cpiLength"), q->cpiLength);
+            rec_scalar(S2S("rowLen"), q->rowLen);
+            rec_scalar(S2S("nfft"), q->nfft);
+            rec_vec(S2S("dopWindow"), q->win, q->rowLen, 1);
+            rec_vec(S2S("noiseGain"), q->noiseGain, q->nfft, 0);
+            rec_vec(S2S("noiseGainBypass"), q->noiseGain + q->nfft, q->nfft, 0);
+            rec_vec(S2S("dopFreq_Hz"), q->fHz, q->nfft, 0);
+            rec_scalar(S2S("notchBins"), q->notchBins);
+            const double h = ceil(minExtent / (rate * (1.0 / scanPrf[j]) * updateEvery));
+            rec_scalar(S2S("minHits"), h > 1 ? h : 1);
+            const double sp[2] = { wv[0].lambda_m / (2 * q->rowPri), wv[1].lambda_m / (2 * q->rowPri) };
+            rec_scalar(S2S("trackVrSpan"), !ws->enable ? sp[1] : !wl->enable ? sp[0] : sp[0] < sp[1] ? sp[0] : sp[1]);
+            rec_vec(S2S("trackVrSpanPulse"), sp, 2, 0);
+#undef S2S
+        }
+    }
     rec_scalar("trackEnable", trackEnable);
     rec_scalar("trackDim", dim);
     {
@@ -1511,7 +1652,7 @@ static void export_config(void)
     rec_scalar("trackBatchMax_s", num("track.gnnMaxSector_deg") / rate);
     rec_scalar("trackGate", 2 * gammaincinv(gateProb, dim / 2.0));
     rec_scalar("trackUseVr", num("track.useRadialVelocity") != 0);
-    rec_scalar("trackVrUnambiguous", maxSpeed < vrSpan / 2);
+    rec_scalar("trackVrUnambiguous", maxSpeed < vrSpanMin / 2);
     rec_scalar("trackSigmaVr", sqrt(Rvr));
     rec_scalar("trackVrSpan", vrSpan);
     rec_vec("trackVrSpanPulse", vrSpanPulse, 2, 0);
@@ -1553,7 +1694,7 @@ static void export_config(void)
         }
         rec_scalar("pmbmPd", pd);
         rec_scalar("pmbmPs", ps);
-        const double ll[3] = { log(fpps / vol), log(und / vol), -log(vrSpan) };
+        const double ll[3] = { log(fpps / vol), log(und / vol), -log(vrSpanMin) };
         rec_vec("pmbmLogLambda", ll, 3, 0);
         const double maxHyp = num(TK("maxHypotheses"));
         const double rPrune = trkMethod == 2 ? 1e-9 : num(TK("rPrune")), rConfirm = trkMethod == 2 ? 1.0 : num(TK("rConfirm"));
@@ -1638,11 +1779,22 @@ static void export_config(void)
                nCh, nBeams, nDdc, fsOut / 1e6, ws->nRange, wl->nRange, cpiLength, nfft, nRows,
                mtiFir ? "FIR" : "canceller", nTaps, cfarType == 0 ? "CA" : cfarType == 1 ? "GO" : cfarType == 2 ? "SO" : "OS",
                method, 10 * log10(alpha), cfar_pfa(alpha, &det), nLooks);
+        printf("Radar mode %d%s%s (%s sub-mode): short %s, long %s\n", radarMode, has("modes.name") ? " " : "",
+               has("modes.name") ? str("modes.name") : "", subSingle ? "single" : "dual",
+               !ws->enable ? "off" : ws->phaseCode ? (ws->mismatch ? "phase code (mismatch)" : "phase code") : "LFM",
+               !wl->enable ? "off" : wl->phaseCode ? (wl->mismatch ? "phase code (mismatch)" : "phase code") : "LFM");
+        if (nScanPrf > 0) {
+            printf("Scan-to-scan PRF:");
+            for (int j = 0; j < nScanPrf; j++) printf(" %.1f Hz (CPI %d, FFT %d)", scanPrf[j], s2s[j].cpiLength, s2s[j].nfft);
+            printf("\n");
+        }
     }
     (void)trackEnable;
     free(beamElKeep); free(g_qs); free(g_qw); g_qs = g_qw = NULL;
     free(pri); free(mti); free(tDdc); free(wRe); free(wIm); free(beamU); free(win); free(fHz);
-    free(noiseGain); free(Cre); free(Cim); free(ddc.h1); free(ddc.h2);
+    free(noiseGain); free(ddc.h1); free(ddc.h2);
+    for (int j = 0; j < nScanPrf; j++) { free(s2s[j].win); free(s2s[j].fHz); free(s2s[j].noiseGain); }
+    free(s2s); free(scanPrf);
     for (int i = 0; i < 2; i++) {
         free(wv[i].codeRe); free(wv[i].codeIm); free(wv[i].misRe); free(wv[i].misIm);
         free(wv[i].tapsRe); free(wv[i].tapsIm); free(wv[i].delay_s); free(wv[i].range_m);
@@ -1698,7 +1850,10 @@ int main(int argc, char **argv)
         return 1;
     }
     if (cfg->type != MV_STRUCT) {
-        fprintf(stderr, "radar_export_config: %s does not return a struct\n", mPath);
+        if (cfg->type == MV_UNEVAL)                      /* e.g. a mode file that could not be evaluated */
+            fprintf(stderr, "radar_export_config: cfg of %s: %s\n", mPath, cfg->str);
+        else
+            fprintf(stderr, "radar_export_config: %s does not return a struct\n", mPath);
         mvalue_free(cfg);
         return 1;
     }

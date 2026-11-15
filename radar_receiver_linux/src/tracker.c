@@ -3,6 +3,7 @@
  * track_update.m), and the assignment shared by both trackers.
  */
 #include "tracker.h"
+#include "tracker_common.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -16,6 +17,21 @@ void tracker_init(Tracker *t, const RadarConfig *cfg)
     if (t->method == TRACK_METHOD_PMBM) pmbm_tracker_init(&t->pmbm, cfg);
     else if (t->method == TRACK_METHOD_TOMHT) tomht_tracker_init(&t->tomht, cfg);
     else ekf_tracker_init(&t->ekf, cfg);
+}
+
+void tracker_set_vr_span(Tracker *t, const RadarConfig *cfg)
+{
+    double *span = t->method == TRACK_METHOD_PMBM ? &t->pmbm.vrSpan : t->method == TRACK_METHOD_TOMHT ? &t->tomht.vrSpan
+                                                                                                    : &t->ekf.vrSpan;
+    double *pulse = t->method == TRACK_METHOD_PMBM ? t->pmbm.vrSpanPulse
+                  : t->method == TRACK_METHOD_TOMHT ? t->tomht.vrSpanPulse : t->ekf.vrSpanPulse;
+    *span = cfg->trackVrSpan;
+    for (int p = 0; p < N_PULSES; p++) {
+        Detection d;
+        memset(&d, 0, sizeof d);
+        d.pulse = p;
+        pulse[p] = tracker_plot_vr_span(cfg, &d);
+    }
 }
 
 void tracker_free(Tracker *t)

@@ -38,6 +38,7 @@ tests(end+1, :) = {'DDC recording and replay over UDP with the PRI timing', @tes
 tests(end+1, :) = {'DDC file generation with parfor (generate_ddc_files)', @test_generate_ddc};
 tests(end+1, :) = {'Phase codes: matched and mismatch filters (and the C core test)', @test_phase_code};
 tests(end+1, :) = {'Configuration edge cases (sectors, invalid settings, handover)', @test_setup};
+tests(end+1, :) = {'Radar modes, single/dual sub-modes, scan-to-scan PRF, lowest CFAR threshold', @test_modes};
 tests(end+1, :) = {'CFAR detectors (CA, GO, SO, OS) x windows (2-D, range, Doppler), edges, range interval', @test_cfar};
 tests(end+1, :) = {'EKF tracker 3-D and 2-D (and the C tracker when built)', @test_tracker};
 tests(end+1, :) = {'PMBM tracker with IMM-UKF 3-D and 2-D: maneuvers, acceleration, clutter, close targets', @test_tracker_pmbm};

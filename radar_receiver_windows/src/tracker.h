@@ -22,6 +22,9 @@ typedef struct {
 
 void tracker_init(Tracker *t, const RadarConfig *cfg);
 void tracker_free(Tracker *t);
+/* Scan-to-scan PRF: the spans of the Doppler axis of the next plots (cfg->trackVrSpan,
+ * cfg->pulse[].vrSpan_mps of the PRF in use; the plots waiting for the association keep theirs). */
+void tracker_set_vr_span(Tracker *t, const RadarConfig *cfg);
 /* The new plots of time t_s (call it every PRI, also with n = 0); flush = 1
  * also associates the plots waiting in the batch. Every track update (with
  * the plot) and deletion is reported through callback (may be NULL). */

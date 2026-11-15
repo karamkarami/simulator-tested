@@ -220,7 +220,7 @@ end
 ppi_callbacks('option', fig, 'showMode', 'video');
 [~, want] = ppi_update(ppi, sys, 70, 16.0, 2, p, dets, tk, [], [], V);
 S = getappdata(fig, 'ppi');
-ok = check(strcmp(want.raw, 'video') && ~want.rd && strcmp(get(S.h.video, 'Visible'), 'on') && isempty(get(S.h.long, 'XData')) ...
+ok = check(strcmp(want.raw, 'video') && want.rd && strcmp(get(S.h.video, 'Visible'), 'on') && isempty(get(S.h.long, 'XData')) ...
            && get(S.h.ui.showMode, 'Value') == 4, 'video mode: the video image instead of the plots') && ok;
 A = get(S.h.video, 'AlphaData');  C = get(S.h.video, 'CData');
 pix = @(r, az) round(([r*cosd(az) r*sind(az)] / (V.rMax_km*1e3) + 1) / 2 * (V.nPix - 1)) + 1;   % [row col]
@@ -369,9 +369,9 @@ ok = check(isempty(S.data.rd) && ~isempty(strfind(get(S.h.rdTitle, 'String'), 'b
            'another beam: the old map is dropped') && ok;
 ppi_callbacks('tab', fig, 1);
 [~, want] = ppi_update(ppi, sys, 120, 20.8, 2, p, dets, tk);
-ok = check(~want.rd && max(abs(get(ppi.ax, 'Position') - pos1)) < 1e-6 && strcmp(get(S.h.rdAx, 'Visible'), 'off') ...
+ok = check(want.rd && max(abs(get(ppi.ax, 'Position') - pos1)) < 1e-6 && strcmp(get(S.h.rdAx, 'Visible'), 'off') ...
            && strcmp(get(S.h.rdTitle, 'Visible'), 'off') && strcmp(get(S.h.specTitle, 'Visible'), 'off'), ...
-           'back to tab 1: the PPI full size, no map wanted') && ok;
+           'back to tab 1: the PPI full size, the map still wanted (always computed)') && ok;
 
 file = [tempname() '.png'];
 ppi_callbacks('save', fig, file);

@@ -46,7 +46,7 @@ p = struct('nScans', 3, 'prf', 'fixed', 'terrain', 'regions', 'cnrOffset', 0, 'g
 for i = 1:2:numel(varargin), p.(varargin{i}) = varargin{i+1}; end
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.console.plots = false;  cfg.display.enable = false;  cfg.io.saveRaw = false;
 cfg.sim.seed = p.seed;
 cfg.sim.nScans = p.nScans;

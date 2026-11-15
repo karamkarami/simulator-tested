@@ -117,6 +117,33 @@ if isfield(cfg.display, 'rdRate_Hz') && ~isempty(cfg.display.rdRate_Hz), rdRate 
 r{end+1} = {'rdRate_Hz', rdRate};
 r{end+1} = {'minExtent_deg', cfg.extract.minExtent_deg};
 r{end+1} = {'meanPri_s', mean(sys.pri)};
+if isfield(sys, 'mode')                               % radar mode (information): number, sub-mode 0 dual / 1 single
+    r{end+1} = {'radarMode', [sys.mode.active, double(strcmp(sys.mode.subMode, 'single'))]};
+end
+% Scan-to-scan PRF: the slow-time settings above are those of PRF 1; one set per PRF of the
+% scans (prefix s2s<j>_). The receiver selects set j with the stagger index of the PRI header
+% (= the number of the PRF of the scan) and restarts the CPIs when it changes.
+r{end+1} = {'scan2scan', double(sys.scan2scan)};
+if sys.scan2scan
+    r{end+1} = {'prfScan_Hz', sys.prfScan_Hz};
+    for j = 1:numel(sys.prfProfiles)
+        sj = select_prf_profile(sys, j);
+        pre = sprintf('s2s%d_', j);
+        r{end+1} = {[pre 'pri_s'], sj.pri}; %#ok<AGROW>
+        r{end+1} = {[pre 'cpiLength'], sj.cpi.length}; %#ok<AGROW>
+        r{end+1} = {[pre 'rowLen'], sj.cpi.rowLen}; %#ok<AGROW>
+        r{end+1} = {[pre 'nfft'], sj.dop.nfft}; %#ok<AGROW>
+        r{end+1} = {[pre 'dopWindow'], sj.dop.window}; %#ok<AGROW>
+        r{end+1} = {[pre 'noiseGain'], reshape(sj.dop.noiseGain, 1, [])}; %#ok<AGROW>
+        r{end+1} = {[pre 'noiseGainBypass'], reshape(sj.dop.noiseGainBypass, 1, [])}; %#ok<AGROW>
+        r{end+1} = {[pre 'dopFreq_Hz'], sj.dop.f_Hz}; %#ok<AGROW>
+        r{end+1} = {[pre 'notchBins'], sj.dop.notchBins}; %#ok<AGROW>
+        r{end+1} = {[pre 'minHits'], max(1, ceil(cfg.extract.minExtent_deg / ...
+                    (sys.ant.rate_dps * sj.pri * cfg.proc.updateEvery)))}; %#ok<AGROW>
+        r{end+1} = {[pre 'trackVrSpan'], sj.track.vrSpan}; %#ok<AGROW>
+        r{end+1} = {[pre 'trackVrSpanPulse'], [sj.track.vrSpanPulse.short, sj.track.vrSpanPulse.long]}; %#ok<AGROW>
+    end
+end
 tk = sys.track;                                      % tracker (track_setup.m): EKF or PMBM
 r{end+1} = {'trackEnable', double(tk.enable)};
 r{end+1} = {'trackDim', tk.dim};

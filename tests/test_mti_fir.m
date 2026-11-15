@@ -11,7 +11,7 @@ function ok = test_mti_fir()
 
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.clutter.enable = false;
 ok = true;
 sysC = setup_radar(cfg);
@@ -61,7 +61,7 @@ for i = 1:2:numel(bad)
 end
 delete(own);
 % export
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.mti.type = 'fir';
 file = [tempname() '.bin'];
 export_receiver_config(cfg, file);

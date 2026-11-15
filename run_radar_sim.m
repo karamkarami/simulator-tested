@@ -120,8 +120,7 @@ nProcessed = 0;
 wasActive = false;
 % Plot extraction options: minimum azimuth extent -> minimum number of CPI detections
 extractOpt = cfg.extract;
-extractOpt.minHits = max(1, ceil(cfg.extract.minExtent_deg / ...
-                     (sys.ant.rate_dps * mean(sys.pri) * cfg.proc.updateEvery)));
+extractOpt.minHits = extract_min_hits(sys);
 extractOpt.flush = false;
 flushOpt = extractOpt;
 flushOpt.flush = true;
@@ -130,10 +129,40 @@ clipSum = 0;  clipMax = 0;  clipWarned = false;     % ADC overload (adc_overload
 timingPrev = struct('us', zeros(1, 10), 'n', 0);      % block times at the previous display update
 priTime = nan(1, sched.nPulses);                    % time of every simulated PRI (= the UDP send period)
 
+tLast = 0;                                          % time of the newest processed PRI
+
 %% Pulse loop
 for k = 1:sched.nPulses
     t  = sched.time_s(k);
     az = sched.az_deg(k);
+
+    % Scan-to-scan PRF: a scan with another PRF closes the open plots (to the tracker, with the
+    % Doppler axis of their scan) and restarts the CPI buffers with the settings of the new PRF
+    if sys.scan2scan && sched.prfIdx(k) ~= sys.prfProfile
+        swPlots = [];
+        for i = 1:2
+            [ext.(names{i}), newPlots] = plot_extractor(ext.(names{i}), [], flushOpt);
+            plots = [plots, newPlots]; %#ok<AGROW>
+            swPlots = [swPlots, newPlots]; %#ok<AGROW>
+        end
+        if sys.track.enable && ~isempty(swPlots)
+            tracker = track_update(tracker, swPlots, tLast);
+        end
+        sys = select_prf_profile(sys, sched.prfIdx(k));
+        tracker.p.vrSpanPulse = sys.track.vrSpanPulse;
+        tracker.p.vrSpan = sys.track.vrSpan;
+        for i = 1:2
+            buf.(names{i}) = cpi_buffer_init(sys.nBeams, sys.wave.(names{i}).nRange, sys.cpi.length);
+            ext.(names{i}) = plot_extractor_init(sys.dop.nfft);
+        end
+        extractOpt.minHits = extract_min_hits(sys);
+        flushOpt.minHits = extractOpt.minHits;
+        rdSlice = {[], []};  rdDets = {zeros(0, 3), zeros(0, 3)};
+        if cfg.console.enable
+            fprintf('  scan %d: PRF %.1f Hz (scan-to-scan PRF %d of %d), CPI %d pulses, FFT %d\n', sched.scan(k), ...
+                    1/sys.pri, sys.prfProfile, numel(sys.prfProfiles), sys.cpi.length, sys.dop.nfft);
+        end
+    end
 
     % Skipped sector: restart the CPI buffers and close the open plots
     if ~sched.active(k)
@@ -313,6 +342,7 @@ for k = 1:sched.nPulses
         blockUs(9) = blockUs(9) + 1e6*toc(tb);
     end
     priTime(k) = toc(tPri);
+    tLast = t;
 end
 
 %% Close the remaining plots, associate the last GNN batch
@@ -368,8 +398,17 @@ fprintf('\n=== Rotating search radar simulation ===\n');
 if sys.dbf.enabled, dbfText = sprintf('%d beams', sys.nBeams); else, dbfText = 'no beamforming'; end
 fprintf('fc = %.2f GHz, Pt = %.0f kW, NF = %.1f dB, %d element(s) -> %s\n', cfg.fc/1e9, ...
     cfg.tx.peakPower_W/1e3, cfg.rx.noiseFigure_dB, sys.nCh, dbfText);
-fprintf('PRF mode: %s, mean PRI = %.0f us, %d rpm, azimuth beamwidth %.2f deg\n', cfg.prf.mode, ...
-    mean(sys.pri)*1e6, cfg.ant.rpm, sys.ant.azBeamwidth_deg);
+if isfield(sys, 'mode')
+    fprintf('Radar mode %d ''%s'' (sub-mode %s; modes of this program: %s): short %s, long %s\n', sys.mode.active, ...
+        sys.mode.name, sys.mode.subMode, num2str(sys.mode.available(:).'), wave_text(sys.wave.short), wave_text(sys.wave.long));
+end
+if sys.scan2scan
+    fprintf('PRF mode: scan2scan, PRF of the scans %s Hz (in turn), %d rpm, azimuth beamwidth %.2f deg\n', ...
+        mat2str(round(sys.prfScan_Hz*10)/10), cfg.ant.rpm, sys.ant.azBeamwidth_deg);
+else
+    fprintf('PRF mode: %s, mean PRI = %.0f us, %d rpm, azimuth beamwidth %.2f deg\n', cfg.prf.mode, ...
+        mean(sys.pri)*1e6, cfg.ant.rpm, sys.ant.azBeamwidth_deg);
+end
 fprintf('ADC record: %.1f ... %.1f us of the PRI, IF %.0f MHz (%d samples, %.1f MB per PRI)\n', ...
     sys.rxStart_s*1e6, sys.tAdc(end)*1e6, sys.fIF/1e6, sys.nAdc, sys.nAdc*sys.nCh*2/2^20);
 fprintf(['Receiver gain %.0f dB: thermal noise at the ADC %.1f LSB rms (%.1f dBFS), ADC noise %.1f LSB, ', ...
@@ -415,6 +454,13 @@ fprintf('CFAR %s: Pfa = %.0e, %d training cells%s, %.1f looks, alpha = %.2f (%.1
 fprintf('Simulated pulses: %d of %d (%.1f s of radar time)\n', sum(sched.active), sched.nPulses, sched.time_s(end));
 end
 
+function n = extract_min_hits(sys)
+% Plot extraction: minimum azimuth extent -> minimum number of CPI detections (azimuth step of a
+% CPI update: rotation rate x mean PRI x cfg.proc.updateEvery)
+cfg = sys.cfg;
+n = max(1, ceil(cfg.extract.minExtent_deg / (sys.ant.rate_dps * mean(sys.pri) * cfg.proc.updateEvery)));
+end
+
 function print_tracks(tracker)
 % List the tracks at the end of the run.
 tk = tracker.tracks;
@@ -449,6 +495,13 @@ for i = 1:numel(plots)
     fprintf('%8.3f %8.2f %9.3f %7.2f %8.2f %7.1f %6s %5d\n', p.time_s, p.az_deg, p.range_m/1e3, ...
         p.el_deg, p.vr_mps, p.snr_dB, p.pulse, p.hits);
 end
+end
+
+function s = wave_text(wv)
+% 'lfm', 'phasecode (mismatch)' or 'off'
+if ~wv.enable, s = 'off'; return; end
+s = wv.type;
+if strcmpi(wv.type, 'phasecode'), s = sprintf('%s (%s)', wv.type, wv.compression); end
 end
 
 function s = cfar_detail(c)

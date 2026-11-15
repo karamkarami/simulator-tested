@@ -25,7 +25,7 @@ addpath(root, fullfile(root, 'src'));
 ok = true;
 
 %% 1) CNR of uniform land
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.console.enable = false;  cfg.display.enable = false;  cfg.io.saveRaw = false;
 c1 = cfg;
 c1.ant.nElements = 1;  c1.rx.stc.enable = false;  c1.clutter.terrain = 'uniform';

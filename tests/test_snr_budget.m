@@ -25,7 +25,7 @@ root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
 rng(7);
 
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.prf.mode = prfMode;
 cfg.wave.(pulseName).type = waveType;
 cfg.ant.nElements = nElements;

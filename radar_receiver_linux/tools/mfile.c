@@ -197,7 +197,24 @@ typedef struct {
     jmp_buf jb;
     char   *err;
     size_t  errLen;
+    /* a function file called from another file: the values of its input arguments */
+    MValue **callArgs;
+    int     nCallArgs;
 } Parser;
+
+/* Directories of addpath(...) (the MATLAB path; function files are looked up
+ * in the directory of the calling file, then here), and the nesting of calls. */
+static char **g_pathDirs;
+static int    g_nPathDirs;
+static int    g_callDepth;
+
+static void path_clear(void)
+{
+    for (int i = 0; i < g_nPathDirs; i++) free(g_pathDirs[i]);
+    free(g_pathDirs);
+    g_pathDirs = NULL;
+    g_nPathDirs = 0;
+}
 
 static void fail(Parser *p, const char *fmt, ...)
 {
@@ -641,6 +658,96 @@ static MValue *str_arg(Parser *p, MValue **a, int n, int i, const char *f)
     return a[i];
 }
 
+static MValue *eval_function_file(Parser *caller, const char *path, MValue **args, int n);
+
+static int file_exists(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+/* <dir>/<name>.m of a function: the directory of the calling file, then the addpath directories. */
+static int find_function_file(const Parser *p, const char *name, char *out, size_t outLen)
+{
+    for (const char *c = name; *c; c++)
+        if (!(isalnum((unsigned char)*c) || *c == '_')) return 0;
+    char dir[1024];
+    snprintf(dir, sizeof dir, "%s", p->filePath ? p->filePath : "");
+    char *sep1 = strrchr(dir, '/'), *sep2 = strrchr(dir, '\\'), *sep = sep1 > sep2 ? sep1 : sep2;
+    if (sep) *sep = '\0'; else snprintf(dir, sizeof dir, ".");
+    snprintf(out, outLen, "%s/%s.m", dir, name);
+    if (file_exists(out)) return 1;
+    for (int i = 0; i < g_nPathDirs; i++) {
+        snprintf(out, outLen, "%s/%s.m", g_pathDirs[i], name);
+        if (file_exists(out)) return 1;
+    }
+    return 0;
+}
+
+/* sprintf(format, values...): %d %i %u %f %e %g %s %c %% with flags, width and precision;
+ * the values (numbers element by element, strings whole) are used in turn, the format is
+ * repeated while values are left (as in MATLAB). */
+static MValue *do_sprintf(Parser *p, MValue **a, int n)
+{
+    const char *fmt = str_arg(p, a, n, 0, "sprintf")->str;
+    int nItems = 0;
+    for (int i = 1; i < n; i++) nItems += a[i]->type == MV_STR ? 1 : a[i]->type == MV_NUM ? numel(a[i]) : 0;
+    size_t cap = 256, len = 0;
+    char *out = xmalloc(cap);
+    int arg = 1, elem = 0, used = 0;
+    for (int pass = 0; pass == 0 || (used < nItems && pass < 10000); pass++) {
+        const int usedBefore = used;
+        for (const char *c = fmt; *c; c++) {
+            char piece[512];
+            piece[0] = '\0';
+            if (*c == '%' && c[1] == '%') { snprintf(piece, sizeof piece, "%%"); c++; }
+            else if (*c == '%') {
+                char spec[32];
+                int k = 0;
+                spec[k++] = *c++;
+                while (*c && strchr("+- #0123456789.", *c) && k < 24) spec[k++] = *c++;
+                const char conv = *c;
+                if (!conv) break;
+                if (used >= nItems) { if (pass > 0) goto done; spec[k] = '\0'; continue; }
+                while (arg < n && a[arg]->type == MV_NUM && elem >= numel(a[arg])) { arg++; elem = 0; }
+                MValue *v = a[arg];
+                if (v->type == MV_STR) {
+                    if (conv == 's' || conv == 'c') { spec[k++] = 's'; spec[k] = '\0'; snprintf(piece, sizeof piece, spec, v->str); }
+                    else { spec[k++] = 's'; spec[k] = '\0'; snprintf(piece, sizeof piece, spec, v->str); }
+                    arg++; elem = 0;
+                } else if (v->type == MV_NUM) {
+                    const double x = v->re[elem++];
+                    if (strchr("diuc", conv) && x == floor(x) && fabs(x) < 9e15) {
+                        if (conv == 'c') { piece[0] = (char)x; piece[1] = '\0'; }
+                        else { spec[k++] = 'l'; spec[k++] = 'l'; spec[k++] = 'd'; spec[k] = '\0'; snprintf(piece, sizeof piece, spec, (long long)x); }
+                    } else if (strchr("diuc", conv)) {
+                        spec[k++] = 'g'; spec[k] = '\0'; snprintf(piece, sizeof piece, spec, x);   /* not an integer: as %g */
+                    } else if (conv == 's') {
+                        spec[k++] = 'g'; spec[k] = '\0'; snprintf(piece, sizeof piece, spec, x);
+                    } else if (strchr("feEgG", conv)) {
+                        spec[k++] = conv; spec[k] = '\0'; snprintf(piece, sizeof piece, spec, x);
+                    } else fail(p, "sprintf: conversion '%%%c' is not supported", conv);
+                } else fail(p, "sprintf: argument %d must be a number or a string", arg + 1);
+                used++;
+            } else if (*c == '\\' && c[1] == 'n') { piece[0] = '\n'; piece[1] = '\0'; c++; }
+            else if (*c == '\\' && c[1] == 't') { piece[0] = '\t'; piece[1] = '\0'; c++; }
+            else { piece[0] = *c; piece[1] = '\0'; }
+            const size_t l = strlen(piece);
+            while (len + l + 1 > cap) { cap *= 2; out = realloc(out, cap); if (!out) exit(3); }
+            memcpy(out + len, piece, l + 1);
+            len += l;
+        }
+        if (used == usedBefore) break;                    /* the format uses no value */
+    }
+done:
+    out[len] = '\0';
+    MValue *y = mv_str(out);
+    free(out);
+    return y;
+}
+
 static MValue *call(Parser *p, const char *f, MValue **a, int n)
 {
     /* constants and constructors */
@@ -755,9 +862,28 @@ static MValue *call(Parser *p, const char *f, MValue **a, int n)
         if (k > 1) y->re[k - 1] = x1;
         return y;
     }
-    if (!strcmp(f, "addpath") || !strcmp(f, "rmpath") || !strcmp(f, "warning") || !strcmp(f, "disp") ||
+    if (!strcmp(f, "sprintf")) return do_sprintf(p, a, n);
+    if (!strcmp(f, "feval")) {
+        const char *name = str_arg(p, a, n, 0, f)->str;
+        return call(p, name, a + 1, n - 1);
+    }
+    if (!strcmp(f, "addpath")) {                          /* the directories of the MATLAB path */
+        for (int i = 0; i < n; i++) {
+            const char *d = str_arg(p, a, n, i, f)->str;
+            if (d[0] == '-') continue;                    /* addpath(dir, '-end') */
+            g_pathDirs = realloc(g_pathDirs, sizeof(char *) * (size_t)(g_nPathDirs + 1));
+            if (!g_pathDirs) exit(3);
+            g_pathDirs[g_nPathDirs++] = xstrdup(d);
+        }
+        return mv_uneval("(no value)");
+    }
+    if (!strcmp(f, "rmpath") || !strcmp(f, "warning") || !strcmp(f, "disp") ||
         !strcmp(f, "fprintf") || !strcmp(f, "rng"))
         return mv_uneval("(no value)");
+    {                                                     /* a function file on the path (e.g. a mode file) */
+        char path[1200];
+        if (find_function_file(p, f, path, sizeof path)) return eval_function_file(p, path, a, n);
+    }
     char why[160];
     snprintf(why, sizeof why, "%s(...) is not evaluated by radar_export_config (MATLAB function)", f);
     return mv_uneval(why);
@@ -1144,6 +1270,22 @@ static void run(Parser *p)
                 p->pos++;
                 if (cur(p)->type == T_ID) snprintf(p->outName, sizeof p->outName, "%s", cur(p)->s);
             }
+            /* input arguments: function out = name(in1, in2, ...) gets the values of the call */
+            while (cur(p)->type != T_NL && cur(p)->type != T_EOF && !is_op(cur(p), "(") && !is_op(cur(p), ";")) p->pos++;
+            int nIn = 0;
+            if (accept(p, "(")) {
+                while (cur(p)->type == T_ID) {
+                    if (nIn < p->nCallArgs) {
+                        MValue **slot = var_slot(p, cur(p)->s);
+                        mvalue_free(*slot);
+                        *slot = mv_copy(p->callArgs[nIn]);
+                    }
+                    nIn++;
+                    p->pos++;
+                    if (!accept(p, ",")) break;
+                }
+            }
+            if (p->nCallArgs > nIn) fail(p, "too many input arguments (%d) for the function (%d)", p->nCallArgs, nIn);
             skip_statement(p);
             continue;
         }
@@ -1169,6 +1311,12 @@ static void run(Parser *p)
             MValue **slot = var_slot(p, path[0]);
             for (int i = 1; i < nPath; i++) {
                 if (!*slot) { *slot = mv_new(MV_STRUCT); (*slot)->rows = (*slot)->cols = 1; }
+                if ((*slot)->type == MV_UNEVAL) {      /* e.g. the output of a function that was not found */
+                    char why[400];
+                    snprintf(why, sizeof why, "%s", (*slot)->str ? (*slot)->str : "");
+                    mvalue_free(v);
+                    fail(p, "'%s' has no value: %s", path[i - 1], why);
+                }
                 if ((*slot)->type != MV_STRUCT) { mvalue_free(v); fail(p, "'%s' is not a struct", path[i - 1]); }
                 slot = struct_slot(*slot, path[i], 1);
             }
@@ -1203,6 +1351,71 @@ static void free_tokens(Parser *p)
     p->n = p->cap = p->pos = 0;
 }
 
+static char *read_text(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *text = xmalloc((size_t)(size > 0 ? size : 0) + 1);
+    if (size > 0 && fread(text, 1, (size_t)size, f) != (size_t)size) {
+        fclose(f);
+        free(text);
+        return NULL;
+    }
+    fclose(f);
+    text[size > 0 ? size : 0] = '\0';
+    return text;
+}
+
+/* Runs the function file 'path' with the input arguments args and returns its output.
+ * A file that cannot be evaluated (if/for blocks, ...) gives an unevaluated value with
+ * the reason (no error unless the exporter reads it, as for other MATLAB functions). */
+static MValue *eval_function_file(Parser *caller, const char *path, MValue **args, int n)
+{
+    if (g_callDepth >= 32) fail(caller, "function calls nested too deeply (%s)", path);
+    Parser q;
+    MValue *volatile result = NULL;
+    char err[600];
+    memset(&q, 0, sizeof q);
+    q.err = err;
+    q.errLen = sizeof err;
+    q.filePath = path;
+    q.source = path;
+    q.lineBase = 1;
+    q.callArgs = args;
+    q.nCallArgs = n;
+    err[0] = '\0';
+    char *text = read_text(path);
+    if (!text) fail(caller, "cannot read %s", path);
+    g_callDepth++;
+    if (setjmp(q.jb) == 0) {
+        lex(&q, text);
+        run(&q);
+        if (!q.outName[0]) fail(&q, "the function has no output");
+        MValue **slot = var_slot(&q, q.outName);
+        if (!*slot) fail(&q, "the function does not set its output '%s'", q.outName);
+        result = *slot;
+        *slot = NULL;
+    }
+    g_callDepth--;
+    free_tokens(&q);
+    free(text);
+    for (int i = 0; i < q.nVars; i++) {
+        free(q.varNames[i]);
+        mvalue_free(q.vars[i]);
+    }
+    free(q.varNames);
+    free(q.vars);
+    if (!result) {
+        char why[700];
+        snprintf(why, sizeof why, "not evaluated by radar_export_config: %s", err);
+        return mv_uneval(why);
+    }
+    return result;
+}
+
 MValue *mfile_eval(const char *path, const char *const *extra, int nExtra, char *err, size_t errLen)
 {
     Parser p;
@@ -1213,6 +1426,8 @@ MValue *mfile_eval(const char *path, const char *const *extra, int nExtra, char 
     p.filePath = path;
     strcpy(p.outName, "cfg");
     if (err && errLen) err[0] = '\0';
+    path_clear();
+    g_callDepth = 0;
 
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -1262,5 +1477,6 @@ MValue *mfile_eval(const char *path, const char *const *extra, int nExtra, char 
     }
     free(p.varNames);
     free(p.vars);
+    path_clear();
     return result;
 }

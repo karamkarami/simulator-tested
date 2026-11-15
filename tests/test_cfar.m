@@ -25,7 +25,7 @@ ok = range_limited_notch() && ok;
 rng(11);
 for type = {'ca', 'go', 'so', 'os'}
     for method = {'2d', 'range', 'doppler'}
-        cfg = radar_config();
+        cfg = lfm_mode_config();
         cfg.console.enable = false;
         cfg.cfar.type = type{1};
         cfg.cfar.method = method{1};
@@ -112,7 +112,7 @@ end
 
 function ok = range_limited_notch()
 % The MTI notch suppresses its Doppler bins only through the configured range.
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.console.enable = false;
 cfg.cfar.method = '2d';
 cfg.cfar.notchMaxRange_m = 500;

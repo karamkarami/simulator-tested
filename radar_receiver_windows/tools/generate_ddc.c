@@ -387,6 +387,8 @@ typedef struct {
     int    nCh;
     int    nStagger;
     double *pri;
+    int    nScanPri;                 /* scan-to-scan PRF: the PRIs of the scans (used in turn) */
+    double *scanPri;
     /* DDC */
     int    D1, D2, L1, L2, shift1, shift2, fixedPoint;
     double *h1, *h2;                 /* integer coefficients */
@@ -643,11 +645,25 @@ static void setup(Radar *s)
         s->nStagger = (int)pv->numel;
         s->pri = copy_var(pv);
         mat_free(&st);
+    } else if (same_text(prf, "scan2scan")) {            /* one PRF per scan (cfg.files.scan2scan, prf_Hz) */
+        MatFile sf = load_input("scan2scan", NULL, 0);
+        const MatVar *pv = mat_var(&sf, "prf_Hz", "scan2scan");
+        s->nScanPri = (int)pv->numel;
+        s->scanPri = xcalloc((size_t)s->nScanPri, sizeof(double));
+        for (int j = 0; j < s->nScanPri; j++) {
+            if (!(pv->re[j] > 0) || !isfinite(pv->re[j])) fail("cfg.files.scan2scan: prf_Hz must be positive and finite");
+            s->scanPri[j] = 1.0 / pv->re[j];
+        }
+        mat_free(&sf);
+        s->nStagger = 1;
+        s->pri = xcalloc(1, sizeof(double));
+        s->pri[0] = s->scanPri[0];
     } else {
-        fail("Unknown PRF mode \"%s\"", prf);
+        fail("Unknown PRF mode \"%s\" ('fixed', 'staggered' or 'scan2scan')", prf);
     }
     double minPri = s->pri[0];
     for (int i = 1; i < s->nStagger; i++) if (s->pri[i] < minPri) minPri = s->pri[i];
+    for (int j = 0; j < s->nScanPri; j++) if (s->scanPri[j] < minPri) minPri = s->scanPri[j];
 
     /* DDC filters, decimation (ddc_decimation.m) */
     const double outRate = num("ddc.outputRate_Hz");
@@ -1636,23 +1652,47 @@ static int run(const Options *opt)
     const double tEnd = num("sim.nScans") * 360.0 / s.rate;
     double minPri = s.pri[0];
     for (int i = 1; i < s.nStagger; i++) if (s.pri[i] < minPri) minPri = s.pri[i];
+    for (int j = 0; j < s.nScanPri; j++) if (s.scanPri[j] < minPri) minPri = s.scanPri[j];
     const int nMax = (int)ceil(tEnd / minPri) + 1;
+    const double tScan = 360.0 / s.rate;
     Pri *sched = xcalloc((size_t)nMax, sizeof(Pri));
     int nSched = 0, maxScan = 0;
     double tt = 0;
+    int s2sScan = 1, s2sN = 0;                           /* scan-to-scan PRF: scan and pulse in it */
+    double s2sT0 = 0;
     for (int k = 0; k < nMax; k++) {
         const int st = k % s.nStagger;
+        double pk = s.pri[st];
+        int stIdx = st + 1;
+        if (s.nScanPri > 0) {                            /* pulse_schedule.m: the pulses t0 + n*pri of every
+                                                            scan that start before its end, the header carries
+                                                            the number of the PRF of the scan */
+            int j = (s2sScan - 1) % s.nScanPri;
+            tt = s2sT0 + s2sN * s.scanPri[j];
+            while (!(tt < s2sScan * tScan - 1e-12)) {
+                s2sT0 = s2sN > 0 ? s2sT0 + (s2sN - 1) * s.scanPri[j] + s.scanPri[j] : s2sT0;
+                s2sScan++;
+                s2sN = 0;
+                j = (s2sScan - 1) % s.nScanPri;
+                tt = s2sT0;
+                if (s2sScan > (int)num("sim.nScans")) break;
+            }
+            if (s2sScan > (int)num("sim.nScans")) break;
+            s2sN++;
+            pk = s.scanPri[j];
+            stIdx = j + 1;
+        }
         if (!(tt < tEnd)) break;
         Pri *p = &sched[nSched++];
         p->pulse = k + 1;
-        p->staggerIdx = st + 1;
-        p->pri = s.pri[st];
+        p->staggerIdx = stIdx;
+        p->pri = pk;
         p->t = tt;
         const double azU = s.az0 + s.rate * tt;
         p->az = mod360(azU);
         p->scan = (int)floor((azU - s.az0) / 360) + 1;
         if (p->scan > maxScan) maxScan = p->scan;
-        tt += s.pri[st];
+        tt += pk;
     }
     int nSect = 0, sc = 0;
     const double *sect = NULL;

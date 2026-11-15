@@ -24,7 +24,7 @@ root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
 
 %% Configuration
-cfg = radar_config();
+cfg = lfm_mode_config();
 cfg.prf.mode       = prfMode;
 cfg.clutter.enable = clutterOn;
 cfg.rx.maxRange_m  = 50e3;                       % targets are within 50 km
