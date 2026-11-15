@@ -156,9 +156,16 @@ fprintf('Result (%s PRF, CFAR %s %s, %s tracker, C receiver vs MATLAB): %s\n', p
 end
 
 function ax = compare_axes(sys)
-% Cell sizes used by compare_plots.
-ax.rangeCell_m = max(diff(sys.wave.long.range_m(1:2)), diff(sys.wave.short.range_m(1:2)));
-ax.velocityBin_mps = sys.wave.long.lambda_m / 2 * abs(sys.dop.f_Hz(2) - sys.dop.f_Hz(1));
+% Cell sizes used by compare_plots (of the sub-pulses that are on: a mode may have one only).
+ax.rangeCell_m = 0;  lambda = 0;
+for p = {'short', 'long'}
+    wv = sys.wave.(p{1});
+    if wv.enable && numel(wv.range_m) >= 2
+        ax.rangeCell_m = max(ax.rangeCell_m, diff(wv.range_m(1:2)));
+        lambda = max(lambda, wv.lambda_m);
+    end
+end
+ax.velocityBin_mps = lambda / 2 * abs(sys.dop.f_Hz(2) - sys.dop.f_Hz(1));
 ax.nfft = sys.dop.nfft;
 end
 
