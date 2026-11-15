@@ -532,7 +532,7 @@ static int worker(void *arg)
         }
 #endif
 #ifdef RADAR_WITH_QT
-        if (app->opt.ppi && ppi_video_wanted() && pri->nCh == app->cfg.nCh && pri->nSamples == app->cfg.nDdc) {
+        if (app->opt.ppi && ppi_video_wanted() && pri->nCh == app->cfg.nCh && pri->nSamples >= app->cfg.nDdc) {
             const double tVideo = now_seconds();             /* the video of the PPI (display time) */
             if (!videoRow && video_layout_init(&video, &app->cfg, app->cfg.maxRange_m) == 0)
                 videoRow = malloc(sizeof(float) * (size_t)video.nBins);

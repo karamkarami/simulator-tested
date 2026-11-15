@@ -1403,10 +1403,13 @@ static void run_tracker(Processor *p, double t_s, int flush, const ProcessorCall
 
 /* The PRI has the layout of the configuration: channels, DDC samples, the
  * receive intervals of both sub-pulses (header, 1-based) and the DDC rate.
- * (None of them depends on the CFAR or on the pulse compression filters.) */
+ * (None of them depends on the CFAR or on the pulse compression filters.)
+ * The record may be longer than the configured one (e.g. the DDC output of
+ * the whole PRI): only the receive windows of the sub-pulses are taken out
+ * of it, at their samples from the PRI start. */
 static int pri_matches_config(const RadarConfig *cfg, const PriData *pri)
 {
-    if (pri->nCh != cfg->nCh || pri->nSamples != cfg->nDdc || !pri->iq) return 0;
+    if (pri->nCh != cfg->nCh || pri->nSamples < cfg->nDdc || !pri->iq) return 0;
     const uint32_t *idx[N_PULSES] = { pri->shortIdx, pri->longIdx };
     for (int i = 0; i < N_PULSES; i++) {
         const PulseConfig *pc = &cfg->pulse[i];

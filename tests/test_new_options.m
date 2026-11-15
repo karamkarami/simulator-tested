@@ -19,7 +19,8 @@ function ok = test_new_options()
 %   6) cfg.io.saveMf / saveDoppler: one mf_<n>.mat per PRI and one doppler_<n>.mat per CPI
 %      update, with the sizes of the blocks ([] for a sub-pulse that is off)
 %   7) the C program radar_export_config (when built) writes the same records as
-%      export_receiver_config for every option above
+%      export_receiver_config for every option above, the Doppler window 'blackman', a
+%      short pulse at 11 us with set receive-window starts and radar mode 2 (set windows)
 %   8) the noise floor of the PPI video (colour scale) stays within 0.5 dB while the antenna
 %      crosses a 45 deg sector whose rows are 95% clutter (the mountains)
 
@@ -186,12 +187,17 @@ if exist(exe, 'file')
              'cfg.wave.short.enable = false;', {'wave.short.enable', false}
              'cfg.wave.short.fc_Hz = 165e6; cfg.wave.long.fc_Hz = 175e6;', {'wave.short.fc_Hz', 165e6; 'wave.long.fc_Hz', 175e6}
              'cfg.prf.mode = ''staggered''; cfg.wave.long.fc_Hz = 180e6; cfg.track.method = ''tomht'';', ...
-                 {'prf.mode', 'staggered'; 'wave.long.fc_Hz', 180e6; 'track.method', 'tomht'}};
+                 {'prf.mode', 'staggered'; 'wave.long.fc_Hz', 180e6; 'track.method', 'tomht'}
+             'cfg.proc.dopplerWindow = ''blackman'';', {'proc.dopplerWindow', 'blackman'}
+             'cfg.wave.short.tTx_s = 11e-6; cfg.wave.short.rxStart_s = 40e-6; cfg.wave.long.rxStart_s = 360e-6;', ...
+                 {'wave.short.tTx_s', 11e-6; 'wave.short.rxStart_s', 40e-6; 'wave.long.rxStart_s', 360e-6}
+             'cfg.modes.active = 2; cfg = apply_radar_mode(cfg);', {'modes.active', 2}};
     for k = 1:size(cases, 1)
         c = radar_config();
         for j = 1:size(cases{k, 2}, 1)
             parts = strsplit(cases{k, 2}{j, 1}, '.');
             c = setfield(c, parts{:}, cases{k, 2}{j, 2});
+            if strcmp(cases{k, 2}{j, 1}, 'modes.active'), c = apply_radar_mode(c); end   % every setting of that mode
         end
         fm = [tempname() '.bin'];  fc = [tempname() '.bin'];
         evalc('export_receiver_config(c, fm)');

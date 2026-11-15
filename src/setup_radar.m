@@ -236,26 +236,37 @@ end
 sys.pulseOn = [ws.enable, wl.enable];                         % sub-pulses transmitted and processed
 filterSpan    = (L1-1)/fs + (L2-1)/fs1;                       % input span of one DDC output sample
 sys.rxStart_s = 0;                                            % the record starts with the PRI
-% (the CFAR tests the range cells up to the end of the window: its range
-% window is shifted inwards at the edges, so no extra cells are needed). The
-% record, and so the DDC output, depends only on the timing, the DDC filters
-% and the decimation: not on the pulse compression filters or the CFAR (a
-% filter longer than the pulse sees zeros after the end of the record).
+% Receive window of every sub-pulse [start end) in the PRI: cfg.wave.<pulse>.rxStart_s / rxEnd_s
+% (times from the PRI start, as tTx_s). A set start / end selects the DDC output samples by their
+% time (the centre of their input); [] = the DDC samples whose whole input lies after the end of
+% the pulse and before the transmission of the long pulse (short pulse) or the end of the record
+% (no transmitter leakage). The record (ADC samples, DDC output) runs from the PRI start to the
+% end of the last receive window: rxEnd_s of the last transmitted sub-pulse (plus half the input
+% span of a DDC sample), or without it the end of its echoes from cfg.rx.maxRange_m. The
+% processing takes only the receive windows out of the DDC output (the CFAR tests the range
+% cells up to the end of the window: its range window is shifted inwards at the edges, so no
+% extra cells are needed). The record, and so the DDC output, depends only on the timing, the
+% DDC filters and the decimation: not on the pulse compression filters or the CFAR (a filter
+% longer than the pulse sees zeros outside the receive window).
 wLast = wl;                                                   % the last transmitted sub-pulse ends the record
 if ~wl.enable, wLast = ws; end
-rxEnd = wLast.tTx_s + wLast.width_s + 2*cfg.rx.maxRange_m/c + filterSpan + 2/sys.fsOut;
+[rxIv, rxEnd, rxSet] = receive_windows(ws, wl, wLast.tTx_s + wLast.width_s + 2*cfg.rx.maxRange_m/c + filterSpan + 2/sys.fsOut, ...
+                                     filterSpan/2 + 1/sys.fsOut);
 priMin = min(sys.pri);
 if sys.scan2scan, priMin = min(sys.priScan_s); end
-if rxEnd > priMin
+if rxEnd > priMin + 1e-12
     error(['Receive window (%.1f us) does not fit in the shortest PRI (%.1f us): reduce ', ...
-           'cfg.rx.maxRange_m or start the long pulse earlier.'], rxEnd*1e6, priMin*1e6);
+           'cfg.rx.maxRange_m (or cfg.wave.%s.rxEnd_s) or start the long pulse earlier.'], ...
+           rxEnd*1e6, priMin*1e6, wLast.name);
 end
 sys.nAdc = round((rxEnd - sys.rxStart_s) * fs);
 sys.tAdc = sys.rxStart_s + (0:sys.nAdc-1)' / fs;             % ADC sample times in the PRI [s]
-shortEnd = inf;  if wl.enable, shortEnd = wl.tTx_s; end      % (without the long pulse the short window
-sys.shortRxEnd_s = shortEnd;                                  %  lasts to the end of the record)
-sys.adc.rxSamples = find((ws.enable & sys.tAdc >= ws.tTx_s + ws.width_s & sys.tAdc < shortEnd) | ...
-                         (wl.enable & sys.tAdc >= wl.tTx_s + wl.width_s));  % receive intervals (adc_overload.m)
+shortEnd = inf;  if wl.enable, shortEnd = wl.tTx_s; end      % (without the long pulse the short pulse
+sys.shortRxEnd_s = shortEnd;                                  %  is followed by no other one)
+sys.rxWindow_s.short = rxIv.short;                            % receive windows [start end) [s]
+sys.rxWindow_s.long  = rxIv.long;
+sys.adc.rxSamples = find((ws.enable & sys.tAdc >= rxIv.short(1) & sys.tAdc < rxIv.short(2)) | ...
+                         (wl.enable & sys.tAdc >= rxIv.long(1) & sys.tAdc < rxIv.long(2)));  % (adc_overload.m)
 sys.rx.stcGain = single(stc_gain(sys, sys.tAdc));            % STC in front of the receiver (1 = off)
 
 % Receiver LO at every ADC sample: that of the short pulse, from the transmission of the long
@@ -299,8 +310,7 @@ lastAdc  = (k*D2 + L2 - 1)*D1 + L1;
 %         pulse (mismatch filter) needs samples before and after the interval,
 %         which are taken as zeros (ddc_segment.m), so its range cells are the
 %         same as those of the matched filter.
-rxInterval.short = [ws.tTx_s + ws.width_s, shortEnd];         % [start end) of the receive interval
-rxInterval.long  = [wl.tTx_s + wl.width_s, inf];
+rxInterval = rxIv;                                            % [start end) of the receive interval
 for i = 1:2
     wv = sys.wave.(names{i});
     iv = rxInterval.(names{i});
@@ -310,13 +320,20 @@ for i = 1:2
         sys.wave.(names{i}) = wv;
         continue
     end
-    wv.rxIdx = find(sys.tAdc(firstAdc) >= iv(1) & sys.tAdc(lastAdc) < iv(2)).';
+    % a set window start / end (cfg.wave.<pulse>.rxStart_s / rxEnd_s): the DDC samples whose time
+    % (the centre of their input) lies in it; [] = the DDC samples whose whole input lies between
+    % the end of the pulse and the next transmission / the end of the record (no leakage)
+    set = rxSet.(names{i});
+    inStart = sys.tAdc(firstAdc) >= iv(1);  if set(1), inStart = sys.tDdc >= iv(1); end
+    inEnd   = sys.tAdc(lastAdc) < iv(2);    if set(2), inEnd = sys.tDdc < iv(2); end
+    wv.rxIdx = find(inStart & inEnd).';
     Lp = round(wv.width_s * sys.fsOut);                       % pulse length [samples]
     L  = numel(wv.mfTaps);                                    % compression filter length [samples]
     wv.nRange = numel(wv.rxIdx) - Lp + 1;
     if wv.nRange < 2*(sys.cfar.guardRange + sys.cfar.trainRange) + 1
         error(['The %s-pulse receive interval is too short for its pulse and the CFAR ', ...
-               'window: move the long pulse later or increase cfg.rx.maxRange_m.'], wv.name);
+               'window: move the long pulse later or increase cfg.rx.maxRange_m (or widen ', ...
+               'cfg.wave.%s.rxStart_s / rxEnd_s).'], wv.name, wv.name);
     end
     % Output k of the valid convolution of the matched filter correlates the
     % reference with the segment starting at sample k. The reference holds
@@ -574,7 +591,7 @@ if rowLen < 2
 end
 sys.cpi.nRows  = nRows;
 sys.cpi.rowLen = rowLen;
-w = hamming_window(rowLen);
+[w, sys.dop.mainlobe] = doppler_window(cfg, rowLen);         % cfg.proc.dopplerWindow
 sys.dop.window = w / norm(w);
 sys.dop.nfft   = nfft;
 sys.dop.rowPri_s = rowPri;
@@ -618,8 +635,9 @@ for k = 1:nfft
     end
 end
 % MTI notch: Doppler bins around zero (clutter residue) that the CFAR does not test.
-% The residue is as wide as the Doppler window mainlobe: +-2*nfft/rowLen bins for Hamming.
-sys.dop.notchBins = round(cfg.cfar.notchWidth * 2 * nfft / rowLen);
+% The residue is as wide as the Doppler window mainlobe: +-m*nfft/rowLen bins (m = 2 for Hamming
+% and Hann, 3 for Blackman, 1 for the rectangular window).
+sys.dop.notchBins = round(cfg.cfar.notchWidth * sys.dop.mainlobe * nfft / rowLen);
 zeroBin = floor(nfft/2) + 1;
 if sys.cfar.notchMaxRange_m < cfg.rx.maxRange_m
     tested = true(1, nfft);                  % beyond the notch range, every Doppler bin is tested
@@ -634,6 +652,67 @@ sys.dop.nLooks = min(nLooks(tested));
 % Median / mean of the noise power (used to estimate the noise floor of a beam)
 L = sys.dop.nLooks;
 sys.dop.medianToMean = fzero(@(x) gammainc(L*x, L) - 0.5, [0.1 2]);
+end
+
+function [w, mainlobe] = doppler_window(cfg, N)
+% Window of the Doppler FFT (cfg.proc.dopplerWindow, default 'hamming'; N x 1, not normalised) and
+% the half-width of its mainlobe in units of nfft/N bins.
+name = 'hamming';
+if isfield(cfg.proc, 'dopplerWindow') && ~isempty(cfg.proc.dopplerWindow), name = lower(cfg.proc.dopplerWindow); end
+n = (0:N-1)';
+x = 2*pi*n / max(N - 1, 1);
+switch name
+    case 'hamming',  w = 0.54 - 0.46*cos(x);  mainlobe = 2;
+    case 'hann',     w = 0.5 - 0.5*cos(x);  mainlobe = 2;
+    case 'blackman', w = 0.42 - 0.5*cos(x) + 0.08*cos(2*x);  mainlobe = 3;
+    case {'rect', 'rectangular', 'none'}, w = ones(N, 1);  mainlobe = 1;
+    otherwise
+        error('cfg.proc.dopplerWindow must be ''hamming'', ''hann'', ''blackman'' or ''rect''.');
+end
+if N == 1, w = 1; end
+if ~any(w), w(:) = 1; end                                     % (Hann/Blackman of 2 samples are zero)
+end
+
+function [iv, recEnd, isSet] = receive_windows(ws, wl, defaultEnd, halfSpan)
+% Receive windows [start end) of the sub-pulses in the PRI (cfg.wave.<pulse>.rxStart_s / rxEnd_s,
+% [] = from the end of the pulse to the next transmission or to the end of the record), whether
+% each start / end is set (isSet.<pulse> = [start end]) and the end of the record: with rxEnd_s
+% of the last transmitted sub-pulse set, halfSpan (half the input span of a DDC sample and one
+% sample) after it, so that every DDC sample up to rxEnd_s is in the record; else defaultEnd.
+% An end of inf means the end of the record. A switched-off sub-pulse has the window [0 0].
+w = {ws, wl};
+names = {'short', 'long'};
+last = 2;  if ~wl.enable, last = 1; end
+iv.short = [0 0];  iv.long = [0 0];
+isSet.short = [false false];  isSet.long = [false false];
+recEnd = defaultEnd;
+for i = 1:2
+    v = w{i};
+    if ~v.enable, continue; end
+    if ~isscalar(v.tTx_s) || ~isreal(v.tTx_s) || ~(v.tTx_s >= 0)
+        error('cfg.wave.%s.tTx_s must be a time in the PRI (>= 0) [s].', names{i});
+    end
+    pulseEnd = v.tTx_s + v.width_s;
+    a = pulseEnd;  b = inf;
+    if i == 1 && wl.enable, b = wl.tTx_s; end
+    if isfield(v, 'rxStart_s') && ~isempty(v.rxStart_s), a = v.rxStart_s;  isSet.(names{i})(1) = true; end
+    if isfield(v, 'rxEnd_s') && ~isempty(v.rxEnd_s)
+        b = v.rxEnd_s;  isSet.(names{i})(2) = true;
+        if i == last, recEnd = b + halfSpan; end
+    end
+    if ~isscalar(a) || ~isreal(a) || ~isfinite(a) || a < pulseEnd - 1e-12
+        error(['cfg.wave.%s.rxStart_s = %.2f us: the receive window starts at the end of the pulse ', ...
+               '(tTx_s + width_s = %.2f us) or later.'], names{i}, a*1e6, pulseEnd*1e6);
+    end
+    if ~isscalar(b) || ~isreal(b) || isnan(b) || b <= a
+        error('cfg.wave.%s.rxEnd_s must be later than the start of its receive window (%.2f us).', names{i}, a*1e6);
+    end
+    if i == 1 && wl.enable && b > wl.tTx_s + 1e-12
+        error(['cfg.wave.short.rxEnd_s = %.2f us: the short-pulse receive window ends at the ', ...
+               'transmission of the long pulse (%.2f us) or earlier.'], b*1e6, wl.tTx_s*1e6);
+    end
+    iv.(names{i}) = [a b];
+end
 end
 
 function m = radar_mode_check(cfg)

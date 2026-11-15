@@ -312,6 +312,11 @@ static int16_t sat16(double v)
  * a mismatch filter the echo starts mfShift samples after the start of the
  * target cell (its range axis). Noise 16 LSB rms per component like the
  * simulator's DDC output. */
+/* DDC samples appended to every record of test_end_to_end (a record longer than the configured
+ * one, e.g. the DDC output of the whole PRI: only the receive windows are processed); they hold
+ * large values that would change the plots if they were used */
+static int g_extraSamples = 0;
+
 static int test_end_to_end(const char *configPath, int mfDirect, double threshold_dB, Detection *plotOut, int snrNoise)
 {
     RadarConfig cfg;
@@ -346,16 +351,18 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
      * outside the MTI notch, for any carrier frequency), 0.3 bins off a bin centre */
     const double dv = fabs(cfg.dopFreq_Hz[1] - cfg.dopFreq_Hz[0]) * pc->lambda_m / 2;   /* Doppler bin [m/s] */
     const double vr = -(cfg.nfft / 4 + 0.3) * dv;
-    const double pri_s = 1e-3, amp = 30.0;              /* amplitude per element (LSB)          */
+    /* PRI of the configuration (fixed PRF; 1 ms with a staggered PRF), amplitude per element (LSB) */
+    const double pri_s = cfg.staggered ? 1e-3 : cfg.meanPri_s, amp = 30.0;
     const int nPulses = cfg.cpiLength + 60, nWith = cfg.cpiLength + 30;
 
     PriData pri;
     memset(&pri, 0, sizeof pri);
     pri.nCh = cfg.nCh;
-    pri.nSamples = cfg.nDdc;
+    const int nRec = cfg.nDdc + g_extraSamples;          /* DDC samples per record and channel */
+    pri.nSamples = nRec;
     pri.ddcFs_Hz = (float)cfg.fsOut_Hz;
     set_header_intervals(&cfg, &pri);
-    pri.iq = malloc(sizeof(int16_t) * 2 * (size_t)cfg.nCh * cfg.nDdc);
+    pri.iq = malloc(sizeof(int16_t) * 2 * (size_t)cfg.nCh * nRec);
     double *steerRe = malloc(sizeof(double) * cfg.nCh), *steerIm = malloc(sizeof(double) * cfg.nCh);
     for (int ch = 0; ch < cfg.nCh; ch++) {               /* matched to the beam weights */
         if (!cfg.dbfEnabled) { steerRe[ch] = 1; steerIm[ch] = 0; continue; }
@@ -383,7 +390,10 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
         pri.az_deg = (float)fmod(k * cfg.rate_dps * pri_s, 360.0);
         pri.time_s = k * pri_s;
         pri.staggerIndex = 1;
-        for (size_t i = 0; i < 2 * (size_t)cfg.nCh * cfg.nDdc; i++) pri.iq[i] = sat16(16.0 * gauss());
+        for (int ch = 0; ch < cfg.nCh; ch++)            /* (the same noise with and without extra samples) */
+            for (int n = 0; n < 2 * cfg.nDdc; n++) pri.iq[2 * (size_t)ch * nRec + n] = sat16(16.0 * gauss());
+        for (int ch = 0; ch < cfg.nCh; ch++)
+            for (int n = 2 * cfg.nDdc; n < 2 * nRec; n++) pri.iq[2 * (size_t)ch * nRec + n] = (int16_t)(n % 2 ? -30000 : 30000);
         if (k < nWith) {
             const double ph = -4 * PI * vr * pri.time_s / pc->lambda_m;   /* baseband phase -4*pi*R/lambda */
             const int first = pc->ddcFirst + r0 + pc->mfShift;
@@ -394,7 +404,7 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
                     /* waveform s[m]: the pulse, or conj(h[nTaps-1-m]) */
                     const double sr = pc->nPulse ? pc->pulseRe[m] / pulseNorm : pc->tapsRe[pc->nTaps - 1 - m];
                     const double si = pc->nPulse ? pc->pulseIm[m] / pulseNorm : -pc->tapsIm[pc->nTaps - 1 - m];
-                    int16_t *v = pri.iq + 2 * ((size_t)ch * cfg.nDdc + first + m);
+                    int16_t *v = pri.iq + 2 * ((size_t)ch * nRec + first + m);
                     v[0] = sat16(v[0] + cr * sr - ci * si);
                     v[1] = sat16(v[1] + cr * si + ci * sr);
                 }
@@ -459,7 +469,7 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
                "%.1f dB above the rest, map peak at bin %d / Doppler %d (target %d / %d)\n", sink.nProfile[PROFILE_DBF],
                sink.nProfile[PROFILE_MF], sink.nRd, sink.mfPeakBin, tb, 10 * log10(sink.dbfTarget / sink.dbfElse),
                sink.rdPeakBin, sink.rdPeakDop, tb, dExp);
-        CHECK(sink.nProfile[PROFILE_DBF] == nPulses / 2 && sink.nProfile[PROFILE_MF] == nPulses / 2,
+        CHECK(sink.nProfile[PROFILE_DBF] == (nPulses + 1) / 2 && sink.nProfile[PROFILE_MF] == nPulses / 2,
               "a profile every PRI (%d DBF, %d MF)", sink.nProfile[PROFILE_DBF], sink.nProfile[PROFILE_MF]);
         /* one PRI: the echo is spread over the pulse (about 1 dB above the noise per sample after the DBF with
          * 48 elements); after the pulse compression it stands out (with one element its SNR in one PRI is
@@ -812,6 +822,17 @@ int main(int argc, char **argv)
             CHECK(fabs(a.snr_dB - b.snr_dB) < 0.01 && fabs(a.power / b.power - 1) < 1e-4,
                   "fast and direct matched filter: SNR %.4f / %.4f dB, power ratio %.6f",
                   a.snr_dB, b.snr_dB, a.power / b.power);
+        }
+        /* records longer than the configuration (DDC output of the whole PRI, junk after the last
+         * receive window): the same plot */
+        {
+            Detection e;
+            g_extraSamples = 500;
+            if (test_end_to_end(argv[1], 0, NAN, &e, SNR_NOISE_MEDIAN))
+                CHECK(e.rIdx == a.rIdx && e.dIdx == a.dIdx && e.beam == a.beam && e.hits == a.hits && e.power == a.power,
+                      "a record with 500 more DDC samples changes the plot");
+            g_extraSamples = 0;
+            printf("records with 500 DDC samples more than the configuration: the same plot\n");
         }
         /* the same target with the CFAR threshold raised far above its peak (run-time change) */
         test_end_to_end(argv[1], 0, 45.0, &a, SNR_NOISE_MEDIAN);

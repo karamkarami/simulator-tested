@@ -116,7 +116,10 @@ radar_receiver_windows/build/radar_receiver --config radar_receiver_windows/conf
 
 Then run `run_radar_sim(cfg)` in MATLAB. Export the configuration again
 whenever `cfg` changes: the receiver checks that the PRI layout (number of
-channels and DDC samples) matches and ignores PRIs that do not. The file
+channels, at least the configured DDC samples, receive intervals) matches and
+ignores PRIs that do not. A record may be longer than the configured one (for
+example the DDC output of the whole PRI): only the receive windows of the
+sub-pulses are taken out of it. The file
 has a format version (2); the receiver refuses files of another version and
 needs every value that `export_receiver_config.m` writes.
 
@@ -221,8 +224,13 @@ record within 3e-14 (relative).
 "Scan-to-scan PRF"):
 
 * The mode (`cfg.modes.active`, `cfg.modes.subMode`) is applied by
-  `radar_config.m` itself, so the export holds the waveforms and the PRF of
-  that mode; another mode: `--set "cfg.modes.active = 1; cfg =
+  `radar_config.m` itself, so the export holds every setting of that mode:
+  the waveforms, transmit times and receive windows (`cfg.wave.<pulse>.tTx_s`,
+  `rxStart_s`, `rxEnd_s`: the receive intervals `short_rxFirst` / `_rxCount`,
+  ... and the range axes), the PRF, the STC (only for `radar_generate_ddc`)
+  and the whole processing chain (CFAR, tracker, Doppler window `dopWindow`,
+  CPI, clutter filter, ...): the receiver processes every mode with the same
+  code, from the records of its configuration file. Another mode: `--set "cfg.modes.active = 1; cfg =
   apply_radar_mode(cfg);"` (sub-mode: `cfg.modes.subMode = 'single';` before
   it). Record `radarMode` = [mode, 1 single / 0 dual] (information, printed
   at the start). Both exporters check the modes as `setup_radar.m`.
@@ -378,10 +386,14 @@ A jump in the pulse numbers (a PRI lost, or a skipped azimuth sector)
 restarts the CPI buffers and closes the open plots, as the MATLAB simulator
 does between simulated sectors. A PRI whose layout (channels, DDC samples,
 receive interval of each sub-pulse, DDC rate) differs from the configuration
-is ignored and counted: export the configuration again. The layout depends
-only on the pulse timing, the instrumented range, the DDC filters and the
-decimation, so the CFAR method and the pulse compression filters of the
-receiver may differ from those of the sender.
+is ignored and counted: export the configuration again. A PRI with more DDC
+samples than the configuration (for example the DDC output of the whole PRI,
+with the samples while transmitting and after the last receive window) is
+accepted: only the receive windows are processed (test `core`). The layout
+depends only on the pulse timing (transmit times, receive windows), the
+instrumented range, the DDC filters and the decimation, so the CFAR method
+and the pulse compression filters of the receiver may differ from those of
+the sender.
 
 The datagrams are read in a thread of their own, which puts the complete
 PRIs into a queue (`--queue`). The socket is therefore emptied also while a
@@ -832,10 +844,11 @@ Timing:
 | Test | What it checks |
 |---|---|
 | `tracker` (`tests/test_tracker.c`) | (the tracker of the configuration, `cfg.track.method`) two crossing targets over 6 scans, 3-D and 2-D (plots with radial velocity): two confirmed tracks that stay on their targets; GNN with two targets 200 m apart: each track stays on its own target; speed gate: a 3 m/s track is deleted at its second update with `trackMinSpeed` = 5 m/s, a 100 m/s one kept; with plots, a configuration and the track log from `../tests/test_tracker.m` (CV and CA, 2-D and 3-D, with and without the radial velocity, staggered PRF with folded plot velocities), every C track update equals MATLAB's (same plot, state within 1e-6); with the calls of `../tests/test_tracker_pmbm.m` (16 PMBM cases: maneuvers, constant acceleration, 30 false plots per scan, close and crossing targets, the challenge scenario) every update of the C PMBM tracker equals MATLAB's |
-| `core` (`tests/test_core.c`) | batched FFT against a direct DFT; plot extractor, also on random dense detection streams (hundreds of open groups) against the linear search of `plot_extractor.m`: the same plots in the same order; a moving target through the whole chain with the exported configuration (its velocity a quarter of the Doppler axis from zero, for any carrier frequency; one plot at the right range, velocity and beam); direct and fast-convolution matched filters give the same plot; the same target with the CFAR threshold raised to 45 dB at run time gives no detection; `cfar_pfa()` against the closed forms of CA, GO, SO and OS (one look) and the Pfa 1e-8 of the configured threshold; the display taps of the processor (`processor_set_profile`, `processor_set_rdmap`): a DBF and an MF profile every PRI, the MF peak in the target's range bin, the DBF echo above the noise, the range-Doppler map of the target's beam with its peak at the target's range bin and Doppler bin and only that beam's detections; the raw video of the PPI (`video.c`): mean power over the channels, the short-pulse samples up to the handover, then the long-pulse samples, in the right range bins |
+| `core` (`tests/test_core.c`) | batched FFT against a direct DFT; plot extractor, also on random dense detection streams (hundreds of open groups) against the linear search of `plot_extractor.m`: the same plots in the same order; a moving target through the whole chain with the exported configuration (its velocity a quarter of the Doppler axis from zero, for any carrier frequency; one plot at the right range, velocity and beam); direct and fast-convolution matched filters give the same plot; the same target with the CFAR threshold raised to 45 dB at run time gives no detection; `cfar_pfa()` against the closed forms of CA, GO, SO and OS (one look) and the Pfa 1e-8 of the configured threshold; the display taps of the processor (`processor_set_profile`, `processor_set_rdmap`): a DBF and an MF profile every PRI, the MF peak in the target's range bin, the DBF echo above the noise, the range-Doppler map of the target's beam with its peak at the target's range bin and Doppler bin and only that beam's detections; the raw video of the PPI (`video.c`): mean power over the channels, the short-pulse samples up to the handover, then the long-pulse samples, in the right range bins; records with 500 DDC samples more than the configuration (large values after the last receive window) give the same plot |
 | `core_phasecode` | the same core test with `config/radar_config_phasecode.bin` (both sub-pulses P4 phase codes with mismatch filters; the same as mode 0 of the default `radar_config.bin`): the echo is the real code, the plot lies on the target cell |
 | `export_scan2scan`, `core_scan2scan` | `cfg.prf.mode = 'scan2scan'` exported and processed: the core test, and a target in a scan with PRF 1 and in the next scan with PRF 2 (stagger index 1, then 2): one change of the PRF, the settings of PRF 2 in use, the target found in both scans with its radial velocity on the Doppler axis of each PRF |
 | `export_lfm_mode`, `core_lfm_mode`, `export_single`, `core_single` | radar mode 1 (LFM sub-pulses) and the single-pulse sub-mode of mode 0, selected with `--set "...; cfg = apply_radar_mode(cfg);"`, exported and processed |
+| `export_mode2`, `core_mode2`, `export_blackman`, `core_blackman` | radar mode 2 (short pulse sent at 11 us, receive windows 40 - 248 us and 533 - 1780 us, PRI 1.8 ms: 3556 DDC samples, ranges 4.4 - 31.8 km and 31.8 - 200 km) and the Blackman Doppler window, exported and processed |
 | `core_1ch` | the same core test with `config/radar_config_1ch.bin` (the default radar with one receive element, no DBF): four-step FFT and direct matched filter give the same plot |
 | `cfar` (`tests/test_cfar.c`) | the CFAR detectors of `cfar.c` (CA, GO, SO, OS) against the statistic computed directly from the training cells combined with the direct local peak test: every decision and noise estimate, for every detector with the 2-D, 1-D range and 1-D Doppler windows and tested range intervals in the middle, at both range edges (also when the whole interval lies within the cells of the shifted windows) and over all cells, with the beams of the configuration and with one beam split into range chunks over 4 threads; the noise floor median equals that of a sorted copy (400 maps: odd and even sizes, ties, zeros, a structured half; with and without a bracket from the previous median); the pruning of tens of thousands of CFAR detections (a strong target with sidelobes, 3000 strong cells) gives exactly the cells of the direct pairwise rules; the peak interpolation: a Gaussian peak gives its exact fractional Doppler bin and beam, the Doppler bin wraps at the edge of the axis, the lowest beam keeps its centre, nothing changes with the options off |
 | `cfar_1ch` | the same CFAR test with `config/radar_config_1ch.bin` |

@@ -521,6 +521,8 @@ typedef struct {
     double *beamU;                /* beam directions on its carrier            */
     int    phaseCode, mismatch;
     double width_s, bandwidth_Hz, chip_s, tTx_s;
+    double rx0, rx1;              /* receive window [start end) in the PRI [s] (inf = end of record) */
+    int    rx0Set, rx1Set;           /* rxStart_s / rxEnd_s set: DDC samples selected by their time */
     int    nCode;
     double *codeRe, *codeIm;      /* phase code chips                          */
     int    nMis;
@@ -792,7 +794,7 @@ typedef struct {
 typedef struct {
     int cpiLength, nRows, rowLen, nfft, notchBins;
     double rowPri, notchMaxRange_m, nLooks, medianToMean, mtiMaxRange;
-    double *win;              /* [rowLen] Hamming window, unit energy                      */
+    double *win;              /* [rowLen] Doppler window (cfg.proc.dopplerWindow), unit energy */
     double *fHz;              /* [nfft] Doppler axis                                       */
     double *noiseGain;        /* [2 nfft]: filtered cells, then the cells beyond mtiMaxRange */
 } SlowTime;
@@ -836,9 +838,26 @@ static SlowTime slow_time(const SlowIn *in)
     if (rowLen > nfft) rowLen = nfft;
     if (rowLen < 2)
         fail("The CPI of %d pulses is too short for the MTI and the Doppler processing (cfg.proc.cpiLength).", cpiLength);
+    /* window of the Doppler FFT (cfg.proc.dopplerWindow, default 'hamming') and its mainlobe
+     * half-width in units of nfft/rowLen bins (doppler_window of setup_radar.m) */
+    const char *wname = has("proc.dopplerWindow") && !empty("proc.dopplerWindow") ? str("proc.dopplerWindow") : "hamming";
+    int wType, mainlobe;
+    if (same_text(wname, "hamming")) { wType = 0; mainlobe = 2; }
+    else if (same_text(wname, "hann")) { wType = 1; mainlobe = 2; }
+    else if (same_text(wname, "blackman")) { wType = 2; mainlobe = 3; }
+    else if (same_text(wname, "rect") || same_text(wname, "rectangular") || same_text(wname, "none")) { wType = 3; mainlobe = 1; }
+    else fail("cfg.proc.dopplerWindow must be 'hamming', 'hann', 'blackman' or 'rect'.");
     double *win = xcalloc((size_t)rowLen, sizeof(double)), wn = 0;
+    int anyNonZero = 0;
     for (int j = 0; j < rowLen; j++) {
-        win[j] = rowLen == 1 ? 1.0 : 0.54 - 0.46 * cos(2 * PI * j / (rowLen - 1));
+        const double x = 2 * PI * j / (rowLen > 1 ? rowLen - 1 : 1);
+        win[j] = wType == 0 ? 0.54 - 0.46 * cos(x) : wType == 1 ? 0.5 - 0.5 * cos(x)
+               : wType == 2 ? 0.42 - 0.5 * cos(x) + 0.08 * cos(2 * x) : 1.0;
+        if (rowLen == 1) win[j] = 1.0;
+        anyNonZero |= win[j] != 0;
+    }
+    for (int j = 0; j < rowLen; j++) {
+        if (!anyNonZero) win[j] = 1.0;
         wn += win[j] * win[j];
     }
     wn = sqrt(wn);
@@ -911,7 +930,7 @@ static SlowTime slow_time(const SlowIn *in)
     free(bypass);
     const double notchWidth = num("cfar.notchWidth");
     const double notchMaxRange_m = num("cfar.notchMaxRange_m");
-    const int notchBins = (int)lround(notchWidth * 2 * nfft / rowLen);
+    const int notchBins = (int)lround(notchWidth * mainlobe * nfft / rowLen);
     const int zeroBin = nfft / 2 + 1;
     double nLooks = INFINITY;
     int anyTested = 0;
@@ -1278,14 +1297,40 @@ static void export_config(void)
     if (ws->enable && wl->enable && wl->tTx_s < ws->tTx_s + ws->width_s)
         fail("The long pulse must start after the end of the short pulse.");
 
-    /* PRI timeline, DDC sample times */
+    /* PRI timeline: receive window of every sub-pulse (cfg.wave.<pulse>.rxStart_s / rxEnd_s, [] = from
+     * the end of the pulse to the long pulse or to the end of the record) and the record (PRI start to
+     * rxEnd_s of the last transmitted sub-pulse, without it to the end of its echoes from maxRange) */
     const double maxRange = num("rx.maxRange_m");
     const double filterSpan = (ddc.L1 - 1) / fs + (ddc.L2 - 1) / fs1;
     const Wave *wLast = wl->enable ? wl : ws;             /* the last transmitted sub-pulse ends the record */
-    const double rxEnd = wLast->tTx_s + wLast->width_s + 2 * maxRange / c + filterSpan + 2 / fsOut;
-    if (rxEnd > minPri)
-        fail("Receive window (%.1f us) does not fit in the shortest PRI (%.1f us): reduce cfg.rx.maxRange_m or "
-             "start the long pulse earlier.", rxEnd * 1e6, minPri * 1e6);
+    double rxEnd = wLast->tTx_s + wLast->width_s + 2 * maxRange / c + filterSpan + 2 / fsOut;
+    for (int i = 0; i < 2; i++) {
+        Wave *w = &wv[i];
+        if (!w->enable) continue;
+        if (!(w->tTx_s >= 0) || !isfinite(w->tTx_s)) fail("cfg.wave.%s.tTx_s must be a time in the PRI (>= 0) [s].", names[i]);
+        const double pulseEnd = w->tTx_s + w->width_s;
+        snprintf(p, sizeof p, "wave.%s.rxStart_s", names[i]);
+        w->rx0Set = has(p) && !empty(p);
+        w->rx0 = num_or(p, pulseEnd);
+        w->rx1 = i == 0 && wl->enable ? wl->tTx_s : INFINITY;
+        snprintf(p, sizeof p, "wave.%s.rxEnd_s", names[i]);
+        if (has(p) && !empty(p)) {
+            w->rx1 = num(p);
+            w->rx1Set = 1;
+            if (w == wLast) rxEnd = w->rx1 + filterSpan / 2 + 1 / fsOut;   /* every DDC sample up to rxEnd_s */
+        }
+        if (!isfinite(w->rx0) || w->rx0 < pulseEnd - 1e-12)
+            fail("cfg.wave.%s.rxStart_s = %.2f us: the receive window starts at the end of the pulse (tTx_s + width_s = "
+                 "%.2f us) or later.", names[i], w->rx0 * 1e6, pulseEnd * 1e6);
+        if (isnan(w->rx1) || w->rx1 <= w->rx0)
+            fail("cfg.wave.%s.rxEnd_s must be later than the start of its receive window (%.2f us).", names[i], w->rx0 * 1e6);
+        if (i == 0 && wl->enable && w->rx1 > wl->tTx_s + 1e-12)
+            fail("cfg.wave.short.rxEnd_s = %.2f us: the short-pulse receive window ends at the transmission of the long "
+                 "pulse (%.2f us) or earlier.", w->rx1 * 1e6, wl->tTx_s * 1e6);
+    }
+    if (rxEnd > minPri + 1e-12)
+        fail("Receive window (%.1f us) does not fit in the shortest PRI (%.1f us): reduce cfg.rx.maxRange_m (or "
+             "cfg.wave.%s.rxEnd_s) or start the long pulse earlier.", rxEnd * 1e6, minPri * 1e6, wLast->name);
     const long nAdc = lround((rxEnd - 0.0) * fs);
     const long n1 = (nAdc - ddc.L1) / ddc.D1 + 1;
     const int nDdc = (int)((n1 - ddc.L2) / ddc.D2 + 1);
@@ -1299,13 +1344,14 @@ static void export_config(void)
     for (int i = 0; i < 2; i++) {
         Wave *w = &wv[i];
         if (!w->enable) continue;                         /* switched off: no receive interval, no cells */
-        const double iv0 = i == 0 ? ws->tTx_s + ws->width_s : wl->tTx_s + wl->width_s;
-        const double iv1 = i == 0 && wl->enable ? wl->tTx_s : INFINITY;
+        const double iv0 = w->rx0, iv1 = w->rx1;
         int first = -1, count = 0;
         for (int k = 0; k < nDdc; k++) {
             const double tFirst = (double)((long)k * ddc.D2 * ddc.D1) / fs;
             const double tLast = (double)(((long)k * ddc.D2 + ddc.L2 - 1) * ddc.D1 + ddc.L1 - 1) / fs;
-            if (tFirst >= iv0 && tLast < iv1) {
+            /* a set start / end: the DDC samples by their time; else their whole input inside */
+            const int in0 = w->rx0Set ? tDdc[k] >= iv0 : tFirst >= iv0, in1 = w->rx1Set ? tDdc[k] < iv1 : tLast < iv1;
+            if (in0 && in1) {
                 if (first < 0) first = k;
                 else if (k != first + count) fail("internal: the %s-pulse receive interval is not contiguous", w->name);
                 count++;
@@ -1317,7 +1363,7 @@ static void export_config(void)
         w->nRange = count - Lp + 1;
         if (first < 0 || w->nRange < 2 * (guardR + trainR) + 1)
             fail("The %s-pulse receive interval is too short for its pulse and the CFAR window: move the long "
-                 "pulse later or increase cfg.rx.maxRange_m.", w->name);
+                 "pulse later or increase cfg.rx.maxRange_m (or widen cfg.wave.%s.rxStart_s / rxEnd_s).", w->name, w->name);
         w->ddcFirst1 = w->rxFirst - w->mfShift;
         w->ddcCount = w->nRange + w->nTaps - 1;
         w->delay_s = xcalloc((size_t)w->nRange, sizeof(double));

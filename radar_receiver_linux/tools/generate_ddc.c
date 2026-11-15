@@ -370,6 +370,8 @@ typedef struct {
     int    enable, phaseCode;
     double fc, lambda, fIF, fLO, radarConst;
     double width, bw, chip, tTx;
+    double rx0, rx1;              /* receive window [start end) in the PRI [s] (inf = end of record) */
+    int    rx0Set, rx1Set;           /* rxStart_s / rxEnd_s set: DDC samples selected by their time */
     int    nCode;
     double *codeRe, *codeIm;
     int    compMismatch, nMis;
@@ -771,14 +773,41 @@ static void setup(Radar *s)
     Wave *ws = &s->w[0], *wl = &s->w[1];
     if (ws->enable && wl->enable && wl->tTx < ws->tTx + ws->width) fail("The long pulse must start after the end of the short pulse.");
 
-    /* PRI timeline, NCO, STC, DDC samples and receive intervals */
+    /* PRI timeline, NCO, STC, DDC samples and receive intervals. Receive window of every sub-pulse:
+     * cfg.wave.<pulse>.rxStart_s / rxEnd_s ([] = from the end of the pulse to the long pulse or to the
+     * end of the record); the record ends with rxEnd_s of the last transmitted sub-pulse (without it
+     * with the end of its echoes from cfg.rx.maxRange_m) */
     const double maxRange = num("rx.maxRange_m");
     const double filterSpan = (s->L1 - 1) / s->fs + (s->L2 - 1) / s->fs1;
     const Wave *wLast = wl->enable ? wl : ws;
-    const double rxEnd = wLast->tTx + wLast->width + 2 * maxRange / s->c + filterSpan + 2 / s->fsOut;
-    if (rxEnd > minPri)
-        fail("Receive window (%.1f us) does not fit in the shortest PRI (%.1f us): reduce cfg.rx.maxRange_m or start the "
-             "long pulse earlier.", rxEnd * 1e6, minPri * 1e6);
+    double rxEnd = wLast->tTx + wLast->width + 2 * maxRange / s->c + filterSpan + 2 / s->fsOut;
+    for (int i = 0; i < 2; i++) {
+        Wave *w = &s->w[i];
+        if (!w->enable) continue;
+        if (!(w->tTx >= 0) || !isfinite(w->tTx)) fail("cfg.wave.%s.tTx_s must be a time in the PRI (>= 0) [s].", names[i]);
+        const double pulseEnd = w->tTx + w->width;
+        snprintf(p, sizeof p, "wave.%s.rxStart_s", names[i]);
+        w->rx0Set = has(p) && !empty(p);
+        w->rx0 = num_or(p, pulseEnd);
+        w->rx1 = i == 0 && wl->enable ? wl->tTx : INFINITY;
+        snprintf(p, sizeof p, "wave.%s.rxEnd_s", names[i]);
+        if (has(p) && !empty(p)) {
+            w->rx1 = num(p);
+            w->rx1Set = 1;
+            if (w == wLast) rxEnd = w->rx1 + filterSpan / 2 + 1 / s->fsOut;   /* every DDC sample up to rxEnd_s */
+        }
+        if (!isfinite(w->rx0) || w->rx0 < pulseEnd - 1e-12)
+            fail("cfg.wave.%s.rxStart_s = %.2f us: the receive window starts at the end of the pulse (tTx_s + width_s = "
+                 "%.2f us) or later.", names[i], w->rx0 * 1e6, pulseEnd * 1e6);
+        if (isnan(w->rx1) || w->rx1 <= w->rx0)
+            fail("cfg.wave.%s.rxEnd_s must be later than the start of its receive window (%.2f us).", names[i], w->rx0 * 1e6);
+        if (i == 0 && wl->enable && w->rx1 > wl->tTx + 1e-12)
+            fail("cfg.wave.short.rxEnd_s = %.2f us: the short-pulse receive window ends at the transmission of the long "
+                 "pulse (%.2f us) or earlier.", w->rx1 * 1e6, wl->tTx * 1e6);
+    }
+    if (rxEnd > minPri + 1e-12)
+        fail("Receive window (%.1f us) does not fit in the shortest PRI (%.1f us): reduce cfg.rx.maxRange_m (or "
+             "cfg.wave.%s.rxEnd_s) or start the long pulse earlier.", rxEnd * 1e6, minPri * 1e6, wLast->name);
     s->nAdc = (int)lround(rxEnd * s->fs);
     const double shortEnd = wl->enable ? wl->tTx : INFINITY;
     s->cosNco = xcalloc((size_t)s->nAdc, sizeof(double));
@@ -811,9 +840,10 @@ static void setup(Radar *s)
                 s->loShift[p][2 * k + 1] = sin(ph);
             }
         }
-        const int inShort = ws->enable && t >= ws->tTx + ws->width && t < shortEnd;
+        const int inShort = ws->enable && t >= ws->tTx + ws->width && t < shortEnd;   /* STC: between the pulses */
         const int inLong = wl->enable && t >= wl->tTx + wl->width;
-        s->rxSample[k] = (unsigned char)(inShort || inLong);
+        s->rxSample[k] = (unsigned char)((ws->enable && t >= ws->rx0 && t < ws->rx1) ||   /* receive windows */
+                                         (wl->enable && t >= wl->rx0 && t < wl->rx1));
         s->nRx += s->rxSample[k];
         double A = 0.0;
         if (s->stcOn) {
@@ -830,17 +860,20 @@ static void setup(Radar *s)
         Wave *w = &s->w[i];
         w->rxFirst = w->rxLast = 0;
         if (!w->enable) continue;
-        const double iv0 = w->tTx + w->width, iv1 = i == 0 ? shortEnd : INFINITY;
+        const double iv0 = w->rx0, iv1 = w->rx1;
         for (int k = 0; k < s->nDdc; k++) {
             const double tFirst = (double)((long)k * s->D2 * s->D1) / s->fs;
             const double tLast = (double)(((long)k * s->D2 + s->L2 - 1) * s->D1 + s->L1 - 1) / s->fs;
-            if (tFirst >= iv0 && tLast < iv1) {
+            /* a set start / end: the DDC samples by their time; else their whole input inside */
+            const double tC = (double)((long)k * s->D2 * s->D1) / s->fs + (s->L1 - 1) / 2.0 / s->fs + (s->L2 - 1) / 2.0 / s->fs1;
+            const int in0 = w->rx0Set ? tC >= iv0 : tFirst >= iv0, in1 = w->rx1Set ? tC < iv1 : tLast < iv1;
+            if (in0 && in1) {
                 if (!w->rxFirst) w->rxFirst = k + 1;
                 w->rxLast = k + 1;
             }
         }
         if (!w->rxFirst) fail("The %s-pulse receive interval holds no DDC sample: move the long pulse later or increase "
-                              "cfg.rx.maxRange_m.", w->name);
+                              "cfg.rx.maxRange_m (or widen cfg.wave.%s.rxStart_s / rxEnd_s).", w->name, w->name);
     }
 }
 

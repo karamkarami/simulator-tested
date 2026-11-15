@@ -7,7 +7,8 @@ function ok = test_generate_ddc_c()
 %      the same I, Q up to the rounding of a few ADC samples (MATLAB sums the
 %      signal in single precision): at least 99.9% of the samples equal, none
 %      more than 2 LSB apart. Cases: default (2 MHz), 4 MHz DDC with the
-%      sub-pulses on 165 / 175 MHz, the long pulse off, phase codes.
+%      sub-pulses on 165 / 175 MHz, the long pulse off, phase codes, radar mode 2
+%      (short pulse sent at 11 us, receive windows set in the PRI).
 %   2. Terrain clutter: with the expected amplitude in every cell (no random
 %      phase, no motion: RADAR_GEN_FIXED_CLUTTER, and clutter_init.m changed the
 %      same way) the DDC output agrees with MATLAB as in 1 (over the mountains
@@ -47,12 +48,14 @@ cases = {'default, 2 MHz', {}
          '4 MHz, short 165 MHz, long 175 MHz', {'ddc.outputRate_Hz', 4e6; 'wave.short.fc_Hz', 165e6; 'wave.long.fc_Hz', 175e6}
          'long pulse off', {'wave.long.enable', false}
          'P4 phase codes, mismatch filter (long)', {'wave.short.type', 'phasecode'; 'wave.long.type', 'phasecode'; ...
-                                                    'wave.long.compression', 'mismatch'}};
+                                                    'wave.long.compression', 'mismatch'}
+         'mode 2: short pulse at 11 us, set receive windows', {'modes.active', 2}};
 for k = 1:size(cases, 1)
     c = base;
     for j = 1:size(cases{k, 2}, 1)
         parts = strsplit(cases{k, 2}{j, 1}, '.');
         c = setfield(c, parts{:}, cases{k, 2}{j, 2});
+        if strcmp(cases{k, 2}{j, 1}, 'modes.active'), c = apply_radar_mode(c); end   % every setting of that mode
     end
     c.sim.sectors_deg = [10 10.25];
     c.targets = [make_target('A', 10, 20e3, 10.1, 1000, 150, 0), make_target('B', 5, 50e3, 10.2, 5000, -200, 30)];

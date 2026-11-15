@@ -294,8 +294,9 @@ if(RADAR_BUILD_TESTS)
     set_tests_properties(core_exported PROPERTIES FIXTURES_REQUIRED exported_config)
     # options of radar_config.m exported and processed: one sub-pulse off, the sub-pulses on their
     # own carriers with the clutter filter up to 50 km and a CPI of 96 pulses, the TOMHT tracker,
-    # the scan-to-scan PRF, radar mode 1 and the single-pulse sub-mode
-    foreach(variant IN ITEMS short_off long_off carriers tomht scan2scan lfm_mode single)
+    # the scan-to-scan PRF, radar mode 1, the single-pulse sub-mode, radar mode 2 (short pulse sent at
+    # 11 us, receive windows set in the PRI) and the Blackman Doppler window
+    foreach(variant IN ITEMS short_off long_off carriers tomht scan2scan lfm_mode single mode2 blackman)
         if(variant STREQUAL "short_off")
             set(stmt "cfg.wave.short.enable = false;")
         elseif(variant STREQUAL "long_off")
@@ -310,6 +311,11 @@ if(RADAR_BUILD_TESTS)
         elseif(variant STREQUAL "lfm_mode")
             # radar mode 1 (LFM sub-pulses) selected after radar_config.m
             set(stmt "cfg.modes.active = 1; cfg = apply_radar_mode(cfg);")
+        elseif(variant STREQUAL "mode2")
+            # radar mode 2: every setting of its mode file (timing, receive windows, processing)
+            set(stmt "cfg.modes.active = 2; cfg = apply_radar_mode(cfg);")
+        elseif(variant STREQUAL "blackman")
+            set(stmt "cfg.proc.dopplerWindow = 'blackman';")
         else()
             # the single-pulse sub-mode of mode 0 (only its cfg.wave.singlePulse)
             set(stmt "cfg.modes.subMode = 'single'; cfg = apply_radar_mode(cfg);")

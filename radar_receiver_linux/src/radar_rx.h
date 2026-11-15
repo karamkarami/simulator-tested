@@ -102,7 +102,7 @@ typedef struct {
                               cell; Inf without the long pulse)                       */
 
     /* DDC output */
-    int     nDdc;          /* DDC samples per PRI and channel                         */
+    int     nDdc;          /* DDC samples per PRI and channel (a longer record is accepted) */
     double  fsOut_Hz;      /* DDC output rate                                         */
     PulseConfig pulse[N_PULSES];
 

@@ -5,9 +5,11 @@ receive antenna is a column of 48 elements (selectable) with digital
 beamforming (DBF) in elevation, and every PRI holds a short and a long
 sub-pulse. Everything from the 120 MHz ADC samples on the 30 MHz IF down to
 the PPI display is simulated. Each processing block is a short function in
-`src/`. All parameters are in `radar_config.m`; the waveforms and the PRF of
-each of the (at most 6) radar modes are in `modes/radar_config_mode_<k>.m`
-(see "Radar modes"). The PRF is fixed, staggered or changes from scan to scan.
+`src/`. All parameters are in `radar_config.m` and in the files of the (at
+most 6) radar modes `modes/radar_config_mode_<k>.m`: each mode has its own
+waveforms, transmit times, receive windows, PRF, STC and its own receiver
+processing chain (CFAR, tracker, windows, CPI buffer, ...; see "Radar
+modes"). The PRF is fixed, staggered or changes from scan to scan.
 
 The code needs no MATLAB toolbox (UDP streaming uses `udpport` or Java). It
 was tested with GNU Octave 8.4. The folders `radar_receiver_windows/` and
@@ -164,43 +166,66 @@ tracks (see Tests: `test_multi_scan`).
 ## Radar modes
 
 The radar has at most **6 modes** (numbers 0 ... 5). Every mode has its own
-file `modes/radar_config_mode_<k>.m` with the settings that belong to it: the
-waveforms of both sub-pulses (`cfg.wave.short`, `cfg.wave.long`: type,
-width, bandwidth, chip, compression filter, transmit time, carrier,
-on/off), the sub-pulse of its single-pulse sub-mode (`cfg.wave.singlePulse`)
-and the PRF (`cfg.prf`). `radar_config.m` (section "Radar modes") says which
-modes a program uses and which one runs:
+file `modes/radar_config_mode_<k>.m` with **everything of the receiver
+processing chain**, not only the timing:
+
+| Settings in the mode file | Fields |
+|---|---|
+| waveforms of both sub-pulses | `cfg.wave.short`, `cfg.wave.long`: type, width, bandwidth, chip, compression filter, carrier, on/off |
+| timing | transmit time `tTx_s` and receive window `rxStart_s` / `rxEnd_s` of each sub-pulse (see "PRI timeline") |
+| single-pulse sub-mode | `cfg.wave.singlePulse` |
+| instrumented range | `cfg.rx.maxRange_m` |
+| PRF | `cfg.prf` (fixed, staggered, scan to scan) |
+| input files of the processing | `cfg.files.stagger` (staggered PRIs and MTI weights), `cfg.files.scan2scan`, `cfg.files.phaseCode`, `cfg.files.mtiFir`: each mode may have its own |
+| STC | `cfg.rx.stc` (curves of both windows) |
+| pulse compression, CPI buffer, Doppler | `cfg.proc`: Taylor window, CPI length (buffer), FFT length, Doppler window (`dopplerWindow`), update rate |
+| clutter filter | `cfg.mti` |
+| CFAR | `cfg.cfar`: type, window, guard / training cells, Pfa / threshold, notch, tested ranges |
+| pruning, reports, plot extraction | `cfg.prune`, `cfg.report`, `cfg.extract` |
+| tracking | `cfg.track`: method (EKF, PMBM, TOMHT), model, errors, gates, confirmation, PMBM / TOMHT settings |
+
+Common to all modes (`radar_config.m`): the antenna, the transmitter, the
+receiver gain and noise, the ADC, the DDC, the clutter, the targets, the
+recording and the display. `radar_config_mode_0.m` explains every setting;
+the other mode files have the same settings with short comments.
+`radar_config.m` (section "Radar modes") says which modes a program uses and
+which one runs:
 
 ```matlab
 cfg.modes.available = [0 1 2];  % modes of this program (at most 6 of the numbers 0 ... 5)
 cfg.modes.active    = 0;        % mode the radar runs in (one of cfg.modes.available)
 cfg.modes.subMode   = 'dual';   % 'dual' (both sub-pulses) or 'single' (only cfg.wave.singlePulse)
-cfg = apply_radar_mode(cfg);    % the waveforms and the PRF of the active mode
+cfg = apply_radar_mode(cfg);    % every setting of the active mode
 ```
 
 Every mode has two sub-modes: **dual pulse** (`'dual'`, both sub-pulses in
 every PRI, as set in the mode file) and **single pulse** (`'single'`, only
 the sub-pulse `cfg.wave.singlePulse` of the mode; the other one is switched
-off, so with only the short pulse its receive window lasts to
-`cfg.rx.maxRange_m`).
+off, so with only the short pulse its receive window lasts to its
+`rxEnd_s` or to `cfg.rx.maxRange_m`).
 
-| Mode | Name | Sub-pulses | PRF | single-pulse sub-mode |
-|---|---|---|---|---|
-| 0 | `medium_mode` | both phase codes (P4, 25 / 150 chips of 1 us), mismatch filters | fixed 1 kHz | long pulse |
-| 1 | `lfm_mode` | both LFM (1 MHz), Taylor-windowed matched filter (the waveforms before the modes) | fixed 1 kHz | long pulse |
-| 2 ... 5 | `mode_2` ... `mode_5` | not yet defined: the settings of mode 1, to be edited | fixed 1 kHz | long pulse |
+| Mode | Name | Sub-pulses | Timing | PRF | single-pulse sub-mode |
+|---|---|---|---|---|---|
+| 0 | `medium_mode` | both phase codes (P4, 25 / 150 chips of 1 us), mismatch filters | short at 0, long at 200 us, windows from the pulse ends, to 80 km | fixed 1 kHz | long pulse |
+| 1 | `lfm_mode` | both LFM (1 MHz), Taylor-windowed matched filter (the waveforms before the modes) | as mode 0 | fixed 1 kHz | long pulse |
+| 2 | `long_range_mode` | both LFM (25 / 125 us) | short at 11 us (received 40 - 248 us), long at 321 us (received 533 - 1780 us, to 200 km) | fixed 1.8 ms | long pulse |
+| 3 ... 5 | `mode_3` ... `mode_5` | not yet defined: the settings of mode 1, to be edited | as mode 1 | fixed 1 kHz | long pulse |
+
+The processing settings of modes 0 ... 5 are all the same so far (those of
+the radar before the modes); edit them per mode.
 
 `src/apply_radar_mode.m` runs the mode file of `cfg.modes.active` and then
 applies the sub-mode. Every mode file sets the same fields (all of them), so
-selecting another mode replaces them all; a mode may set further fields of
-`cfg` (set them in every mode file then). Another mode or sub-mode in a
+selecting another mode replaces them all; a new setting of the processing goes
+into every mode file (`test_modes` checks that they all set the same fields
+and that `radar_config.m` sets none of them). Another mode or sub-mode in a
 script:
 
 ```matlab
 cfg = radar_config;
 cfg.modes.active  = 1;              % one of cfg.modes.available
 cfg.modes.subMode = 'single';
-cfg = apply_radar_mode(cfg);        % changes of cfg.wave / cfg.prf after this are kept
+cfg = apply_radar_mode(cfg);        % every setting of mode 1; changes after this are kept
 results = run_radar_sim(cfg);
 ```
 
@@ -288,7 +313,7 @@ file was built for other values (for example after you change
 | File | Purpose |
 |---|---|
 | `radar_config.m` | all user parameters |
-| `modes/radar_config_mode_<k>.m` | the settings of radar mode k = 0 ... 5 (waveforms, single-pulse sub-mode, PRF; see "Radar modes") |
+| `modes/radar_config_mode_<k>.m` | the settings of radar mode k = 0 ... 5: waveforms, transmit times, receive windows, single-pulse sub-mode, PRF, files, STC and the whole receiver processing chain (see "Radar modes") |
 | `src/apply_radar_mode.m` | runs the mode file of `cfg.modes.active` and applies the sub-mode `cfg.modes.subMode` |
 | `src/select_prf_profile.m` | scan-to-scan PRF: the slow-time settings (CPI, FFT, Doppler axis, noise gains, notch) of the PRF of a scan |
 | `export_receiver_config.m` | writes the configuration of the C receiver (`radar_receiver_<os>/config/radar_config.bin`; without MATLAB: `radar_export_config` of the receiver project) |
@@ -393,6 +418,8 @@ range-Doppler tab of the PPI follows the Doppler axis of the scan.
 
 ## PRI timeline and range coverage
 
+Mode 0 / 1 (receive windows `[]`: from the end of each pulse):
+
 | Time in the PRI | Event |
 |---|---|
 | 0 - 25 us | short pulse transmitted (`cfg.wave.short.tTx_s`); Tx leakage in the receiver |
@@ -400,24 +427,52 @@ range-Doppler tab of the PPI follows the Doppler axis of the scan.
 | 200 - 350 us | long pulse transmitted (`cfg.wave.long.tTx_s`); Tx leakage in the receiver |
 | 350 - 896 us | long-pulse receive interval, up to `cfg.rx.maxRange_m` (80 km) |
 
-The transmit times are parameters. Both sub-pulses use LFM (1 MHz) or a
-phase code (1 us chips, P4 by default, from `inputs/phase_code.mat`) on the
-same 30 MHz IF and are separated only in
+Mode 2 (transmit times and receive windows set in the mode file):
+
+| Time in the PRI | Event |
+|---|---|
+| 0 - 11 us | nothing transmitted (the short pulse starts at `cfg.wave.short.tTx_s` = 11 us) |
+| 11 - 36 us | short pulse (25 us) transmitted |
+| 40 - 248 us | short-pulse receive window (`rxStart_s`, `rxEnd_s`): 4.35 - 31.8 km |
+| 321 - 446 us | long pulse (125 us) transmitted (`cfg.wave.long.tTx_s`) |
+| 533 - 1780 us | long-pulse receive window: 31.8 - 200 km |
+
+The transmit time `tTx_s` and the receive window `[rxStart_s, rxEnd_s)` of
+each sub-pulse are parameters of the mode file (times from the PRI start).
+A window start or end that is `[]` follows the pulses: it starts at the end
+of the pulse and ends at the transmission of the long pulse (short pulse) or
+at the end of the echoes from `cfg.rx.maxRange_m` (long pulse). A window may
+not start before the end of its pulse, the short window not end after the
+transmission of the long pulse, and the record not end after the shortest
+PRI (`setup_radar` and `radar_export_config` stop with a message). Both
+sub-pulses use LFM (1 MHz) or a phase code (1 us chips, P4 by default, from
+`inputs/phase_code.mat`) on the same 30 MHz IF and are separated only in
 time. The ADC records one continuous block from the start of the PRI to the
-end of the long window, Tx leakage included. The DDC processes the whole
-block, and its output is then split: a DDC sample belongs to a sub-pulse
-when its whole filter input lies inside that sub-pulse's receive interval.
-The leakage samples are therefore never processed. The short pulse covers
-4.2 - 23.7 km and the long pulse 22.9 - 80.6 km (the long pulse is blind up
-to c x 150 us / 2 = 22.5 km). The CFAR tests every range cell of a window
-(its range window is shifted inwards at the edges, see CFAR below), so the
-short pulse is tested up to the first long-pulse cell (handover at 22.9 km);
-its cells beyond that are only CFAR training cells. `cfg.cfar.short` and
-`cfg.cfar.long` (`minRange_m`, `maxRange_m`) restrict the tested ranges of
-each sub-pulse further. The latest long-pulse start, and with it the
-instrumented range, is limited by the shortest PRI; `setup_radar` stops with
-an error when a receive interval is too short for the filters and the CFAR
-window.
+end of the last receive window (the end of the long window, plus half the
+input span of a DDC sample when `rxEnd_s` is set), Tx leakage included. The
+DDC processes the whole block, and its output is then split: only the receive
+windows are taken out of it and processed. With a set start / end a DDC
+sample belongs to the window when its time (the centre of its filter input)
+lies in it; with `[]` when its whole filter input lies inside the receive
+interval, so that the leakage samples are never processed. The range cells of
+a sub-pulse are the echoes that lie whole inside its window: delays
+`rxStart_s - tTx_s` ... `rxEnd_s - tTx_s - width_s` (mode 2: short 4.35 -
+31.8 km, long 31.8 - 200 km, handover without a gap). The C receiver accepts
+DDC records longer than the configured one (for example the DDC output of the
+whole PRI) and takes only the receive windows out of them.
+
+In modes 0 / 1 the short pulse covers 4.2 - 23.7 km and the long pulse 22.9 -
+80.6 km (the long pulse is blind up to c x 150 us / 2 = 22.5 km). The CFAR
+tests every range cell of a window (its range window is shifted inwards at
+the edges, see CFAR below), so the short pulse is tested up to the first
+long-pulse cell (handover at 22.9 km); its cells beyond that are only CFAR
+training cells. `cfg.cfar.short` and `cfg.cfar.long` (`minRange_m`,
+`maxRange_m`) restrict the tested ranges of each sub-pulse further. The
+latest long-pulse start, and with it the instrumented range, is limited by
+the shortest PRI; `setup_radar` stops with an error when a receive interval
+is too short for the filters and the CFAR window. The STC attenuates from the
+end of each pulse to the next transmission, as a function of the time since
+the end of the pulse (`cfg.rx.stc`), whatever the receive windows.
 
 Because both sub-pulses share the IF, the short-pulse echo of a target
 beyond 52.5 km also falls into the long-pulse window. The long-pulse matched
@@ -673,7 +728,12 @@ there, at the same beam and Doppler, behind very strong far targets.
   (114 -> 128). Staggered PRF: the stagger MTI weights from the file, then
   de-interleaving into 4 rows of 28 samples. Each row is sampled every
   sum(PRI); it gets a Hamming window and a 32-point FFT (the next power of 2
-  of 28), and |X|^2 is averaged over the rows.
+  of 28), and |X|^2 is averaged over the rows. The window is a setting of
+  the mode (`cfg.proc.dopplerWindow`: `'hamming'` (default), `'hann'`,
+  `'blackman'` or `'rect'`); the MTI notch that the CFAR does not test is
+  `cfg.cfar.notchWidth` times its mainlobe (+-2, +-2, +-3, +-1 bins times
+  nfft / samples). It is exported with the Doppler window (`dopWindow`), so
+  the C receiver needs no change for it.
 * **CFAR:** one of four detectors (`cfg.cfar.type`) with one of three
   windows (`cfg.cfar.method`), each window with its own guard and training
   cells and Pfa (or a fixed threshold `threshold_dB`). The detector is the
@@ -1286,11 +1346,12 @@ budget.
 | `test_tracker_pmbm` | PMBM tracker with IMM-UKF on synthetic plots (target positions from `target_state`, plots at the antenna looks, errors of `cfg.track`, folded radial velocity), 3-D and 2-D, against the EKF on the same plots: six targets with 8 false plots per scan (fixed and staggered PRF): one confirmed track per target, no false track; a 4 deg/s turn: one track, smaller position error than the EKF, CT dominant in the turn; a 6 m/s^2 acceleration: one track, CA dominant, smaller velocity error than the EKF; Pd 0.7 with 30 false plots per scan: every target detected in the last 3 scans tracked, at most one false track; two targets 200 m apart and two crossing targets: no merge, no swap; track termination after the missed scans; speed gate; the 13 challenge targets with detections from the SNR budget: every target detected in the last 3 scans tracked, no false track |
 | `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA, with and without the radial velocity: one confirmed track per target, close to it, no false track; the radial velocity lowers the velocity error after two scans; staggered PRF (folded plot velocities): the track radial velocity is unfolded; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |
 | `test_peak_interpolation` | peak interpolation: a peak that is Gaussian in Doppler and across the beams gives its exact fractional Doppler bin (radial velocity) and beam (elevation); the Doppler axis wraps; the lowest beam keeps its centre; with the options off the bin and beam centres stay (the C `test_cfar` checks the same in `processor.c`) |
-| `test_new_options` | the options of this revision: `cfg.proc.cpiMode` auto / manual; `cfg.mti.maxRange_m` (a stationary echo cancelled before the limit and kept beyond it, a flat noise floor on both sides); the long pulse off (the short pulse to 80.6 km, a target at 50 km as a short-pulse plot), the short pulse off (blind below 22.9 km, long-pulse plots only); the sub-pulses on 165 / 175 MHz (IF 30 MHz for both, LO 135 / 145 MHz, echo spectra at the ADC on 30 MHz and the short-pulse echo in the long window on 20 MHz, the radial velocity of each plot on its own carrier within one Doppler bin, the DBF beams scaled by fc / fc_Hz); `cfg.io.saveMf` / `saveDoppler` (one file per PRI / per CPI update, block sizes, `[]` for a sub-pulse that is off); the PPI video noise floor over a mountain sector (0.5 dB); `radar_export_config` writes the same records as `export_receiver_config` for all of them and the TOMHT tracker |
+| `test_new_options` | the options of this revision: `cfg.proc.cpiMode` auto / manual; `cfg.mti.maxRange_m` (a stationary echo cancelled before the limit and kept beyond it, a flat noise floor on both sides); the long pulse off (the short pulse to 80.6 km, a target at 50 km as a short-pulse plot), the short pulse off (blind below 22.9 km, long-pulse plots only); the sub-pulses on 165 / 175 MHz (IF 30 MHz for both, LO 135 / 145 MHz, echo spectra at the ADC on 30 MHz and the short-pulse echo in the long window on 20 MHz, the radial velocity of each plot on its own carrier within one Doppler bin, the DBF beams scaled by fc / fc_Hz); `cfg.io.saveMf` / `saveDoppler` (one file per PRI / per CPI update, block sizes, `[]` for a sub-pulse that is off); the PPI video noise floor over a mountain sector (0.5 dB); `radar_export_config` writes the same records as `export_receiver_config` for all of them, the TOMHT tracker, the Blackman Doppler window, a short pulse at 11 us with set receive windows and radar mode 2 |
 | `test_tracker_tomht` | the cases of `test_tracker_pmbm` with the TOMHT tracker (`test_tracker_pmbm('tomht')`), and the C TOMHT tracker on the same calls |
-| `test_generate_ddc_c` | the C program `radar_generate_ddc` against `generate_ddc_files.m`: equal files without noise (2 / 4 MHz, other carriers, long pulse off, phase codes), equal clutter with fixed reflectivities, the same power of random clutter and noise, reproducible with any number of threads, the six targets generated in C detected by the C receiver |
+| `test_generate_ddc_c` | the C program `radar_generate_ddc` against `generate_ddc_files.m`: equal files without noise (2 / 4 MHz, other carriers, long pulse off, phase codes, radar mode 2 with its transmit times and receive windows), equal clutter with fixed reflectivities, the same power of random clutter and noise, reproducible with any number of threads, the six targets generated in C detected by the C receiver |
 | `test_mti_fir` | clutter filter option: the FIR file instead of [1 -2 1], CPI - (L - 1) outputs, deeper notch than the canceller, flat noise floor after the noise gain of every bin, one row for every stagger position or one row per position, invalid files refused, `mtiCoeffs` and `mtiType` exported |
-| `test_c_receiver(mode, ..., cfarMethod, cfarType, trackMethod)` | the six-target scenario streamed over UDP to the C receiver (`radar_receiver_<os>/`) with the given CFAR window, detector and tracker: its plots and track updates must match MATLAB; the recorded stream is replayed to check repeatability and speed |
+| `test_c_receiver(mode, ..., cfarMethod, cfarType, trackMethod, radarMode)` | the six-target scenario streamed over UDP to the C receiver (`radar_receiver_<os>/`) with the given PRF mode (`'fixed'`, `'staggered'`, `'scan2scan'`), CFAR window, detector, tracker and radar mode (default 1; 2: short pulse at 11 us, set receive windows): its plots and track updates must match MATLAB; the recorded stream is replayed to check repeatability and speed |
+| `test_modes` | radar modes: the defaults (modes 0, 1, 2, mode 0 active, dual); another mode and the single-pulse sub-mode; invalid modes refused; the scan-to-scan PRF (settings per PRF, schedule, header, a target in two scans); `cfg.cfar.maxPfa`; every mode file sets the same settings (the whole processing chain) and `radar_config.m` none; `apply_radar_mode` replaces changed settings; a mode of its own with another CFAR, tracker, model, Doppler window, stagger file, CPI and STC gives exactly these; mode 2: the DDC samples of the receive windows lie in them, the range cells follow from the windows and transmit times (no gap at the handover), the PRI header carries the windows, invalid windows refused, a simulation finds a target in each window at its true range and velocity; the Doppler windows (Hann, Blackman, rectangular) and their MTI notch widths |
 
 Results of this revision (Octave 8.4, 4 vCPUs): `test_new_options`,
 `test_tracker_tomht` (every case; the C TOMHT tracker equals MATLAB in all

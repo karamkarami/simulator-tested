@@ -37,6 +37,7 @@ cfg.ant.nElements = 1;
 cfg.clutter.enable = false;
 for p = {'short', 'long'}
     cfg.wave.(p{1}).type = 'phasecode';
+    cfg.wave.(p{1}).compression = 'matched';            % (mode 0 has mismatch filters: cDef below)
 end
 
 %% 1) default file
