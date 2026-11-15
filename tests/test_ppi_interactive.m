@@ -156,7 +156,7 @@ sys3 = ppi_update(ppi, sys2, 102, 12.2, 2, p, dets);
 ok = check(sys3.cfar.alpha == sys2.cfar.alpha, 'the request is applied once') && ok;
 ppi_callbacks('cfar', fig, NaN);
 sys4 = ppi_update(ppi, sys3, 103, 12.3, 2, p, dets);
-ok = check(sys4.cfar.alpha == sys3.cfar.alpha && ~isempty(strfind(get(S.h.ui.cfarInfo, 'String'), 'enter 0 ... 50 dB')), ...
+ok = check(sys4.cfar.alpha == sys3.cfar.alpha && ~isempty(regexp(get(S.h.ui.cfarInfo, 'String'), 'enter \d+\.\d\d \.\.\. 50 dB', 'once')), ...
            'an invalid value is refused') && ok;
 ppi_callbacks('cfar', fig, dB0);                           % Default button
 sys5 = ppi_update(ppi, sys4, 104, 12.4, 2, p, dets);
