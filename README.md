@@ -319,6 +319,7 @@ file was built for other values (for example after you change
 | `export_receiver_config.m` | writes the configuration of the C receiver (`radar_receiver_<os>/config/radar_config.bin`; without MATLAB: `radar_export_config` of the receiver project) |
 | `run_radar_sim.m` | main loop: generation, recording, DDC/streaming, processing, display |
 | `replay_ddc_udp.m` | sends recorded DDC files (`ddc_<n>.mat`) over UDP, unchanged, with the original PRI timing |
+| `src/swlog_to_ddc.m` | converts a DDC log of the real receiver (`.swlog`, format of `SwlogReader.m`: 84-byte header + float32 I/Q of 4 channels, log modes 0 ... 3) into DDC files `ddc_<n>.mat` of this project (one per PRI, int16, the receive windows at their place in the DDC record, header from the PRF counter and azimuth); options for the PRI, DDC rate, t0, channels, scale. The receiver configuration must match (channels, DDC rate, record length, windows) |
 | `generate_ddc_files.m` | simulates every PRI only up to the DDC output and saves the DDC files, the PRIs in parallel (`parfor`) |
 | `make_input_files.m` | default input .mat files |
 | `src/setup_radar.m` | derives the PRI timeline, NCO, DDC segments, pulse compression filters (matched / mismatch), axes, CPI length, FFT length, CFAR factor ... |
