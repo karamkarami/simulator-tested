@@ -36,7 +36,6 @@ cfg.modes.name = 'long_range_mode';     % name of the mode (run summary, receive
 % receive windows out of it (the samples while transmitting and between the windows are not used).
 % Range cells of a sub-pulse: the echoes that lie whole inside its window, i.e. the delays
 % rxStart_s - tTx_s ... rxEnd_s - tTx_s - width_s.
-cfg.wave.maxCodes           = 4;        % phase codes: largest number of code / mismatch pairs per sub-pulse
 cfg.wave.short.enable       = true;     % short sub-pulse on/off (false: only the long pulse)
 cfg.wave.short.fc_Hz        = [];       % its carrier [Hz] ([] = cfg.fc)
 cfg.wave.short.type         = 'lfm';    % 'lfm' or 'phasecode' (code from cfg.files.phaseCode)
@@ -44,7 +43,8 @@ cfg.wave.short.width_s      = 25e-6;    % pulse width [s]
 cfg.wave.short.bandwidth_Hz = 1e6;      % LFM sweep bandwidth [Hz]
 cfg.wave.short.chip_s       = 1e-6;     % phase-code chip length [s] (width_s/chip_s chips)
 cfg.wave.short.compression  = 'matched'; % phase code: 'matched' or 'mismatch' filter (LFM: 'matched')
-cfg.wave.short.codeIndex    = 1;        % phase code: code / mismatch pair of cfg.files.phaseCode (1 ... maxCodes)
+cfg.wave.short.availableCodes = [1 2 3 4]; % phase code: pairs of cfg.files.phaseCode this mode may use
+cfg.wave.short.codeIndex    = 1;        % phase code: code / mismatch pair of cfg.files.phaseCode (one of availableCodes)
 cfg.wave.short.mismatchLength = [];     % coefficients (one per chip) of the mismatch filter in the default
                                         % phase-code file ([] = chips + 10, at most 2x the chips)
 cfg.wave.short.tTx_s        = 11e-6;    % transmit time in the PRI [s]
@@ -58,6 +58,7 @@ cfg.wave.long.width_s       = 125e-6;
 cfg.wave.long.bandwidth_Hz  = 1e6;
 cfg.wave.long.chip_s        = 1e-6;
 cfg.wave.long.compression   = 'matched';
+cfg.wave.long.availableCodes = [1 2 3 4];
 cfg.wave.long.codeIndex     = 1;
 cfg.wave.long.mismatchLength = [];
 cfg.wave.long.tTx_s         = 321e-6;   % transmit time in the PRI [s]
@@ -74,8 +75,8 @@ cfg.rx.ddcT0_s   = [];           % manualDdc: time of the first DDC sample in th
 % 'scan2scan' (one PRF per antenna scan from cfg.files.scan2scan, constant during the scan)
 cfg.prf.mode  = 'fixed';
 cfg.prf.pri_s = 1.8e-3;                 % PRI in fixed mode [s] (at least the end of the last receive window)
-cfg.prf.staggerSet     = 1;     % staggered PRF: pair (T, w) of cfg.files.stagger (1 ... maxStaggerSets)
-cfg.prf.maxStaggerSets = 4;     % staggered PRF: largest number of (T, w) pairs
+cfg.prf.availableStaggerSets = [1 2 3 4]; % staggered PRF: (T, w) pairs of cfg.files.stagger this mode may use
+cfg.prf.staggerSet           = 1;         % staggered PRF: pair in use (one of availableStaggerSets)
 
 %% Input files of this mode (each mode may have its own files)
 cfg.files.stagger   = fullfile(root, 'inputs', 'stagger_prf.mat');    % staggered PRIs + MTI weights (cfg.prf.mode = 'staggered')

@@ -14,7 +14,8 @@ function make_input_files(cfg, which)
 %     scan2scan_prf.mat   : PRFs of the antenna scans (prf_Hz, used in turn) for
 %                           cfg.prf.mode = 'scan2scan'
 %     phase_code.mat      : phase codes of the short and the long sub-pulse
-%                           (cfg.wave.maxCodes per sub-pulse, the first P4,
+%                           (pairs 1 ... the largest of cfg.wave.<pulse>.
+%                           availableCodes per sub-pulse, the first P4,
 %                           width_s/chip_s chips) and their mismatch filters
 %                           (one coefficient per chip)
 %     mti_fir.mat         : FIR clutter filter along slow time (coeffs), used with
@@ -106,14 +107,17 @@ end
 
 %% 4) Staggered PRF: pairs of a PRI sequence T and its time-varying 3-pulse MTI weights w
 % priVector_s_<k> [K x 1] and mtiCoeffs_<k> [K x 3] (one row per stagger position: the weights of
-% the MTI outputs whose oldest pulse has that position), k = 1 ... cfg.prf.maxStaggerSets (default
-% 1): the mode selects pair cfg.prf.staggerSet. Pair 1 is the stagger of the radar before the
+% the MTI outputs whose oldest pulse has that position: length(T) weight sequences, the MTI is time
+% varying), k = 1 ... max(cfg.prf.availableStaggerSets) (default 1): the mode may use the pairs
+% availableStaggerSets and selects pair cfg.prf.staggerSet. Pair 1 is the stagger of the radar before the
 % pairs; the others are further sequences (the same mean PRI of about 1 ms, other blind speeds).
-% A file of your own may hold fewer pairs (at least 1, numbered from 1) of any lengths, or only
-% priVector_s and mtiCoeffs (one pair).
+% A file of your own holds at least the pairs of availableStaggerSets (any numbers and lengths), or
+% only priVector_s and mtiCoeffs (pair 1).
 if doAll || strcmpi(which, 'stagger')
     maxSets = 1;
-    if isfield(cfg.prf, 'maxStaggerSets') && ~isempty(cfg.prf.maxStaggerSets), maxSets = cfg.prf.maxStaggerSets; end
+    if isfield(cfg.prf, 'availableStaggerSets') && ~isempty(cfg.prf.availableStaggerSets)
+        maxSets = max(cfg.prf.availableStaggerSets(:));
+    end
     seqs = {[920; 1000; 960; 1040], [940; 1000; 920; 1060], [960; 1020; 930; 1050; 990], [920; 980; 1040; 1100], ...
             [930; 1010; 970; 1050; 950; 1030]};
     out = struct();
@@ -146,12 +150,13 @@ end
 % shortCode_<k>, longCode_<k> [nChips x 1]: complex chip values, the first chip is sent first;
 % shortMismatch_<k>, longMismatch_<k> [K x 1]: the mismatch filter of code k with one
 % coefficient per chip, as a convolution filter (output = conv(code, filter)); its main peak is
-% in the middle of the full convolution. k = 1 ... cfg.wave.maxCodes (default 1); the mode selects
-% the pair cfg.wave.<pulse>.codeIndex. Code 1 is P4; the others are polyphase codes with the phases
+% in the middle of the full convolution. k = 1 ... the largest number of cfg.wave.short.availableCodes
+% and cfg.wave.long.availableCodes (default 1); the mode may use the pairs availableCodes of each
+% sub-pulse and selects the pair cfg.wave.<pulse>.codeIndex. Code 1 is P4; the others are polyphase codes with the phases
 % pi*r*m^2/N - pi*m (r coprime to N; r = 1: P4), the roots r chosen one after the other among the
 % first 16 so that the echo of any other code of the set through the mismatch filter of a code
-% stays as far as possible below its own peak (agile_codes below). A file of your own may hold fewer pairs (numbered from 1)
-% or only <pulse>Code and <pulse>Mismatch (one pair). Filter length K =
+% stays as far as possible below its own peak (agile_codes below). A file of your own holds at
+% least the pairs of availableCodes (any numbers), or only <pulse>Code and <pulse>Mismatch (pair 1). Filter length K =
 % cfg.wave.<pulse>.mismatchLength (any K >= nChips, e.g. 3*nChips; the extra coefficients are
 % split between both ends), by default nChips + 2*pad with pad = min(5, nChips/2): more padding
 % gives little here (25 chips: PSL -25.9 dB with 5, -26.0 dB with 10). Any length works with the
@@ -164,7 +169,12 @@ if doAll || strcmpi(which, 'phaseCode')
     madeFor = struct();
     out = struct();
     maxCodes = 1;
-    if isfield(cfg.wave, 'maxCodes') && ~isempty(cfg.wave.maxCodes), maxCodes = cfg.wave.maxCodes; end
+    for i = 1:2
+        wv = cfg.wave.(names{i});
+        if isfield(wv, 'availableCodes') && ~isempty(wv.availableCodes)
+            maxCodes = max(maxCodes, max(wv.availableCodes(:)));
+        end
+    end
     for i = 1:2
         wv = cfg.wave.(names{i});
         N = round(wv.width_s / wv.chip_s);

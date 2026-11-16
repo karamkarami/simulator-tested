@@ -46,12 +46,17 @@ function ok = test_modes()
 %      a missing nDdc, a record beyond the PRI and a set window end after the
 %      record stop with a message.
 %  12. Code agility: cfg.wave.<pulse>.codeIndex selects the code / mismatch
-%      pair of the file; a codeIndex above cfg.wave.maxCodes, a file with more
-%      pairs than maxCodes and a codeIndex above the pairs of the file stop
-%      with a message; a file with only <pulse>Code / <pulse>Mismatch is one pair.
+%      pair of the file among cfg.wave.<pulse>.availableCodes (default: the
+%      first); more available pairs rebuild the default file (the first pairs
+%      unchanged); a file of its own with any pair numbers; a file with only
+%      <pulse>Code / <pulse>Mismatch is pair 1; a codeIndex not available, an
+%      available pair missing from the file, an invalid list and the removed
+%      cfg.wave.maxCodes stop with a message.
 %  13. Stagger pairs: cfg.prf.staggerSet selects the pair (T, w) of the file
-%      (its PRIs and weights, CPI of whole periods); invalid choices and files
-%      stop with a message.
+%      among cfg.prf.availableStaggerSets (its PRIs and length(T) weight rows,
+%      CPI of whole periods); invalid choices, files (an available pair
+%      missing, w without length(T) rows) and the removed cfg.prf.maxStaggerSets
+%      stop with a message; a bad pair the mode may not use does not matter.
 %  14. Time-varying MTI weights of the staggered PRF: every output uses the
 %      row of the stagger position of its oldest pulse (direct sum); on slowly
 %      moving clutter (0.3 m/s) both null DC, but the time-varying weights
@@ -226,6 +231,7 @@ edits = {'cfg.cfar.type   = ''ca'';', 'cfg.cfar.type   = ''go'';';
          'cfg.proc.dopplerWindow = ''hamming'';', 'cfg.proc.dopplerWindow = ''hann'';';
          'cfg.prf.mode  = ''fixed'';', 'cfg.prf.mode  = ''staggered'';';
          sprintf('cfg.files.stagger   = fullfile(root, ''inputs'', ''stagger_prf.mat'');'), sprintf('cfg.files.stagger = ''%s'';', ownStagger);
+         'cfg.prf.availableStaggerSets = [1 2 3 4];', 'cfg.prf.availableStaggerSets = 1;';
          'cfg.proc.cpiMode      = ''auto'';', 'cfg.proc.cpiMode      = ''manual'';';
          'cfg.proc.cpiLength    = 114;', 'cfg.proc.cpiLength    = 88;';
          'cfg.rx.stc.enable = true;', 'cfg.rx.stc.enable = false;'};
@@ -378,69 +384,116 @@ cc = base;
 cc.files.phaseCode = fullfile(tmpd, 'codes.mat');            % (a default file of its own: the inputs stay)
 f = [];
 codesOk = true;
-for k = 1:cc.wave.maxCodes
-    cc.wave.short.codeIndex = k;  cc.wave.long.codeIndex = cc.wave.maxCodes + 1 - k;
+list = cc.wave.short.availableCodes;  nL = numel(list);
+for k = list
+    cc.wave.short.codeIndex = k;  cc.wave.long.codeIndex = list(nL + 1 - k);
     sk = setup_radar(cc);
     if isempty(f), f = load(cc.files.phaseCode); end
     codesOk = codesOk && isequal(sk.wave.short.code, f.(sprintf('shortCode_%d', k))) && ...
-              isequal(sk.wave.long.code, f.(sprintf('longCode_%d', cc.wave.maxCodes + 1 - k))) && ...
-              isequal(sk.wave.short.mismatch, f.(sprintf('shortMismatch_%d', k))) && sk.wave.short.codeIndex == k;
+              isequal(sk.wave.long.code, f.(sprintf('longCode_%d', list(nL + 1 - k)))) && ...
+              isequal(sk.wave.short.mismatch, f.(sprintf('shortMismatch_%d', k))) && sk.wave.short.codeIndex == k && ...
+              isequal(sk.wave.short.availableCodes, list);
 end
-ok = report(sprintf('code agility: codeIndex 1 ... %d selects the code / mismatch pair of the file (both sub-pulses)', ...
-            cc.wave.maxCodes), codesOk) && ok;
+ok = report(sprintf('code agility: codeIndex %s selects the code / mismatch pair of the file (both sub-pulses)', ...
+            mat2str(list)), codesOk) && ok;
+c2 = cc;  c2.wave.short.availableCodes = [4 2];  c2.wave.short.codeIndex = [];
+s2 = setup_radar(c2);
+ok = report('code agility: availableCodes [4 2] without codeIndex uses pair 4 (the first)', ...
+            s2.wave.short.codeIndex == 4 && isequal(s2.wave.short.code, f.shortCode_4)) && ok;
+c6 = cc;  c6.wave.short.availableCodes = 1:6;  c6.wave.short.codeIndex = 6;
+s6 = setup_radar(c6);  f6 = load(c6.files.phaseCode);
+same = true;
+for k = 1:4, same = same && isequal(f6.(sprintf('shortCode_%d', k)), f.(sprintf('shortCode_%d', k))); end
+ok = report('code agility: availableCodes 1 ... 6 rebuilds the default file with 6 pairs (pairs 1 ... 4 unchanged)', ...
+            same && isfield(f6, 'shortCode_6') && ~isfield(f6, 'shortCode_7') && f6.madeFor.nCodes == 6 && ...
+            isequal(s6.wave.short.code, f6.shortCode_6)) && ok;
 u = rmfield(f, 'madeFor');
 two = struct('shortCode_1', u.shortCode_1, 'shortMismatch_1', u.shortMismatch_1, 'shortCode_2', u.shortCode_2, ...
              'shortMismatch_2', u.shortMismatch_2, 'longCode_1', u.longCode_1, 'longMismatch_1', u.longMismatch_1, ...
              'longCode_2', u.longCode_2, 'longMismatch_2', u.longMismatch_2);
 one = struct('shortCode', u.shortCode_3, 'shortMismatch', u.shortMismatch_3, 'longCode', u.longCode_1, 'longMismatch', u.longMismatch_1);
+gap = struct('shortCode_2', u.shortCode_2, 'shortMismatch_2', u.shortMismatch_2, 'shortCode_7', u.shortCode_3, ...
+             'shortMismatch_7', u.shortMismatch_3, 'longCode_1', u.longCode_1, 'longMismatch_1', u.longMismatch_1);
 save(fullfile(tmpd, 'all.mat'), '-struct', 'u');  save(fullfile(tmpd, 'two.mat'), '-struct', 'two');
-save(fullfile(tmpd, 'one.mat'), '-struct', 'one');
+save(fullfile(tmpd, 'one.mat'), '-struct', 'one');  save(fullfile(tmpd, 'gap.mat'), '-struct', 'gap');
 c1 = base;  c1.files.phaseCode = fullfile(tmpd, 'one.mat');
+c1.wave.short.availableCodes = 1;  c1.wave.long.availableCodes = 1;  c1.wave.short.codeIndex = 1;  c1.wave.long.codeIndex = 1;
 s1 = setup_radar(c1);
-ok = report('code agility: a file with only shortCode / shortMismatch holds one pair', ...
+ok = report('code agility: a file with only shortCode / shortMismatch holds pair 1', ...
             isequal(s1.wave.short.code, u.shortCode_3) && s1.wave.short.codeIndex == 1) && ok;
-bad = {'all.mat', 4, 5, 'cfg.wave.short.codeIndex';  'all.mat', 2, 1, 'more than cfg.wave.maxCodes';
-       'two.mat', 4, 3, 'holds only 2';  'one.mat', 4, 2, 'holds only 1'};
+cg = c1;  cg.files.phaseCode = fullfile(tmpd, 'gap.mat');  cg.wave.short.availableCodes = [2 7];  cg.wave.short.codeIndex = 7;
+sg = setup_radar(cg);
+ok = report('code agility: a file of its own with the pairs 2 and 7 (availableCodes [2 7], codeIndex 7)', ...
+            isequal(sg.wave.short.code, u.shortCode_3) && sg.wave.short.codeIndex == 7) && ok;
+% {file, short.availableCodes, short.codeIndex, long.availableCodes, part of the message}
+bad = {'all.mat', 1:4, 5, 1:4, 'is not one of cfg.wave.short.availableCodes';
+       'all.mat', [1 3], 2, 1:4, 'is not one of cfg.wave.short.availableCodes';
+       'two.mat', 1:3, 1, [1 2], 'holds pair 3, but';
+       'one.mat', [1 2], 1, 1, 'holds pair 2, but';
+       'two.mat', [1 2], 1, 1:4, 'cfg.wave.long.availableCodes holds pair 3';
+       'all.mat', [0 1], 1, 1:4, 'cfg.wave.short.availableCodes must hold';
+       'all.mat', [1 1], 1, 1:4, 'cfg.wave.short.availableCodes must hold'};
 for i = 1:size(bad, 1)
     cb = base;  cb.files.phaseCode = fullfile(tmpd, bad{i, 1});
-    cb.wave.maxCodes = bad{i, 2};  cb.wave.short.codeIndex = bad{i, 3};
+    cb.wave.short.availableCodes = bad{i, 2};  cb.wave.short.codeIndex = bad{i, 3};
+    cb.wave.long.availableCodes = bad{i, 4};  cb.wave.long.codeIndex = 1;
     msg = '';
     try, setup_radar(cb); catch err, msg = err.message; end
-    ok = report(sprintf('code agility refused: %s, maxCodes %d, codeIndex %d', bad{i, 1}, bad{i, 2}, bad{i, 3}), ...
-                ~isempty(strfind(msg, bad{i, 4}))) && ok;
+    ok = report(sprintf('code agility refused: %s, availableCodes %s, codeIndex %d, long %s', bad{i, 1}, ...
+                mat2str(bad{i, 2}), bad{i, 3}, mat2str(bad{i, 4})), ~isempty(strfind(msg, bad{i, 5}))) && ok;
 end
+cb = base;  cb.wave.maxCodes = 4;
+msg = '';
+try, setup_radar(cb); catch err, msg = err.message; end
+ok = report('code agility: the removed cfg.wave.maxCodes is refused', ~isempty(strfind(msg, 'cfg.wave.maxCodes no longer exists'))) && ok;
 
 %% 13) stagger pairs (T, w)
 cs = base;  cs.prf.mode = 'staggered';
 cs.files.stagger = fullfile(tmpd, 'stagger.mat');            % (a default file of its own)
 st = [];
 setsOk = true;
-for k = 1:cs.prf.maxStaggerSets
+for k = cs.prf.availableStaggerSets
     cs.prf.staggerSet = k;
     sk = setup_radar(cs);
     if isempty(st), st = load(cs.files.stagger); end
     T = st.(sprintf('priVector_s_%d', k));  w = st.(sprintf('mtiCoeffs_%d', k));
     setsOk = setsOk && isequal(sk.pri(:), T(:)) && isequal(sk.mtiCoeffs, w) && sk.staggerSet == k && ...
-             mod(sk.cpi.length, numel(T)) == 0 && sk.cpi.nRows == numel(T);
+             mod(sk.cpi.length, numel(T)) == 0 && sk.cpi.nRows == numel(T) && size(w, 1) == numel(T) && ...
+             isequal(sk.availableStaggerSets, cs.prf.availableStaggerSets);
 end
-ok = report(sprintf('stagger pairs: staggerSet 1 ... %d selects T and w of the file (PRIs, weights, rows)', ...
-            cs.prf.maxStaggerSets), setsOk) && ok;
+ok = report(sprintf('stagger pairs: staggerSet %s selects T and w (length(T) rows) of the file (PRIs, weights, rows)', ...
+            mat2str(cs.prf.availableStaggerSets)), setsOk) && ok;
+c3 = cs;  c3.prf.availableStaggerSets = [3 1];  c3.prf.staggerSet = [];
+s3 = setup_radar(c3);
+ok = report('stagger pairs: availableStaggerSets [3 1] without staggerSet uses pair 3 (the first)', ...
+            s3.staggerSet == 3 && isequal(s3.pri(:), st.priVector_s_3(:))) && ok;
 v = rmfield(st, 'madeFor');
 sv = struct('priVector_s_1', v.priVector_s_1, 'mtiCoeffs_1', v.mtiCoeffs_1, 'priVector_s_2', v.priVector_s_2, ...
             'mtiCoeffs_2', v.mtiCoeffs_2);
 save(fullfile(tmpd, 'st_all.mat'), '-struct', 'v');  save(fullfile(tmpd, 'st_two.mat'), '-struct', 'sv');
 bw = v;  bw.mtiCoeffs_2 = bw.mtiCoeffs_2(1:2, :);
 save(fullfile(tmpd, 'st_badw.mat'), '-struct', 'bw');
-bad = {'st_all.mat', 4, 5, 'cfg.prf.staggerSet';  'st_all.mat', 3, 1, 'more than cfg.prf.maxStaggerSets';
-       'st_two.mat', 4, 3, 'holds only 2';  'st_badw.mat', 4, 2, 'rows'};
+c3 = cs;  c3.files.stagger = fullfile(tmpd, 'st_badw.mat');  c3.prf.availableStaggerSets = [1 3];  c3.prf.staggerSet = 3;
+s3 = setup_radar(c3);
+ok = report('stagger pairs: a pair with bad weights that the mode may not use (2) does not matter', s3.staggerSet == 3) && ok;
+% {file, availableStaggerSets, staggerSet, part of the message}
+bad = {'st_all.mat', 1:4, 5, 'is not one of cfg.prf.availableStaggerSets';
+       'st_two.mat', 1:3, 1, 'holds pair 3, but';
+       'st_badw.mat', [1 2], 1, 'needs 4 rows, one weight sequence per stagger position';
+       'st_all.mat', [2 -1], 2, 'cfg.prf.availableStaggerSets must hold'};
 for i = 1:size(bad, 1)
     cb = cs;  cb.files.stagger = fullfile(tmpd, bad{i, 1});
-    cb.prf.maxStaggerSets = bad{i, 2};  cb.prf.staggerSet = bad{i, 3};
+    cb.prf.availableStaggerSets = bad{i, 2};  cb.prf.staggerSet = bad{i, 3};
     msg = '';
     try, setup_radar(cb); catch err, msg = err.message; end
-    ok = report(sprintf('stagger pairs refused: %s, maxStaggerSets %d, staggerSet %d', bad{i, 1}, bad{i, 2}, bad{i, 3}), ...
-                ~isempty(strfind(msg, bad{i, 4}))) && ok;
+    ok = report(sprintf('stagger pairs refused: %s, availableStaggerSets %s, staggerSet %d', bad{i, 1}, ...
+                mat2str(bad{i, 2}), bad{i, 3}), ~isempty(strfind(msg, bad{i, 4}))) && ok;
 end
+cb = cs;  cb.prf.maxStaggerSets = 4;
+msg = '';
+try, setup_radar(cb); catch err, msg = err.message; end
+ok = report('stagger pairs: the removed cfg.prf.maxStaggerSets is refused', ...
+            ~isempty(strfind(msg, 'cfg.prf.maxStaggerSets no longer exists'))) && ok;
 
 %% 14) time-varying MTI weights
 cs.prf.staggerSet = 1;

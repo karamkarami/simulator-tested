@@ -57,12 +57,12 @@ cfg.modes.name = 'medium_mode';         % name of the mode (run summary, receive
 % more than the pulse bandwidth apart also keep the short-pulse echo of far targets out of the
 % long window (the DDC filters reject it).
 %
-% Code agility: cfg.files.phaseCode holds up to cfg.wave.maxCodes code / mismatch-filter pairs per
-% sub-pulse (<pulse>Code_<k>, <pulse>Mismatch_<k>, k = 1, 2, ...; the default file: maxCodes pairs,
-% code 1 P4, the others polyphase codes of other roots); cfg.wave.<pulse>.codeIndex selects the pair
-% of each sub-pulse. A file with more pairs than maxCodes, or a codeIndex above maxCodes or above
-% the pairs of the file, stops with a message.
-cfg.wave.maxCodes           = 4;        % phase codes: largest number of code / mismatch pairs per sub-pulse
+% Code agility: cfg.files.phaseCode holds code / mismatch-filter pairs per sub-pulse
+% (<pulse>Code_<k>, <pulse>Mismatch_<k>, k = 1, 2, ...; the default file: pairs 1 ... the largest
+% number of availableCodes, code 1 P4, the others polyphase codes of other roots).
+% cfg.wave.<pulse>.availableCodes lists the pairs this mode may use for the sub-pulse and
+% cfg.wave.<pulse>.codeIndex (one of them) selects the pair in use. A pair of availableCodes
+% missing from the file, or a codeIndex not in availableCodes, stops with a message.
 cfg.wave.short.enable       = true;     % short sub-pulse on/off (false: only the long pulse)
 cfg.wave.short.fc_Hz        = [];       % its carrier [Hz] ([] = cfg.fc)
 cfg.wave.short.type         = 'phasecode'; % 'lfm' or 'phasecode' (code from cfg.files.phaseCode)
@@ -70,7 +70,8 @@ cfg.wave.short.width_s      = 25e-6;    % pulse width [s]
 cfg.wave.short.bandwidth_Hz = 1e6;      % LFM sweep bandwidth [Hz]
 cfg.wave.short.chip_s       = 1e-6;     % phase-code chip length [s] (width_s/chip_s chips)
 cfg.wave.short.compression  = 'mismatch'; % phase code: 'matched' or 'mismatch' filter (LFM: 'matched')
-cfg.wave.short.codeIndex    = 1;        % phase code: code / mismatch pair of cfg.files.phaseCode (1 ... maxCodes)
+cfg.wave.short.availableCodes = [1 2 3 4]; % phase code: pairs of cfg.files.phaseCode this mode may use
+cfg.wave.short.codeIndex    = 1;        % phase code: code / mismatch pair of cfg.files.phaseCode (one of availableCodes)
 cfg.wave.short.mismatchLength = [];     % coefficients (one per chip) of the mismatch filter in the default
                                         % phase-code file ([] = chips + 10, at most 2x the chips)
 cfg.wave.short.tTx_s        = 0;        % transmit time in the PRI [s]
@@ -84,6 +85,7 @@ cfg.wave.long.width_s       = 150e-6;
 cfg.wave.long.bandwidth_Hz  = 1e6;
 cfg.wave.long.chip_s        = 1e-6;
 cfg.wave.long.compression   = 'mismatch';
+cfg.wave.long.availableCodes = [1 2 3 4];
 cfg.wave.long.codeIndex     = 1;
 cfg.wave.long.mismatchLength = [];
 cfg.wave.long.tTx_s         = 200e-6;   % transmit time in the PRI [s]
@@ -115,13 +117,14 @@ cfg.rx.ddcT0_s   = [];           % manualDdc: time of the first DDC sample in th
 %               blind speeds follow the PRF of the scan.
 cfg.prf.mode  = 'fixed';
 cfg.prf.pri_s = 1e-3;                   % PRI in fixed mode [s] (at least the end of the last receive window)
-% Staggered PRF: cfg.files.stagger holds up to maxStaggerSets pairs of a PRI sequence T
-% (priVector_s_<k>) and its MTI weights w (mtiCoeffs_<k>: one row per stagger position, applied
-% time-varying: each MTI output uses the row of the stagger position of its oldest pulse);
-% staggerSet selects the pair. More pairs in the file than maxStaggerSets, or a staggerSet above
-% maxStaggerSets or above the pairs of the file, stops with a message.
-cfg.prf.staggerSet     = 1;     % staggered PRF: pair (T, w) of cfg.files.stagger (1 ... maxStaggerSets)
-cfg.prf.maxStaggerSets = 4;     % staggered PRF: largest number of (T, w) pairs
+% Staggered PRF: cfg.files.stagger holds pairs of a PRI sequence T (priVector_s_<k>) and its MTI
+% weights w (mtiCoeffs_<k>). The MTI is time varying, so w has length(T) rows, one weight sequence
+% per stagger position: each MTI output uses the row of the stagger position of its oldest pulse.
+% availableStaggerSets lists the pairs this mode may use and staggerSet (one of them) selects the
+% pair in use. A pair of availableStaggerSets missing from the file, w without length(T) rows, or a
+% staggerSet not in availableStaggerSets, stops with a message.
+cfg.prf.availableStaggerSets = [1 2 3 4]; % staggered PRF: (T, w) pairs of cfg.files.stagger this mode may use
+cfg.prf.staggerSet           = 1;         % staggered PRF: pair in use (one of availableStaggerSets)
 
 %% Input files of this mode (each mode may have its own files)
 cfg.files.stagger   = fullfile(root, 'inputs', 'stagger_prf.mat');    % staggered PRIs + MTI weights (cfg.prf.mode = 'staggered')

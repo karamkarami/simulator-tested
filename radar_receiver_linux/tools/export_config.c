@@ -510,40 +510,53 @@ static const MatVar *mat_var(const MatFile *m, const char *name, const char *key
     return v;
 }
 
-/* A whole-number setting 1 ... hi (or >= 1 when hi = 0) with a default for a missing or empty field. */
-static int whole_setting(const char *path, int def, int hi, const char *what)
+/* The pairs of an input file a mode may use: cfg.<path> holds 1 ... MAX_AVAILABLE different whole
+ * numbers >= 1 (missing or empty: pair 1). Returns how many; the numbers in list[]. */
+#define MAX_AVAILABLE 64
+static int available_list(const char *path, int *list, const char *what)
 {
-    const double v = num_or(path, def);
-    if (!(v >= 1) || v != floor(v) || (hi > 0 && v > hi)) {
-        if (hi > 0) fail("cfg.%s = %g must be a whole number 1 ... %d (%s).", path, v, hi, what);
-        fail("cfg.%s must be a whole number >= 1 (%s).", path, what);
+    if (!has(path) || empty(path)) { list[0] = 1; return 1; }
+    const MValue *v = field(path, 1);
+    const int n = v->type == MV_NUM ? v->rows * v->cols : 0;
+    int ok = n >= 1 && n <= MAX_AVAILABLE;
+    for (int i = 0; ok && i < n; i++) {
+        const double x = v->re[i];
+        ok = x >= 1 && x <= 1e6 && x == floor(x);
+        for (int k = 0; ok && k < i; k++) ok = list[k] != (int)x;
+        if (ok) list[i] = (int)x;
     }
-    return (int)v;
-}
-
-/* Numbered pairs of an input file: <base>_1, <base>_2, ... (n of them), or <base> alone (one pair,
- * *numbered = 0). Returns n (0: none). */
-static int count_numbered(const MatFile *m, const char *base, int *numbered)
-{
-    char nm[96];
-    int n = 0;
-    for (;;) {
-        snprintf(nm, sizeof nm, "%s_%d", base, n + 1);
-        if (!mat_get(m, nm)) break;
-        n++;
-    }
-    *numbered = n > 0;
-    if (n == 0 && mat_get(m, base)) n = 1;
+    if (!ok) fail("cfg.%s must hold 1 to %d different whole numbers >= 1 (the %s the mode may use).", path, MAX_AVAILABLE, what);
     return n;
 }
 
-/* The variable of pair k (1-based) of a numbered set. */
-static const MatVar *pair_var(const MatFile *m, const char *base, int k, int numbered, const char *key)
+static int list_max(const int *list, int n)
+{
+    int m = list[0];
+    for (int i = 1; i < n; i++) if (list[i] > m) m = list[i];
+    return m;
+}
+
+/* cfg.<path> (missing or empty: the first of the list cfg.<listPath>) must be one of the list. */
+static int chosen_from(const char *path, const int *list, int n, const char *listPath)
+{
+    const double v = has(path) && !empty(path) ? num(path) : list[0];
+    for (int i = 0; i < n; i++) if (v == list[i]) return list[i];
+    char txt[MAX_AVAILABLE * 8 + 4] = "[";
+    for (int i = 0; i < n; i++) snprintf(txt + strlen(txt), sizeof txt - strlen(txt), i ? " %d" : "%d", list[i]);
+    strcat(txt, "]");
+    fail("cfg.%s = %g is not one of cfg.%s = %s.", path, v, listPath, txt);
+    return 0;
+}
+
+/* Pair k of a numbered set of an input file: <base>_<k>, or <base> alone for pair 1 (a file with
+ * one pair). NULL when the file does not hold it. */
+static const MatVar *find_pair(const MatFile *m, const char *base, int k)
 {
     char nm[96];
-    if (numbered) snprintf(nm, sizeof nm, "%s_%d", base, k);
-    else snprintf(nm, sizeof nm, "%s", base);
-    return mat_var(m, nm, key);
+    snprintf(nm, sizeof nm, "%.80s_%d", base, k);
+    const MatVar *v = mat_get(m, nm);
+    if (!v && k == 1) v = mat_get(m, base);
+    return v && v->re ? v : NULL;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1170,7 +1183,8 @@ static void export_config(void)
     /* PRI sequence and MTI weights */
     const char *prfMode = str("prf.mode");
     int nStagger, staggered, nTaps;
-    int staggerSet = 0, maxStaggerSets = 0;              /* staggered: the (T, w) pair of cfg.files.stagger */
+    int staggerSet = 0, nAvSets = 0;                     /* staggered: the (T, w) pair of cfg.files.stagger */
+    int avSets[MAX_AVAILABLE];                           /* and the pairs the mode may use */
     double *pri, *mti;
     int nScanPrf = 0;                                    /* scan-to-scan PRF: the PRFs of the scans */
     double *scanPrf = NULL;
@@ -1205,31 +1219,36 @@ static void export_config(void)
         mti[0] = 1; mti[1] = -2; mti[2] = 1;
     } else if (same_text(prfMode, "staggered")) {
         staggered = 1;
-        /* pair cfg.prf.staggerSet of at most cfg.prf.maxStaggerSets (T: priVector_s_<k>, w: mtiCoeffs_<k>) */
-        maxStaggerSets = whole_setting("prf.maxStaggerSets", 1, 0, "the largest number of (T, w) pairs");
-        staggerSet = whole_setting("prf.staggerSet", 1, maxStaggerSets, "pair (T, w) of cfg.files.stagger, at most cfg.prf.maxStaggerSets");
-        const MadeFor mfSt[1] = { { "nSets", { maxStaggerSets }, 1 } };
+        /* pair cfg.prf.staggerSet of the pairs cfg.prf.availableStaggerSets (T: priVector_s_<k>,
+         * w: mtiCoeffs_<k>); every pair the mode may use must be in the file, w with length(T) rows
+         * (one weight sequence per stagger position: the MTI is time varying) */
+        if (has("prf.maxStaggerSets"))
+            fail("cfg.prf.maxStaggerSets no longer exists: cfg.prf.availableStaggerSets lists the (T, w) pairs of "
+                 "cfg.files.stagger the mode may use (cfg.prf.staggerSet is one of them).");
+        nAvSets = available_list("prf.availableStaggerSets", avSets, "(T, w) pairs");
+        staggerSet = chosen_from("prf.staggerSet", avSets, nAvSets, "prf.availableStaggerSets");
+        const MadeFor mfSt[1] = { { "nSets", { list_max(avSets, nAvSets) }, 1 } };
         MatFile st = load_input("stagger", mfSt, 1);
-        int numbered = 0;
-        const int nSets = count_numbered(&st, "priVector_s", &numbered);
-        if (nSets == 0) fail("%s holds no staggered PRIs (priVector_s_1, mtiCoeffs_1, ... or priVector_s, mtiCoeffs).", str("files.stagger"));
-        if (nSets > maxStaggerSets)
-            fail("%s holds %d (T, w) pairs, more than cfg.prf.maxStaggerSets = %d.", str("files.stagger"), nSets, maxStaggerSets);
-        if (staggerSet > nSets)
-            fail("cfg.prf.staggerSet = %d: %s holds only %d (T, w) pair(s).", staggerSet, str("files.stagger"), nSets);
-        const MatVar *pv = pair_var(&st, "priVector_s", staggerSet, numbered, "stagger");
-        const MatVar *mv = pair_var(&st, "mtiCoeffs", staggerSet, numbered, "stagger");
+        const MatVar *pv = NULL, *mv = NULL;
+        for (int j = 0; j < nAvSets; j++) {
+            const int k = avSets[j];
+            const MatVar *pj = find_pair(&st, "priVector_s", k), *mj = find_pair(&st, "mtiCoeffs", k);
+            if (!pj) fail("cfg.prf.availableStaggerSets holds pair %d, but %s has no 'priVector_s_%d'.", k, str("files.stagger"), k);
+            if (!mj) fail("%s: the MTI weights 'mtiCoeffs_%d' of pair %d are missing.", str("files.stagger"), k, k);
+            for (size_t i = 0; i < pj->numel; i++)
+                if (!(pj->re[i] > 0) || !isfinite(pj->re[i])) fail("%s: the PRIs of pair %d must be positive [s].", str("files.stagger"), k);
+            if (pj->numel == 0 || mj->rows != pj->numel || mj->cols == 0)
+                fail("%s: 'mtiCoeffs_%d' needs %d rows, one weight sequence per stagger position of 'priVector_s_%d' "
+                     "(the MTI is time varying).", str("files.stagger"), k, (int)pj->numel, k);
+            if (k == staggerSet) { pv = pj; mv = mj; }
+        }
         nStagger = (int)pv->numel;
-        for (int k = 0; k < nStagger; k++)
-            if (!(pv->re[k] > 0) || !isfinite(pv->re[k])) fail("%s: the PRIs of pair %d must be positive [s].", str("files.stagger"), staggerSet);
         pri = xcalloc((size_t)nStagger, sizeof(double));
         memcpy(pri, pv->re, sizeof(double) * (size_t)nStagger);
         nTaps = (int)mv->cols;
-        if ((int)mv->rows != 1 && (int)mv->rows != nStagger)
-            fail("%s: the MTI weights of pair %d need 1 or %d rows (one per stagger position).", str("files.stagger"), staggerSet, nStagger);
         mti = xcalloc((size_t)(nStagger * nTaps), sizeof(double));      /* row-major [nStagger x nTaps] */
         for (int k = 0; k < nStagger; k++)
-            for (int l = 0; l < nTaps; l++) mti[k * nTaps + l] = mv->re[(mv->rows == 1 ? 0 : k) + l * mv->rows];
+            for (int l = 0; l < nTaps; l++) mti[k * nTaps + l] = mv->re[k + l * mv->rows];
         mat_free(&st);
     } else {
         fail("Unknown PRF mode \"%s\" ('fixed', 'staggered' or 'scan2scan')", prfMode);
@@ -1303,10 +1322,19 @@ static void export_config(void)
         if (same_text(comp, "mismatch")) w->mismatch = 1;
         else if (!same_text(comp, "matched")) fail("cfg.wave.%s.compression must be 'matched' or 'mismatch'.", names[i]);
     }
-    /* code agility: up to cfg.wave.maxCodes code / mismatch pairs per sub-pulse in cfg.files.phaseCode
-     * (<pulse>Code_<k>, <pulse>Mismatch_<k>, or <pulse>Code, <pulse>Mismatch: one pair); pair
-     * cfg.wave.<pulse>.codeIndex is used */
-    const int maxCodes = whole_setting("wave.maxCodes", 1, 0, "the largest number of phase codes per sub-pulse");
+    /* code agility: code / mismatch pairs per sub-pulse in cfg.files.phaseCode (<pulse>Code_<k>,
+     * <pulse>Mismatch_<k>, or <pulse>Code, <pulse>Mismatch: pair 1); the mode may use the pairs
+     * cfg.wave.<pulse>.availableCodes, pair cfg.wave.<pulse>.codeIndex is used */
+    if (has("wave.maxCodes"))
+        fail("cfg.wave.maxCodes no longer exists: cfg.wave.<pulse>.availableCodes lists the code / mismatch pairs of "
+             "cfg.files.phaseCode a sub-pulse may use (cfg.wave.<pulse>.codeIndex is one of them).");
+    int avCodes[2][MAX_AVAILABLE], nAvCodes[2];
+    for (int i = 0; i < 2; i++) {
+        snprintf(p, sizeof p, "wave.%s.availableCodes", names[i]);
+        nAvCodes[i] = available_list(p, avCodes[i], "code / mismatch pairs");
+    }
+    const int maxCode = list_max(avCodes[0], nAvCodes[0]) > list_max(avCodes[1], nAvCodes[1])
+                      ? list_max(avCodes[0], nAvCodes[0]) : list_max(avCodes[1], nAvCodes[1]);
     if (wv[0].phaseCode || wv[1].phaseCode) {
         MadeFor mf[5];
         for (int i = 0; i < 2; i++) {
@@ -1315,28 +1343,33 @@ static void export_config(void)
             mf[2 * i] = (MadeFor){ i ? "longChips" : "shortChips", { round(wv[i].width_s / wv[i].chip_s) }, 1 };
             mf[2 * i + 1] = (MadeFor){ i ? "longMismatchLength" : "shortMismatchLength", { hasLen ? num(p) : 0 }, hasLen };
         }
-        mf[4] = (MadeFor){ "nCodes", { maxCodes }, 1 };
+        mf[4] = (MadeFor){ "nCodes", { maxCode }, 1 };
         codes = load_input("phaseCode", mf, 5);
         haveCodes = 1;
         for (int i = 0; i < 2; i++) {
             Wave *w = &wv[i];
             if (!w->phaseCode) continue;
             snprintf(p, sizeof p, "wave.%s.codeIndex", names[i]);
-            w->codeIndex = whole_setting(p, 1, maxCodes, "code / mismatch pair of cfg.files.phaseCode, at most cfg.wave.maxCodes");
-            snprintf(q, sizeof q, "%sCode", names[i]);
-            int numbered = 0;
-            const int nCodes = count_numbered(&codes, q, &numbered);
-            if (nCodes == 0) fail("%s holds no %s code (%sCode_1, ... or %sCode).", str("files.phaseCode"), names[i], names[i], names[i]);
-            if (nCodes > maxCodes)
-                fail("%s holds %d %s codes, more than cfg.wave.maxCodes = %d.", str("files.phaseCode"), nCodes, names[i], maxCodes);
-            if (w->codeIndex > nCodes)
-                fail("cfg.wave.%s.codeIndex = %d: %s holds only %d %s code(s).", names[i], w->codeIndex, str("files.phaseCode"),
-                     nCodes, names[i]);
-            const MatVar *cv = pair_var(&codes, q, w->codeIndex, numbered, "phaseCode");
+            snprintf(q, sizeof q, "wave.%s.availableCodes", names[i]);
+            w->codeIndex = chosen_from(p, avCodes[i], nAvCodes[i], q);
+            const MatVar *cv = NULL;
+            const int nChips = (int)lround(w->width_s / w->chip_s);
+            for (int j = 0; j < nAvCodes[i]; j++) {        /* every pair the mode may use */
+                const int k = avCodes[i][j];
+                snprintf(q, sizeof q, "%sCode", names[i]);
+                const MatVar *cj = find_pair(&codes, q, k);
+                if (!cj) fail("cfg.wave.%s.availableCodes holds pair %d, but %s has no '%sCode_%d'.", names[i], k,
+                              str("files.phaseCode"), names[i], k);
+                if ((int)cj->numel != nChips)
+                    fail("The %s code %d of %s has %d chips, but width_s/chip_s = %d.", names[i], k, str("files.phaseCode"),
+                         (int)cj->numel, nChips);
+                snprintf(q, sizeof q, "%sMismatch", names[i]);
+                if (w->mismatch && !find_pair(&codes, q, k))
+                    fail("%s has no mismatch filter '%sMismatch_%d' for the %s code %d.", str("files.phaseCode"), names[i], k,
+                         names[i], k);
+                if (k == w->codeIndex) cv = cj;
+            }
             w->nCode = (int)cv->numel;
-            if (w->nCode != (int)lround(w->width_s / w->chip_s))
-                fail("The %s code %d of %s has %d chips, but width_s/chip_s = %d.", names[i], w->codeIndex, str("files.phaseCode"),
-                     w->nCode, (int)lround(w->width_s / w->chip_s));
             if (w->enable && w->chip_s * fsOut < 1 - 1e-9)
                 fail("cfg.wave.%s.chip_s = %.3g us is shorter than the DDC sample period %.3g us (%.3g MHz): the code "
                      "bandwidth 1/chip_s does not fit the DDC output.", names[i], w->chip_s * 1e6, 1e6 / fsOut, fsOut / 1e6);
@@ -1344,11 +1377,8 @@ static void export_config(void)
             w->codeIm = xcalloc((size_t)w->nCode, sizeof(double));
             for (int k = 0; k < w->nCode; k++) { w->codeRe[k] = cv->re[k]; w->codeIm[k] = cv->im ? cv->im[k] : 0; }
             if (w->mismatch) {
-                if (numbered) snprintf(q, sizeof q, "%sMismatch_%d", names[i], w->codeIndex);
-                else snprintf(q, sizeof q, "%sMismatch", names[i]);
-                const MatVar *mv = mat_get(&codes, q);
-                if (!mv || !mv->re)
-                    fail("%s has no mismatch filter '%s' for the %s code %d.", str("files.phaseCode"), q, names[i], w->codeIndex);
+                snprintf(q, sizeof q, "%sMismatch", names[i]);
+                const MatVar *mv = find_pair(&codes, q, w->codeIndex);
                 w->nMis = (int)mv->numel;
                 w->misRe = xcalloc((size_t)w->nMis, sizeof(double));
                 w->misIm = xcalloc((size_t)w->nMis, sizeof(double));
@@ -1934,8 +1964,8 @@ static void export_config(void)
                !wl->enable ? "off" : wl->phaseCode ? (wl->mismatch ? "phase code (mismatch)" : "phase code") : "LFM");
         printf("DDC record (%s): %d samples, the first at %.3f us", manualDdc ? "manual" : "automatic", nDdc, tDdc[0] * 1e6);
         for (int i = 0; i < 2; i++)
-            if (wv[i].enable && wv[i].phaseCode) printf("; %s code %d of %d", names[i], wv[i].codeIndex, maxCodes);
-        if (staggered) printf("; stagger pair %d of %d (%d PRIs)", staggerSet, maxStaggerSets, nStagger);
+            if (wv[i].enable && wv[i].phaseCode) printf("; %s code %d (of %d available)", names[i], wv[i].codeIndex, nAvCodes[i]);
+        if (staggered) printf("; stagger pair %d (of %d available, %d PRIs)", staggerSet, nAvSets, nStagger);
         printf("\n");
         if (nScanPrf > 0) {
             printf("Scan-to-scan PRF:");

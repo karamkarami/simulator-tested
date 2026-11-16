@@ -230,12 +230,13 @@ record within 3e-14 (relative).
   code, from the records of its configuration file. The DDC record of the
   mode (automatic, or by hand: `cfg.rx.manualDdc`, `cfg.rx.nDdc`,
   `cfg.rx.ddcT0_s`) sets `nDdc` and the receive intervals; the selected phase
-  code / mismatch pair of each sub-pulse (`cfg.wave.<pulse>.codeIndex` of at
-  most `cfg.wave.maxCodes` pairs in `cfg.files.phaseCode`) sets the
-  compression filters, and the selected (T, w) pair of the staggered PRF
-  (`cfg.prf.staggerSet` of at most `cfg.prf.maxStaggerSets` in
-  `cfg.files.stagger`) the MTI weights (`mtiCoeffs`, one row per stagger
-  position: applied time-varying, by the stagger index of every PRI) and the
+  code / mismatch pair of each sub-pulse (`cfg.wave.<pulse>.codeIndex`, one
+  of the pairs `cfg.wave.<pulse>.availableCodes` of `cfg.files.phaseCode`
+  the mode may use) sets the compression filters, and the selected (T, w)
+  pair of the staggered PRF (`cfg.prf.staggerSet`, one of the pairs
+  `cfg.prf.availableStaggerSets` of `cfg.files.stagger`) the MTI weights
+  (`mtiCoeffs`, length(T) rows, one per stagger position: applied
+  time-varying, by the stagger index of every PRI) and the
   Doppler axis. Records `ddcRecord` = [manual 1/0, time of the first DDC
   sample], `codeIndex` = [short long] (0: no phase code) and `staggerSet`
   (0: not staggered) are printed at the start (information). Both exporters

@@ -223,38 +223,53 @@ static const MatVar *mat_var(const MatFile *m, const char *name, const char *key
     return v;
 }
 
-/* A whole-number setting 1 ... hi (or >= 1 when hi = 0) with a default for a missing or empty field. */
-static int whole_setting(const char *path, int def, int hi, const char *what)
+/* The pairs of an input file a mode may use: cfg.<path> holds 1 ... MAX_AVAILABLE different whole
+ * numbers >= 1 (missing or empty: pair 1). Returns how many; the numbers in list[]. */
+#define MAX_AVAILABLE 64
+static int available_list(const char *path, int *list, const char *what)
 {
-    const double v = num_or(path, def);
-    if (!(v >= 1) || v != floor(v) || (hi > 0 && v > hi)) {
-        if (hi > 0) fail("cfg.%s = %g must be a whole number 1 ... %d (%s).", path, v, hi, what);
-        fail("cfg.%s must be a whole number >= 1 (%s).", path, what);
+    if (!has(path) || empty(path)) { list[0] = 1; return 1; }
+    const MValue *v = field(path, 1);
+    const int n = v->type == MV_NUM ? v->rows * v->cols : 0;
+    int ok = n >= 1 && n <= MAX_AVAILABLE;
+    for (int i = 0; ok && i < n; i++) {
+        const double x = v->re[i];
+        ok = x >= 1 && x <= 1e6 && x == floor(x);
+        for (int k = 0; ok && k < i; k++) ok = list[k] != (int)x;
+        if (ok) list[i] = (int)x;
     }
-    return (int)v;
-}
-
-/* Numbered pairs <base>_1, <base>_2, ... of an input file (n), or <base> alone (one, *numbered = 0). */
-static int count_numbered(const MatFile *m, const char *base, int *numbered)
-{
-    char nm[96];
-    int n = 0;
-    for (;;) {
-        snprintf(nm, sizeof nm, "%s_%d", base, n + 1);
-        if (!mat_get(m, nm)) break;
-        n++;
-    }
-    *numbered = n > 0;
-    if (n == 0 && mat_get(m, base)) n = 1;
+    if (!ok) fail("cfg.%s must hold 1 to %d different whole numbers >= 1 (the %s the mode may use).", path, MAX_AVAILABLE, what);
     return n;
 }
 
-static const MatVar *pair_var(const MatFile *m, const char *base, int k, int numbered, const char *key)
+static int list_max(const int *list, int n)
+{
+    int m = list[0];
+    for (int i = 1; i < n; i++) if (list[i] > m) m = list[i];
+    return m;
+}
+
+/* cfg.<path> (missing or empty: the first of the list cfg.<listPath>) must be one of the list. */
+static int chosen_from(const char *path, const int *list, int n, const char *listPath)
+{
+    const double v = has(path) && !empty(path) ? num(path) : list[0];
+    for (int i = 0; i < n; i++) if (v == list[i]) return list[i];
+    char txt[MAX_AVAILABLE * 8 + 4] = "[";
+    for (int i = 0; i < n; i++) snprintf(txt + strlen(txt), sizeof txt - strlen(txt), i ? " %d" : "%d", list[i]);
+    strcat(txt, "]");
+    fail("cfg.%s = %g is not one of cfg.%s = %s.", path, v, listPath, txt);
+    return 0;
+}
+
+/* Pair k of a numbered set of an input file: <base>_<k>, or <base> alone for pair 1 (a file with
+ * one pair). NULL when the file does not hold it. */
+static const MatVar *find_pair(const MatFile *m, const char *base, int k)
 {
     char nm[96];
-    if (numbered) snprintf(nm, sizeof nm, "%s_%d", base, k);
-    else snprintf(nm, sizeof nm, "%s", base);
-    return mat_var(m, nm, key);
+    snprintf(nm, sizeof nm, "%.80s_%d", base, k);
+    const MatVar *v = mat_get(m, nm);
+    if (!v && k == 1) v = mat_get(m, base);
+    return v && v->re ? v : NULL;
 }
 
 static double *copy_var(const MatVar *v)
@@ -677,17 +692,17 @@ static void setup(Radar *s)
         s->pri = xcalloc(1, sizeof(double));
         s->pri[0] = num("prf.pri_s");
     } else if (same_text(prf, "staggered")) {
-        /* pair cfg.prf.staggerSet of at most cfg.prf.maxStaggerSets (priVector_s_<k>, mtiCoeffs_<k>) */
-        const int maxSets = whole_setting("prf.maxStaggerSets", 1, 0, "the largest number of (T, w) pairs");
-        const int set = whole_setting("prf.staggerSet", 1, maxSets, "pair (T, w) of cfg.files.stagger");
-        const MadeFor mfSt[1] = { { "nSets", { maxSets }, 1 } };
+        /* pair cfg.prf.staggerSet of the pairs cfg.prf.availableStaggerSets (priVector_s_<k>, mtiCoeffs_<k>) */
+        if (has("prf.maxStaggerSets"))
+            fail("cfg.prf.maxStaggerSets no longer exists: cfg.prf.availableStaggerSets lists the (T, w) pairs of "
+                 "cfg.files.stagger the mode may use (cfg.prf.staggerSet is one of them).");
+        int sets[MAX_AVAILABLE];
+        const int nSets = available_list("prf.availableStaggerSets", sets, "(T, w) pairs");
+        const int set = chosen_from("prf.staggerSet", sets, nSets, "prf.availableStaggerSets");
+        const MadeFor mfSt[1] = { { "nSets", { list_max(sets, nSets) }, 1 } };
         MatFile st = load_input("stagger", mfSt, 1);
-        int numbered = 0;
-        const int nSets = count_numbered(&st, "priVector_s", &numbered);
-        if (nSets == 0 || nSets > maxSets || set > nSets)
-            fail("%s holds %d (T, w) pair(s): cfg.prf.staggerSet = %d and cfg.prf.maxStaggerSets = %d do not fit it.",
-                 str("files.stagger"), nSets, set, maxSets);
-        const MatVar *pv = pair_var(&st, "priVector_s", set, numbered, "stagger");
+        const MatVar *pv = find_pair(&st, "priVector_s", set);
+        if (!pv) fail("cfg.prf.availableStaggerSets holds pair %d, but %s has no 'priVector_s_%d'.", set, str("files.stagger"), set);
         s->nStagger = (int)pv->numel;
         s->pri = copy_var(pv);
         mat_free(&st);
@@ -779,8 +794,16 @@ static void setup(Radar *s)
     }
     if (!s->w[0].enable && !s->w[1].enable) fail("Both sub-pulses are switched off (cfg.wave.short.enable, cfg.wave.long.enable).");
     if (anyCode) {
-        /* code agility: pair cfg.wave.<pulse>.codeIndex of at most cfg.wave.maxCodes (<pulse>Code_<k>) */
-        const int maxCodes = whole_setting("wave.maxCodes", 1, 0, "the largest number of phase codes per sub-pulse");
+        /* code agility: pair cfg.wave.<pulse>.codeIndex of the pairs cfg.wave.<pulse>.availableCodes (<pulse>Code_<k>) */
+        if (has("wave.maxCodes"))
+            fail("cfg.wave.maxCodes no longer exists: cfg.wave.<pulse>.availableCodes lists the code / mismatch pairs of "
+                 "cfg.files.phaseCode a sub-pulse may use (cfg.wave.<pulse>.codeIndex is one of them).");
+        int avCodes[2][MAX_AVAILABLE], nAvCodes[2], maxCode = 1;
+        for (int i = 0; i < 2; i++) {
+            snprintf(p, sizeof p, "wave.%s.availableCodes", names[i]);
+            nAvCodes[i] = available_list(p, avCodes[i], "code / mismatch pairs");
+            if (list_max(avCodes[i], nAvCodes[i]) > maxCode) maxCode = list_max(avCodes[i], nAvCodes[i]);
+        }
         MadeFor mf[5];
         for (int i = 0; i < 2; i++) {
             snprintf(p, sizeof p, "wave.%s.mismatchLength", names[i]);
@@ -788,21 +811,19 @@ static void setup(Radar *s)
             mf[2 * i] = (MadeFor){ i ? "longChips" : "shortChips", { round(s->w[i].width / s->w[i].chip) }, 1 };
             mf[2 * i + 1] = (MadeFor){ i ? "longMismatchLength" : "shortMismatchLength", { hasLen ? num(p) : 0 }, hasLen };
         }
-        mf[4] = (MadeFor){ "nCodes", { maxCodes }, 1 };
+        mf[4] = (MadeFor){ "nCodes", { maxCode }, 1 };
         MatFile codes = load_input("phaseCode", mf, 5);
         for (int i = 0; i < 2; i++) {
             Wave *w = &s->w[i];
             if (!w->phaseCode) continue;
             char q[64];
             snprintf(p, sizeof p, "wave.%s.codeIndex", names[i]);
-            const int ci = whole_setting(p, 1, maxCodes, "code / mismatch pair of cfg.files.phaseCode");
+            snprintf(q, sizeof q, "wave.%s.availableCodes", names[i]);
+            const int ci = chosen_from(p, avCodes[i], nAvCodes[i], q);
             snprintf(q, sizeof q, "%sCode", names[i]);
-            int numbered = 0;
-            const int nCodes = count_numbered(&codes, q, &numbered);
-            if (nCodes == 0 || nCodes > maxCodes || ci > nCodes)
-                fail("%s holds %d %s code(s): cfg.wave.%s.codeIndex = %d and cfg.wave.maxCodes = %d do not fit it.",
-                     str("files.phaseCode"), nCodes, names[i], names[i], ci, maxCodes);
-            const MatVar *cv = pair_var(&codes, q, ci, numbered, "phaseCode");
+            const MatVar *cv = find_pair(&codes, q, ci);
+            if (!cv) fail("cfg.wave.%s.availableCodes holds pair %d, but %s has no '%sCode_%d'.", names[i], ci,
+                          str("files.phaseCode"), names[i], ci);
             w->nCode = (int)cv->numel;
             if (w->nCode != (int)lround(w->width / w->chip))
                 fail("The %s code has %d chips, but width_s/chip_s = %d.", names[i], w->nCode, (int)lround(w->width / w->chip));
@@ -814,7 +835,9 @@ static void setup(Radar *s)
             for (int k = 0; k < w->nCode; k++) { w->codeRe[k] = cv->re[k]; w->codeIm[k] = cv->im ? cv->im[k] : 0; }
             if (w->compMismatch) {
                 snprintf(q, sizeof q, "%sMismatch", names[i]);
-                const MatVar *mv = pair_var(&codes, q, ci, numbered, "phaseCode");
+                const MatVar *mv = find_pair(&codes, q, ci);
+                if (!mv) fail("%s has no mismatch filter '%sMismatch_%d' for the %s code %d.", str("files.phaseCode"), names[i], ci,
+                              names[i], ci);
                 w->nMis = (int)mv->numel;
                 w->misRe = xcalloc((size_t)w->nMis, sizeof(double));
                 w->misIm = xcalloc((size_t)w->nMis, sizeof(double));

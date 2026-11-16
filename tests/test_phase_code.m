@@ -1,11 +1,11 @@
 function ok = test_phase_code()
 %TEST_PHASE_CODE  Phase codes from cfg.files.phaseCode, matched and mismatch filters.
-%   1. The default file holds cfg.wave.maxCodes code / mismatch pairs of both
-%      sub-pulses (code agility; code 1 P4, one coefficient per chip). Every
-%      pair (cfg.wave.<pulse>.codeIndex) puts a target on its cell, its mismatch
-%      filter with lower sidelobes than its matched filter; the echo of another
-%      code through the filter of the selected one stays 8 dB or more below
-%      the peak of the matched code.
+%   1. The default file holds the code / mismatch pairs 1 ... max of
+%      cfg.wave.<pulse>.availableCodes of both sub-pulses (code agility; code
+%      1 P4, one coefficient per chip). Every pair (cfg.wave.<pulse>.codeIndex)
+%      puts a target on its cell, its mismatch filter with lower sidelobes
+%      than its matched filter; the echo of another code through the filter of
+%      the selected one stays 8 dB or more below the peak of the matched code.
 %   2. A target without noise through signal generation, ADC, DDC and pulse
 %      compression (1 element, 2 and 4 MHz DDC output, both sub-pulses): with
 %      the matched and with the mismatch filter the peak is on the range cell
@@ -46,25 +46,26 @@ end
 
 %% 1) default file
 f = load(cfg.files.phaseCode);
+nCodes = max([cfg.wave.short.availableCodes(:); cfg.wave.long.availableCodes(:)]);   % pairs of the default file
 good = true;
 for p = {'short', 'long'}
     N = round(cfg.wave.(p{1}).width_s / cfg.wave.(p{1}).chip_s);
     m = (0:N-1)';
     good = good && max(abs(f.([p{1} 'Code_1']) - exp(1j*(pi*m.^2/N - pi*m)))) < 1e-12 ...
                 && numel(f.([p{1} 'Mismatch_1'])) > N;
-    for k = 1:cfg.wave.maxCodes                         % code agility: maxCodes pairs per sub-pulse
+    for k = 1:nCodes                                    % code agility: the pairs 1 ... nCodes per sub-pulse
         good = good && isfield(f, sprintf('%sCode_%d', p{1}, k)) && isfield(f, sprintf('%sMismatch_%d', p{1}, k));
     end
-    good = good && ~isfield(f, sprintf('%sCode_%d', p{1}, cfg.wave.maxCodes + 1));
+    good = good && ~isfield(f, sprintf('%sCode_%d', p{1}, nCodes + 1));
 end
-ok = report(sprintf('default file: %d code / mismatch pairs per sub-pulse, code 1 P4', cfg.wave.maxCodes), good) && ok;
+ok = report(sprintf('default file: %d code / mismatch pairs per sub-pulse, code 1 P4', nCodes), good) && ok;
 
 %% 1b) code agility: every pair on the target cell with lower sidelobes than its matched filter;
 % the echo of another code through the filter of the selected one stays well below the peak
 R = struct('short', 15e3, 'long', 45e3);
 good = true;
 txt = {};
-for k = 1:cfg.wave.maxCodes
+for k = 1:nCodes
     cm = cfg;  cmm = cfg;
     for p = {'short', 'long'}
         cm.wave.(p{1}).codeIndex = k;  cmm.wave.(p{1}).codeIndex = k;  cmm.wave.(p{1}).compression = 'mismatch';
@@ -76,12 +77,12 @@ for k = 1:cfg.wave.maxCodes
     end
 end
 ok = report(sprintf('code agility, codes 1 ... %d: target on its cell, mismatch filter lower sidelobes (%s)', ...
-            cfg.wave.maxCodes, strjoin(txt, '; ')), good) && ok;
+            nCodes, strjoin(txt, '; ')), good) && ok;
 worst = -inf;
 for p = {'short', 'long'}
     N = round(cfg.wave.(p{1}).width_s / cfg.wave.(p{1}).chip_s);
-    for j = 1:cfg.wave.maxCodes
-        for k = 1:cfg.wave.maxCodes
+    for j = 1:nCodes
+        for k = 1:nCodes
             if j == k, continue; end
             cj = f.(sprintf('%sCode_%d', p{1}, j));  hk = f.(sprintf('%sMismatch_%d', p{1}, k));
             ck = f.(sprintf('%sCode_%d', p{1}, k));

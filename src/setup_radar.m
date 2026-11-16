@@ -75,11 +75,12 @@ switch lower(cfg.prf.mode)
         sys.pri = cfg.prf.pri_s;
         sys.mtiCoeffs = [1 -2 1];                             % three-pulse canceller
     case 'staggered'
-        % several (PRI sequence T, MTI weights w) pairs in cfg.files.stagger (code agility of the
-        % PRF): pair cfg.prf.staggerSet of at most cfg.prf.maxStaggerSets (stagger_set below)
-        [setIdx, maxSets] = stagger_choice(cfg);
-        st = load_input(cfg, 'stagger', struct('nSets', maxSets));
-        [sys.pri, sys.mtiCoeffs, sys.nStaggerSets] = stagger_set(st, setIdx, maxSets, cfg.files.stagger);
+        % several (PRI sequence T, MTI weights w) pairs in cfg.files.stagger: the mode may use the
+        % pairs cfg.prf.availableStaggerSets and selects cfg.prf.staggerSet (stagger_set below)
+        [setIdx, sets] = stagger_choice(cfg);
+        st = load_input(cfg, 'stagger', struct('nSets', max(sets)));
+        [sys.pri, sys.mtiCoeffs] = stagger_set(st, setIdx, sets, cfg.files.stagger);
+        sys.availableStaggerSets = sets;
         sys.staggerSet = setIdx;                              % weights: one row per stagger position
     case 'scan2scan'
         % one PRF per antenna scan (constant during the scan), used in turn: scan s has
@@ -102,7 +103,7 @@ switch lower(cfg.prf.mode)
         error('Unknown PRF mode "%s" (''fixed'', ''staggered'' or ''scan2scan'')', cfg.prf.mode);
 end
 sys.staggered = strcmpi(cfg.prf.mode, 'staggered');
-if ~sys.staggered, sys.staggerSet = 0; end                    % (no stagger pair in use)
+if ~sys.staggered, sys.staggerSet = 0;  sys.availableStaggerSets = []; end   % (no stagger pair in use)
 sys.nStagger  = numel(sys.pri);
 % Clutter filter: the canceller above, or an FIR filter from cfg.files.mtiFir
 sys.mti.type = 'canceller';
@@ -187,9 +188,15 @@ sys.N0ddc = sys.N0eff * (adcLevel + rounding) / adcLevel;      % noise density a
 names = {'short', 'long'};
 codes = [];                                                   % phase codes and mismatch filters
 % Code agility: cfg.files.phaseCode holds several code / mismatch-filter pairs per sub-pulse
-% (<pulse>Code_<k>, <pulse>Mismatch_<k>, k = 1 ... at most cfg.wave.maxCodes; a file with only
-% <pulse>Code, <pulse>Mismatch holds one pair); cfg.wave.<pulse>.codeIndex selects the pair.
-maxCodes = max_codes(cfg);
+% (<pulse>Code_<k>, <pulse>Mismatch_<k>; a file with only <pulse>Code, <pulse>Mismatch holds pair 1);
+% the mode may use the pairs cfg.wave.<pulse>.availableCodes and selects cfg.wave.<pulse>.codeIndex.
+if isfield(cfg.wave, 'maxCodes')
+    error(['cfg.wave.maxCodes no longer exists: cfg.wave.<pulse>.availableCodes lists the code / mismatch ' ...
+           'pairs of cfg.files.phaseCode a sub-pulse may use (cfg.wave.<pulse>.codeIndex is one of them).']);
+end
+avCodes = {available_numbers(cfg.wave.short, 'availableCodes', 'wave.short.availableCodes', 'code / mismatch pairs'), ...
+           available_numbers(cfg.wave.long, 'availableCodes', 'wave.long.availableCodes', 'code / mismatch pairs')};
+maxCodes = max([avCodes{:}]);                                 % the default file holds pairs 1 ... maxCodes
 if any(strcmpi({cfg.wave.short.type, cfg.wave.long.type}, 'phasecode'))
     nChips = [round(cfg.wave.short.width_s / cfg.wave.short.chip_s), round(cfg.wave.long.width_s / cfg.wave.long.chip_s)];
     codes = load_input(cfg, 'phaseCode', struct('shortChips', nChips(1), 'shortMismatchLength', ...
@@ -215,7 +222,7 @@ for i = 1:2
     wv.radarConst = sys.radarConst * (wv.lambda_m / sys.lambda)^2;   % received power ~ lambda^2
     wv.compression = lower(wv.compression);
     if strcmpi(wv.type, 'phasecode')
-        [wv.code, wv.codeIndex, sfx, wv.nCodesFile] = code_pair(codes, names{i}, wv, maxCodes, cfg.files.phaseCode);
+        [wv.code, wv.codeIndex, sfx] = code_pair(codes, names{i}, wv, avCodes{i}, cfg.files.phaseCode);
         if numel(wv.code) ~= round(wv.width_s / wv.chip_s)
             error('The %s code %d of %s has %d chips, but width_s/chip_s = %d.', names{i}, wv.codeIndex, ...
                   cfg.files.phaseCode, numel(wv.code), round(wv.width_s / wv.chip_s));
@@ -240,7 +247,8 @@ for i = 1:2
             end
         end
     end
-    if ~strcmpi(wv.type, 'phasecode'), wv.codeIndex = 0; end   % (0: no phase code)
+    wv.availableCodes = avCodes{i};
+    if ~strcmpi(wv.type, 'phasecode'), wv.codeIndex = 0;  wv.availableCodes = []; end   % (0: no phase code)
     % Pulse compression filter (unit noise gain) and the samples by which its
     % peak comes earlier than that of the matched filter
     [wv.mfTaps, wv.mfShift] = compression_filter(wv, cfg, sys);
@@ -713,78 +721,89 @@ L = sys.dop.nLooks;
 sys.dop.medianToMean = fzero(@(x) gammainc(L*x, L) - 0.5, [0.1 2]);
 end
 
-function [k, maxSets] = stagger_choice(cfg)
-% cfg.prf.staggerSet (default 1) and cfg.prf.maxStaggerSets (default 1): the pair (T, w) of the
-% stagger file and the largest number of pairs the file may hold.
-k = 1;  maxSets = 1;
-if isfield(cfg.prf, 'maxStaggerSets') && ~isempty(cfg.prf.maxStaggerSets), maxSets = cfg.prf.maxStaggerSets; end
-if isfield(cfg.prf, 'staggerSet') && ~isempty(cfg.prf.staggerSet), k = cfg.prf.staggerSet; end
-if ~isscalar(maxSets) || ~isreal(maxSets) || maxSets < 1 || maxSets ~= round(maxSets)
-    error('cfg.prf.maxStaggerSets must be a whole number >= 1 (the largest number of (T, w) pairs).');
+function [k, sets] = stagger_choice(cfg)
+% cfg.prf.availableStaggerSets (default 1): the (T, w) pairs of the stagger file the mode may use;
+% cfg.prf.staggerSet (default: the first of them): the pair in use.
+if isfield(cfg.prf, 'maxStaggerSets')
+    error(['cfg.prf.maxStaggerSets no longer exists: cfg.prf.availableStaggerSets lists the (T, w) pairs of ' ...
+           'cfg.files.stagger the mode may use (cfg.prf.staggerSet is one of them).']);
 end
-if ~isscalar(k) || ~isreal(k) || k < 1 || k ~= round(k) || k > maxSets
-    error('cfg.prf.staggerSet = %s must be a whole number 1 ... cfg.prf.maxStaggerSets = %d.', mat2str(k), maxSets);
+sets = available_numbers(cfg.prf, 'availableStaggerSets', 'prf.availableStaggerSets', '(T, w) pairs');
+k = chosen_number(cfg.prf, 'staggerSet', sets, 'prf', 'availableStaggerSets');
+end
+
+function v = available_numbers(s, f, path, what)
+% s.(f): 1 ... 64 different whole numbers >= 1 (missing or empty: 1), as a row.
+v = 1;
+if isfield(s, f) && ~isempty(s.(f)), v = s.(f); end
+if ~isnumeric(v) || ~isreal(v) || numel(v) > 64 || any(~isfinite(v(:))) || any(v(:) < 1) || ...
+        any(v(:) ~= round(v(:))) || numel(unique(v(:))) ~= numel(v)
+    error('cfg.%s must hold 1 to 64 different whole numbers >= 1 (the %s the mode may use).', path, what);
+end
+v = double(v(:)).';
+end
+
+function k = chosen_number(s, f, list, prefix, listName)
+% s.(f) (missing or empty: the first of list) must be one of list (cfg.<prefix>.<listName>).
+k = list(1);
+if isfield(s, f) && ~isempty(s.(f)), k = s.(f); end
+if ~isnumeric(k) || ~isscalar(k) || ~any(k == list)
+    error('cfg.%s.%s = %s is not one of cfg.%s.%s = %s.', prefix, f, mat2str(k), prefix, listName, mat2str(list));
+end
+k = double(k);
+end
+
+function [pri, w] = stagger_set(st, k, sets, file)
+% Pair k of a stagger file: priVector_s_<k> and mtiCoeffs_<k>, or priVector_s and mtiCoeffs (a file
+% with one pair: pair 1). Every pair the mode may use (sets) must be in the file, its MTI weights
+% with one row per stagger position: the time-varying filter has length(T) weight sequences.
+for j = sets
+    [T, wj, sfx] = stagger_pair(st, j, file);
+    if isempty(T) || any(~isfinite(T)) || any(T <= 0)
+        error('%s: the PRIs ''priVector_s%s'' must be positive [s].', file, sfx);
+    end
+    if size(wj, 1) ~= numel(T) || isempty(wj) || any(~isfinite(wj(:)))
+        error(['%s: ''mtiCoeffs%s'' needs %d rows, one weight sequence per stagger position of ' ...
+               '''priVector_s%s'' (the MTI is time varying).'], file, sfx, numel(T), sfx);
+    end
+    if j == k, pri = T;  w = wj; end
 end
 end
 
-function [pri, w, n] = stagger_set(st, k, maxSets, file)
-% Pair k of a stagger file: priVector_s_<k> and mtiCoeffs_<k> (k = 1 ... n), or priVector_s and
-% mtiCoeffs (a file with one pair). The weights have one row per stagger position (or one row).
-n = 0;
-while isfield(st, sprintf('priVector_s_%d', n + 1)), n = n + 1; end
-sfx = sprintf('_%d', k);
-if n == 0 && isfield(st, 'priVector_s'), n = 1;  sfx = ''; end
-if n == 0
-    error('%s holds no staggered PRIs (priVector_s_1, mtiCoeffs_1, ... or priVector_s, mtiCoeffs).', file);
-end
-if n > maxSets
-    error('%s holds %d (T, w) pairs, more than cfg.prf.maxStaggerSets = %d.', file, n, maxSets);
-end
-if k > n
-    error('cfg.prf.staggerSet = %d: %s holds only %d (T, w) pair(s).', k, file, n);
+function [T, w, sfx] = stagger_pair(st, j, file)
+% Variables of pair j: priVector_s_<j>, mtiCoeffs_<j> (or priVector_s, mtiCoeffs for pair 1).
+sfx = sprintf('_%d', j);
+if ~isfield(st, ['priVector_s' sfx]) && j == 1 && isfield(st, 'priVector_s'), sfx = ''; end
+if ~isfield(st, ['priVector_s' sfx])
+    error('cfg.prf.availableStaggerSets holds pair %d, but %s has no ''priVector_s_%d''.', j, file, j);
 end
 if ~isfield(st, ['mtiCoeffs' sfx])
-    error('%s: the MTI weights ''mtiCoeffs%s'' of pair %d are missing.', file, sfx, k);
+    error('%s: the MTI weights ''mtiCoeffs%s'' of pair %d are missing.', file, sfx, j);
 end
-pri = double(st.(['priVector_s' sfx])(:));
+T = double(st.(['priVector_s' sfx])(:));
 w = double(st.(['mtiCoeffs' sfx]));
-if isempty(pri) || any(~isfinite(pri)) || any(pri <= 0)
-    error('%s: the PRIs ''priVector_s%s'' must be positive [s].', file, sfx);
-end
-if size(w, 1) ~= 1 && size(w, 1) ~= numel(pri)
-    error('%s: ''mtiCoeffs%s'' needs 1 or %d rows (one per stagger position).', file, sfx, numel(pri));
-end
 end
 
-function m = max_codes(cfg)
-% cfg.wave.maxCodes (default 1): the largest number of code / mismatch pairs per sub-pulse.
-m = 1;
-if isfield(cfg.wave, 'maxCodes') && ~isempty(cfg.wave.maxCodes), m = cfg.wave.maxCodes; end
-if ~isscalar(m) || ~isreal(m) || m < 1 || m ~= round(m)
-    error('cfg.wave.maxCodes must be a whole number >= 1 (the largest number of phase codes per sub-pulse).');
-end
-end
-
-function [code, k, sfx, n] = code_pair(codes, name, wv, maxCodes, file)
-% Code cfg.wave.<name>.codeIndex (default 1) of the phase-code file: <name>Code_<k> (k = 1 ... n),
-% or <name>Code (a file with one code); sfx is the suffix of its variables.
-k = 1;
-if isfield(wv, 'codeIndex') && ~isempty(wv.codeIndex), k = wv.codeIndex; end
-if ~isscalar(k) || ~isreal(k) || k < 1 || k ~= round(k) || k > maxCodes
-    error('cfg.wave.%s.codeIndex = %s must be a whole number 1 ... cfg.wave.maxCodes = %d.', name, mat2str(k), maxCodes);
-end
-n = 0;
-while isfield(codes, sprintf('%sCode_%d', name, n + 1)), n = n + 1; end
-sfx = sprintf('_%d', k);
-if n == 0 && isfield(codes, [name 'Code']), n = 1;  sfx = ''; end
-if n == 0
-    error('%s holds no %s code (%sCode_1, ... or %sCode).', file, name, name, name);
-end
-if n > maxCodes
-    error('%s holds %d %s codes, more than cfg.wave.maxCodes = %d.', file, n, name, maxCodes);
-end
-if k > n
-    error('cfg.wave.%s.codeIndex = %d: %s holds only %d %s code(s).', name, k, file, n, name);
+function [code, k, sfx] = code_pair(codes, name, wv, list, file)
+% Code cfg.wave.<name>.codeIndex (default: the first of cfg.wave.<name>.availableCodes) of the
+% phase-code file: <name>Code_<k>, or <name>Code (a file with one code: pair 1); sfx is the suffix
+% of its variables. Every pair of availableCodes must be in the file with width_s/chip_s chips
+% (and its mismatch filter, for mismatch compression).
+k = chosen_number(wv, 'codeIndex', list, ['wave.' name], 'availableCodes');
+for j = list
+    s = sprintf('_%d', j);
+    if ~isfield(codes, [name 'Code' s]) && j == 1 && isfield(codes, [name 'Code']), s = ''; end
+    if ~isfield(codes, [name 'Code' s])
+        error('cfg.wave.%s.availableCodes holds pair %d, but %s has no ''%sCode_%d''.', name, j, file, name, j);
+    end
+    if numel(codes.([name 'Code' s])) ~= round(wv.width_s / wv.chip_s)
+        error('The %s code %d of %s has %d chips, but width_s/chip_s = %d.', name, j, file, ...
+              numel(codes.([name 'Code' s])), round(wv.width_s / wv.chip_s));
+    end
+    if strcmpi(wv.compression, 'mismatch') && ~isfield(codes, [name 'Mismatch' s])
+        error('%s has no mismatch filter ''%sMismatch%s'' for the %s code %d.', file, name, s, name, j);
+    end
+    if j == k, sfx = s; end
 end
 code = codes.([name 'Code' sfx])(:);
 end
