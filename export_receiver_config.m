@@ -209,12 +209,13 @@ for kFile = 1:numel(fileNames)
     fwrite(fid, [2 numel(r)], 'uint32');
     for i = 1:numel(r)
         name = r{i}{1};
-        value = double(r{i}{2});
+        isCplx = ~isreal(r{i}{2});                 % before double(): it drops the complex flag of a
+        value = double(r{i}{2});                   % value without imaginary part (real phase code)
         nameBytes = zeros(1, 32);
         nameBytes(1:numel(name)) = double(name);
         fwrite(fid, nameBytes, 'uint8');
-        fwrite(fid, [~isreal(value), size(value, 1), size(value, 2)], 'uint32');
-        if isreal(value)
+        fwrite(fid, [isCplx, size(value, 1), size(value, 2)], 'uint32');
+        if ~isCplx
             fwrite(fid, value(:), 'double');
         else
             fwrite(fid, [real(value(:)).'; imag(value(:)).'], 'double');

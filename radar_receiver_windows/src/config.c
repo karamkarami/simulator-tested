@@ -99,7 +99,9 @@ static int get_complex(RecordSet *rs, const char *name, int rows, int cols, int 
 {
     const Record *r = find(rs, name);
     if (!r) return -1;
-    if (!r->isComplex || (int)r->rows != rows || (int)r->cols != cols) {
+    /* a real record is accepted as complex values with zero imaginary part (e.g. the taps of
+     * a binary phase code with a real mismatch filter) */
+    if ((int)r->rows != rows || (int)r->cols != cols) {
         set_error(rs, "configuration value '%s' should be complex %d x %d", name, rows, cols);
         return -1;
     }
@@ -110,8 +112,8 @@ static int get_complex(RecordSet *rs, const char *name, int rows, int cols, int 
         for (int rr = 0; rr < rows; rr++) {
             int src = c * rows + rr;                       /* column-major */
             int dst = rowMajor ? rr * cols + c : src;
-            (*re)[dst] = (float)r->data[2 * src];
-            (*im)[dst] = (float)r->data[2 * src + 1];
+            (*re)[dst] = (float)r->data[r->isComplex ? 2 * src : src];
+            (*im)[dst] = r->isComplex ? (float)r->data[2 * src + 1] : 0.0f;
         }
     }
     return 0;
