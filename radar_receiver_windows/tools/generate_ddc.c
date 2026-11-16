@@ -261,6 +261,44 @@ static int chosen_from(const char *path, const int *list, int n, const char *lis
     return 0;
 }
 
+/* Rotation speed of the mode: cfg.ant.availableRpm holds 1 ... MAX_AVAILABLE different positive
+ * numbers [rev/min] (missing or empty: cfg.ant.rpm alone), cfg.ant.rpm (missing or empty: the first
+ * of them) is one of them (setup_radar.m: rpm_choice). */
+static double rpm_choice(int *nAvailable)
+{
+    const int hasRpm = has("ant.rpm") && !empty("ant.rpm");
+    double list[MAX_AVAILABLE];
+    int n = 0;
+    if (has("ant.availableRpm") && !empty("ant.availableRpm")) {
+        const MValue *v = field("ant.availableRpm", 1);
+        n = v->type == MV_NUM ? v->rows * v->cols : 0;
+        int ok = n >= 1 && n <= MAX_AVAILABLE;
+        for (int i = 0; ok && i < n; i++) {
+            list[i] = v->re[i];
+            ok = isfinite(list[i]) && list[i] > 0;
+            for (int k = 0; ok && k < i; k++) ok = list[k] != list[i];
+        }
+        if (!ok) fail("cfg.ant.availableRpm must hold 1 to %d different positive rotation speeds [rev/min].", MAX_AVAILABLE);
+    } else if (hasRpm) {
+        list[n++] = num("ant.rpm");
+    } else {
+        fail("cfg.ant.availableRpm (rotation speeds of the mode) and cfg.ant.rpm are not set (radar mode file).");
+    }
+    const double rpm = hasRpm ? num("ant.rpm") : list[0];
+    for (int i = 0; i < n; i++) {
+        if (rpm == list[i]) {
+            if (rpm <= 0 || !isfinite(rpm)) fail("cfg.ant.rpm must be a positive rotation speed [rev/min].");
+            if (nAvailable) *nAvailable = n;
+            return rpm;
+        }
+    }
+    char txt[MAX_AVAILABLE * 16 + 4] = "[";
+    for (int i = 0; i < n; i++) snprintf(txt + strlen(txt), sizeof txt - strlen(txt), i ? " %g" : "%g", list[i]);
+    strcat(txt, "]");
+    fail("cfg.ant.rpm = %g is not one of cfg.ant.availableRpm = %s.", rpm, txt);
+    return 0;
+}
+
 /* Pair k of a numbered set of an input file: <base>_<k>, or <base> alone for pair 1 (a file with
  * one pair). NULL when the file does not hold it. */
 static const MatVar *find_pair(const MatFile *m, const char *base, int k)
@@ -633,7 +671,7 @@ static void setup(Radar *s)
     if (s->nCh < 1) fail("cfg.ant.nElements must be at least 1");
     s->height = num("ant.height_m");
     s->tilt = num("ant.tilt_deg");
-    s->rate = num("ant.rpm") * 360.0 / 60.0;
+    s->rate = rpm_choice(NULL) * 360.0 / 60.0;
     s->az0 = num("ant.az0_deg");
 
     /* antenna file */

@@ -61,6 +61,10 @@ function ok = test_modes()
 %      row of the stagger position of its oldest pulse (direct sum); on slowly
 %      moving clutter (0.3 m/s) both null DC, but the time-varying weights
 %      leave a much smaller residue than [1 -2 1] on the staggered pulses.
+%  15. Antenna rotation speed of the mode: cfg.ant.rpm (one of
+%      cfg.ant.availableRpm, default the first) sets the rotation rate and the
+%      CPI length; every mode file sets both; an rpm not available and invalid
+%      lists refused.
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));
 ok = true;
@@ -204,11 +208,13 @@ for k = 0:5
     setsOf{k+1} = flat_fields(m);
     fieldsOk = fieldsOk && all(isfield(m, procFields)) && isfield(m.rx, 'stc') && isfield(m.rx, 'maxRange_m') && ...
                all(isfield(m.files, {'stagger', 'scan2scan', 'phaseCode', 'mtiFir'})) && ...
+               isfield(m, 'ant') && all(isfield(m.ant, {'availableRpm', 'rpm'})) && ...
                isequal(sort(setsOf{k+1}), sort(setsOf{1}));
 end
 txt = fileread(fullfile(root, 'radar_config.m'));
 noneInConfig = isempty(regexp(txt, '(?m)^cfg\.(proc|mti|cfar|prune|report|extract|track|prf|wave)\.', 'once')) && ...
-               isempty(regexp(txt, '(?m)^cfg\.rx\.(stc|maxRange_m)', 'once'));
+               isempty(regexp(txt, '(?m)^cfg\.rx\.(stc|maxRange_m)', 'once')) && ...
+               isempty(regexp(txt, '(?m)^cfg\.ant\.(rpm|availableRpm)', 'once'));
 ok = report(sprintf('every mode file sets the same %d settings (processing chain, timing, files); radar_config.m none', ...
             numel(setsOf{1})), fieldsOk && noneInConfig) && ok;
 c = cfg;
@@ -514,6 +520,44 @@ ratio = 10*log10(mean(abs(y).^2) / mean(abs(yFix).^2));
 ok = report(sprintf(['time-varying MTI: every output with the weights of its oldest pulse''s stagger position; ', ...
                      'clutter at 0.3 m/s: residue %.1f dB below [1 -2 1] on the staggered pulses, DC nulled'], -ratio), ...
             max(abs(y - yRef)) < 1e-12 && max(abs(dc)) < 1e-12 && ratio < -20) && ok;
+
+%% 15) antenna rotation speed of the mode
+cr = cfg;
+rpmOk = true;
+for rpm = cr.ant.availableRpm
+    cr.ant.rpm = rpm;
+    sr = setup_radar(cr);
+    rpmOk = rpmOk && sr.ant.rpm == rpm && abs(sr.ant.rate_dps - 6*rpm) < 1e-12 && ...
+            isequal(sr.ant.availableRpm, cr.ant.availableRpm) && ...
+            sr.cpi.length == round(sr.ant.azBeamwidth_deg / (sr.ant.rate_dps * mean(sr.pri)));
+end
+ok = report(sprintf('rotation speed: every rpm of availableRpm %s sets the rotation rate and the CPI length', ...
+            mat2str(cr.ant.availableRpm)), rpmOk) && ok;
+cr = cfg;  cr.ant.availableRpm = [7.5 4];  cr.ant.rpm = [];
+sr = setup_radar(cr);
+ok = report('rotation speed: availableRpm [7.5 4] without rpm uses 7.5 rpm (the first, 45 deg/s)', ...
+            sr.ant.rpm == 7.5 && abs(sr.ant.rate_dps - 45) < 1e-12) && ok;
+modeRpmOk = true;
+for k = 0:7
+    m = feval(sprintf('radar_config_mode_%d', k), struct('modes', cfg.modes));
+    modeRpmOk = modeRpmOk && any(m.ant.rpm == m.ant.availableRpm);
+end
+c2 = cfg;  c2.ant.rpm = 99;  c2.modes.active = 1;  c2 = apply_radar_mode(c2);
+ok = report('rotation speed: every mode file sets availableRpm and an rpm of it; apply_radar_mode replaces rpm', ...
+            modeRpmOk && c2.ant.rpm == 6) && ok;
+% {availableRpm, rpm, part of the message}
+bad = {[6 12], 9, 'is not one of cfg.ant.availableRpm';
+       [6 6], 6, 'cfg.ant.availableRpm must hold';
+       [6 -3], 6, 'cfg.ant.availableRpm must hold';
+       [6 Inf], 6, 'cfg.ant.availableRpm must hold';
+       [], [], 'are not set'};
+for i = 1:size(bad, 1)
+    cb = cfg;  cb.ant.availableRpm = bad{i, 1};  cb.ant.rpm = bad{i, 2};
+    msg = '';
+    try, setup_radar(cb); catch e, msg = e.message; end
+    ok = report(sprintf('rotation speed refused: availableRpm %s, rpm %s', mat2str(bad{i, 1}), mat2str(bad{i, 2})), ...
+                ~isempty(strfind(msg, bad{i, 3}))) && ok;
+end
 rmdir(tmpd, 's');
 end
 

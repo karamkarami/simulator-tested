@@ -36,7 +36,8 @@ ddcF = load_input(cfg, ddcFile, struct('fs_Hz', fs, 'decimation', ddcDecim, ...
 sys.ant = ant;
 sys.ant.height_m = cfg.ant.height_m;
 sys.ant.tilt_deg = cfg.ant.tilt_deg;
-sys.ant.rate_dps = cfg.ant.rpm * 360 / 60;                    % rotation rate [deg/s]
+[sys.ant.rpm, sys.ant.availableRpm] = rpm_choice(cfg.ant);    % rotation speed of the mode [rev/min]
+sys.ant.rate_dps = sys.ant.rpm * 360 / 60;                    % rotation rate [deg/s]
 sys.ant.azBeamwidth_deg = beamwidth_3dB(ant.az_deg, ant.azGain_dB);
 sys.ant.azSpan_deg = 3 * sys.ant.azBeamwidth_deg;             % echoes outside +-azSpan are ignored
 sys.nCh = cfg.ant.nElements;
@@ -719,6 +720,28 @@ sys.dop.nLooks = min(nLooks(tested));
 % Median / mean of the noise power (used to estimate the noise floor of a beam)
 L = sys.dop.nLooks;
 sys.dop.medianToMean = fzero(@(x) gammainc(L*x, L) - 0.5, [0.1 2]);
+end
+
+function [rpm, list] = rpm_choice(ant)
+% cfg.ant.availableRpm: the rotation speeds the mode may use (1 ... 64 different positive numbers,
+% missing or empty: cfg.ant.rpm alone); cfg.ant.rpm (missing or empty: the first of them): the one in use.
+rpm = [];
+if isfield(ant, 'rpm'), rpm = ant.rpm; end
+list = rpm;
+if isfield(ant, 'availableRpm') && ~isempty(ant.availableRpm), list = ant.availableRpm; end
+if isempty(list)
+    error('cfg.ant.availableRpm (rotation speeds of the mode) and cfg.ant.rpm are not set (radar mode file).');
+end
+if ~isnumeric(list) || ~isreal(list) || numel(list) > 64 || any(~isfinite(list(:))) || any(list(:) <= 0) || ...
+        numel(unique(list(:))) ~= numel(list)
+    error('cfg.ant.availableRpm must hold 1 to 64 different positive rotation speeds [rev/min] (is %s).', mat2str(list));
+end
+list = double(list(:)).';
+if isempty(rpm), rpm = list(1); end
+if ~isnumeric(rpm) || ~isscalar(rpm) || ~any(rpm == list)
+    error('cfg.ant.rpm = %s is not one of cfg.ant.availableRpm = %s.', mat2str(rpm), mat2str(list));
+end
+rpm = double(rpm);
 end
 
 function [k, sets] = stagger_choice(cfg)

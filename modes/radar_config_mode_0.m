@@ -8,12 +8,12 @@ function cfg = radar_config_mode_0(cfg)
 %
 %   cfg = RADAR_CONFIG_MODE_0(cfg) sets everything of this mode in cfg: the
 %   waveforms, transmit times and receive windows of both sub-pulses (each
-%   one on or off), the PRF, the input files of the
+%   one on or off), the PRF, the antenna rotation speed, the input files of the
 %   processing (stagger, scan-to-scan PRFs, phase codes, FIR clutter filter),
 %   the STC and the whole receiver processing chain (pulse compression, CPI
 %   buffer, Doppler window and FFT, clutter filter, CFAR, pruning, reports,
 %   plot extraction, tracking). Common to all modes (radar_config.m): the
-%   antenna, transmitter, receiver gain, ADC, DDC, clutter, targets, recording
+%   antenna (except its rotation speed), transmitter, receiver gain, ADC, DDC, clutter, targets, recording
 %   and display. radar_config.m calls this file (through apply_radar_mode.m)
 %   when this mode is cfg.modes.active. Every mode file sets the same fields
 %   (all of them), so that selecting another mode with apply_radar_mode
@@ -125,6 +125,15 @@ cfg.prf.pri_s = 1e-3;                   % PRI in fixed mode [s] (at least the en
 % staggerSet not in availableStaggerSets, stops with a message.
 cfg.prf.availableStaggerSets = [1 2 3 4]; % staggered PRF: (T, w) pairs of cfg.files.stagger this mode may use
 cfg.prf.staggerSet           = 1;         % staggered PRF: pair in use (one of availableStaggerSets)
+
+%% Antenna rotation of this mode (each mode may turn the antenna at another speed)
+% availableRpm lists the rotation speeds this mode may use and rpm (one of them) selects the one in
+% use. It sets the rotation rate (rpm * 6 deg/s): the scan time, the pulses per beamwidth (the CPI
+% length with cfg.proc.cpiMode = 'auto'), the azimuth steps of the plot extraction and the tracker.
+% An rpm not in availableRpm, or a list that is not 1 to 64 different positive numbers, stops with
+% a message.
+cfg.ant.availableRpm = [6 12];          % rotation speeds this mode may use [rev/min]
+cfg.ant.rpm          = 6;               % rotation speed in use [rev/min] (one of availableRpm; [] = the first)
 
 %% Input files of this mode (each mode may have its own files)
 cfg.files.stagger   = fullfile(root, 'inputs', 'stagger_prf.mat');    % staggered PRIs + MTI weights (cfg.prf.mode = 'staggered')

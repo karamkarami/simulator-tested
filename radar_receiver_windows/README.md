@@ -240,7 +240,9 @@ record within 3e-14 (relative).
   `cfg.prf.availableStaggerSets` of `cfg.files.stagger`) the MTI weights
   (`mtiCoeffs`, length(T) rows, one per stagger position: applied
   time-varying, by the stagger index of every PRI) and the
-  Doppler axis. Records `ddcRecord` = [manual 1/0, time of the first DDC
+  Doppler axis. The rotation speed of the mode (`cfg.ant.rpm`, one of
+  `cfg.ant.availableRpm`) sets `rate_dps` (record `rpm` for information),
+  the CPI length and the azimuth steps. Records `ddcRecord` = [manual 1/0, time of the first DDC
   sample], `codeIndex` = [short long] (0: no phase code) and `staggerSet`
   (0: not staggered) are printed at the start (information). Both exporters
   and `radar_generate_ddc` check the choices against the files. Another mode: `--set "cfg.modes.active = 1; cfg =

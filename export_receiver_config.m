@@ -43,6 +43,7 @@ r{end+1} = {'beamU', sys.dbf.beamU};
 r{end+1} = {'tilt_deg', sys.ant.tilt_deg};
 r{end+1} = {'height_m', sys.ant.height_m};
 r{end+1} = {'rate_dps', sys.ant.rate_dps};
+r{end+1} = {'rpm', sys.ant.rpm};                        % rotation speed of the mode [rev/min] (information)
 r{end+1} = {'azBeamwidth_deg', sys.ant.azBeamwidth_deg};
 r{end+1} = {'maxRange_m', cfg.rx.maxRange_m};
 r{end+1} = {'nDdc', sys.nDdc};

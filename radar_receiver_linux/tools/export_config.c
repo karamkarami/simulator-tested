@@ -548,6 +548,44 @@ static int chosen_from(const char *path, const int *list, int n, const char *lis
     return 0;
 }
 
+/* Rotation speed of the mode: cfg.ant.availableRpm holds 1 ... MAX_AVAILABLE different positive
+ * numbers [rev/min] (missing or empty: cfg.ant.rpm alone), cfg.ant.rpm (missing or empty: the first
+ * of them) is one of them (setup_radar.m: rpm_choice). */
+static double rpm_choice(int *nAvailable)
+{
+    const int hasRpm = has("ant.rpm") && !empty("ant.rpm");
+    double list[MAX_AVAILABLE];
+    int n = 0;
+    if (has("ant.availableRpm") && !empty("ant.availableRpm")) {
+        const MValue *v = field("ant.availableRpm", 1);
+        n = v->type == MV_NUM ? v->rows * v->cols : 0;
+        int ok = n >= 1 && n <= MAX_AVAILABLE;
+        for (int i = 0; ok && i < n; i++) {
+            list[i] = v->re[i];
+            ok = isfinite(list[i]) && list[i] > 0;
+            for (int k = 0; ok && k < i; k++) ok = list[k] != list[i];
+        }
+        if (!ok) fail("cfg.ant.availableRpm must hold 1 to %d different positive rotation speeds [rev/min].", MAX_AVAILABLE);
+    } else if (hasRpm) {
+        list[n++] = num("ant.rpm");
+    } else {
+        fail("cfg.ant.availableRpm (rotation speeds of the mode) and cfg.ant.rpm are not set (radar mode file).");
+    }
+    const double rpm = hasRpm ? num("ant.rpm") : list[0];
+    for (int i = 0; i < n; i++) {
+        if (rpm == list[i]) {
+            if (rpm <= 0 || !isfinite(rpm)) fail("cfg.ant.rpm must be a positive rotation speed [rev/min].");
+            if (nAvailable) *nAvailable = n;
+            return rpm;
+        }
+    }
+    char txt[MAX_AVAILABLE * 16 + 4] = "[";
+    for (int i = 0; i < n; i++) snprintf(txt + strlen(txt), sizeof txt - strlen(txt), i ? " %g" : "%g", list[i]);
+    strcat(txt, "]");
+    fail("cfg.ant.rpm = %g is not one of cfg.ant.availableRpm = %s.", rpm, txt);
+    return 0;
+}
+
 /* Pair k of a numbered set of an input file: <base>_<k>, or <base> alone for pair 1 (a file with
  * one pair). NULL when the file does not hold it. */
 static const MatVar *find_pair(const MatFile *m, const char *base, int k)
@@ -1113,7 +1151,8 @@ static void export_config(void)
     free(azv);
     free(gv);
     mat_free(&ant);
-    const double rate = num("ant.rpm") * 360.0 / 60.0;
+    int nAvRpm = 1;
+    const double rpm = rpm_choice(&nAvRpm), rate = rpm * 360.0 / 60.0;
     const int nCh = (int)num("ant.nElements");
     const double tilt = num("ant.tilt_deg");
 
@@ -1695,6 +1734,7 @@ static void export_config(void)
     rec_scalar("tilt_deg", tilt);
     rec_scalar("height_m", num("ant.height_m"));
     rec_scalar("rate_dps", rate);
+    rec_scalar("rpm", rpm);
     rec_scalar("azBeamwidth_deg", azBeamwidth);
     rec_scalar("maxRange_m", maxRange);
     rec_scalar("nDdc", nDdc);
@@ -1958,10 +1998,11 @@ static void export_config(void)
                nCh, nBeams, nDdc, fsOut / 1e6, ws->nRange, wl->nRange, cpiLength, nfft, nRows,
                mtiFir ? "FIR" : "canceller", nTaps, cfarType == 0 ? "CA" : cfarType == 1 ? "GO" : cfarType == 2 ? "SO" : "OS",
                method, 10 * log10(alpha), cfar_pfa(alpha, &det), nLooks);
-        printf("Radar mode %d%s%s: short %s, long %s\n", radarMode, has("modes.name") ? " " : "",
+        printf("Radar mode %d%s%s: short %s, long %s; %g rpm (of %d available)\n", radarMode, has("modes.name") ? " " : "",
                has("modes.name") ? str("modes.name") : "",
                !ws->enable ? "off" : ws->phaseCode ? (ws->mismatch ? "phase code (mismatch)" : "phase code") : "LFM",
-               !wl->enable ? "off" : wl->phaseCode ? (wl->mismatch ? "phase code (mismatch)" : "phase code") : "LFM");
+               !wl->enable ? "off" : wl->phaseCode ? (wl->mismatch ? "phase code (mismatch)" : "phase code") : "LFM",
+               rpm, nAvRpm);
         printf("DDC record (%s): %d samples, the first at %.3f us", manualDdc ? "manual" : "automatic", nDdc, tDdc[0] * 1e6);
         for (int i = 0; i < 2; i++)
             if (wv[i].enable && wv[i].phaseCode) printf("; %s code %d (of %d available)", names[i], wv[i].codeIndex, nAvCodes[i]);

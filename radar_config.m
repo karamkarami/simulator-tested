@@ -44,7 +44,7 @@ cfg.ant.elementSpacing_lambda = 0.66;  % element spacing in elevation [wavelengt
 % (azimuth: fixed 4.1 deg beam of every element; patterns come from the antenna file)
 cfg.ant.height_m  = 6;    % antenna height above the ground [m]
 cfg.ant.tilt_deg  = 11;   % array tilt above the horizon [deg]
-cfg.ant.rpm       = 6;    % rotation speed [rev/min]
+% (rotation speed: cfg.ant.availableRpm / cfg.ant.rpm of the radar mode, modes/radar_config_mode_<k>.m)
 cfg.ant.az0_deg   = 0;    % antenna azimuth at t = 0, clockwise from North [deg]
 
 %% Transmitter and receiver
