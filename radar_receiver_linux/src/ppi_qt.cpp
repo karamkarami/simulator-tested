@@ -3233,20 +3233,6 @@ private:
         row->addLayout(s, 2);
         QObject::connect(logButton_, &QPushButton::clicked, [this]() { toggleLog(); });
         v->addWidget(box);
-        QLabel *note = new QLabel(QStringLiteral(
-            "At the start, radar_parameters.mat holds every setting of the processing chain (struct params; changes of "
-            "the CFAR threshold during the log are noted in log_info.txt). "
-            "One MAT-file per PRI and block: ddc/ddc_<n>.mat (I, Q, hdr: the DDC files of the simulator, the receiver can "
-            "process them again with radar_stream_send), dbf/dbf_<n>.mat (beams), mf/mf_<n>.mat (pulse compression), "
-            "doppler/doppler_<n>.mat (range-velocity maps of the CPI updates), detection/detection_<n>.mat (detections "
-            "and plots); <n> is the pulse number. A thread of its own writes the files; while the log runs the PPI shows "
-            "REC in its corner and the timing panel the time of the logging. When the disk cannot keep up, PRIs are "
-            "dropped from the log (counted below). Screen record: this window with the mouse pointer and the sound of the "
-            "microphone (without sound when there is no microphone), encoded by ffmpeg (installed, or next to the program) to screen_record.mp4 of the log; it ends "
-            "with Stop logging."), page);
-        note->setObjectName(QStringLiteral("note"));
-        note->setWordWrap(true);
-        v->addWidget(note);
         v->addWidget(buildRadarSettings(page));
         v->addStretch(1);
         return page;
@@ -3307,6 +3293,10 @@ private:
                 board_control_request(g_board, BOARD_REQ_SET, i ? BOARD_F2 : BOARD_F1, bF_[i]->value(), nullptr);
             });
         }
+        for (int col = 0; col < 8; col++) g->setColumnStretch(col, 0);   /* each label next to its field */
+        g->setColumnStretch(8, 1);                                         /* the free space on the right */
+        for (int col = 1; col < 8; col += 2) g->setColumnMinimumWidth(col, 150);
+        for (int col = 2; col < 8; col += 2) g->setColumnMinimumWidth(col - 1, 150);
         v->addLayout(g);
         QHBoxLayout *b = new QHBoxLayout();
         QPushButton *resetMode = new QPushButton(QStringLiteral("Reset defaults for this mode"), box);
