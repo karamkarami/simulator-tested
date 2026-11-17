@@ -16,6 +16,11 @@
  *   params.tracker     tracker settings (EKF / PMBM / TOMHT)
  *   params.runtime     options of the receiver: matched filter method, threads, update rate,
  *                      Doppler/CFAR skipped (behind the stream), range-Doppler rate of the PPI
+ *   params.cfg         the whole cfg of the MATLAB configuration (radar_config.m with its radar
+ *                      mode, every setting of the radar and of the simulation) as exported with the
+ *                      configuration file (record cfgText; missing in files of older exporters)
+ *   params.exported    every record of the configuration file as read by the receiver (double,
+ *                      complex where the file holds complex values; the indices 0-based as there)
  *
  * Indices are 1-based (MATLAB), arrays are columns as in the exported configuration.
  */
@@ -103,6 +108,7 @@ static MatStruct *pulse_struct(const RadarConfig *cfg, int p)
     SC(s, "mtiCells", q->mtiCells);
     SC(s, "vrSpan_mps", q->vrSpan_mps);
     col_double(s, "beamU", q->beamU, q->beamU ? cfg->nBeams : 0);
+    col_single(s, "txPulse", q->pulseRe, q->pulseIm, q->nPulse);   /* transmitted pulse at the DDC rate */
     if (cfg->nfft > 0 && cfg->dopFreq_Hz && q->lambda_m > 0) {   /* velocity of the Doppler bins */
         double *v = malloc(sizeof(double) * (size_t)cfg->nfft);
         if (!v) abort();
@@ -111,6 +117,176 @@ static MatStruct *pulse_struct(const RadarConfig *cfg, int p)
         free(v);
     }
     return s;
+}
+
+
+/* ---- params.cfg: the text of record cfgText (format in export_receiver_config.m) ---- */
+
+typedef struct { const char *p, *end; } Text;
+
+static int next_line(Text *t, const char **line, size_t *len)
+{
+    if (t->p >= t->end) return 0;
+    const char *e = memchr(t->p, '\n', (size_t)(t->end - t->p));
+    if (!e) e = t->end;
+    *line = t->p;
+    *len = (size_t)(e - t->p);
+    t->p = e < t->end ? e + 1 : e;
+    return 1;
+}
+
+/* unescaped line into a new zero-terminated string */
+static char *unescape(const char *s, size_t n)
+{
+    char *o = malloc(n + 1), *d = o;
+    if (!o) abort();
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\\' && i + 1 < n) {
+            const char c = s[++i];
+            *d++ = c == 'n' ? '\n' : c == 'r' ? '\r' : c == 't' ? '\t' : c;
+        } else *d++ = s[i];
+    }
+    *d = '\0';
+    return o;
+}
+
+static int parse_numbers(Text *t, double *v, size_t n)
+{
+    const char *line;
+    size_t len;
+    if (!next_line(t, &line, &len)) return -1;
+    char *buf = malloc(len + 1);
+    if (!buf) abort();
+    memcpy(buf, line, len);
+    buf[len] = '\0';
+    char *p = buf;
+    for (size_t i = 0; i < n; i++) {
+        char *e;
+        v[i] = strtod(p, &e);
+        if (e == p) { free(buf); return -1; }
+        p = e;
+    }
+    free(buf);
+    return 0;
+}
+
+/* one value (header line and data) into s as field 'name' of the header ('-': cell element) */
+static int parse_value(Text *t, MatStruct *s, int depth)
+{
+    const char *line;
+    size_t len;
+    if (depth > 64 || !next_line(t, &line, &len) || len == 0 || len > 200) return -1;
+    char head[201], kind, name[96] = "";
+    memcpy(head, line, len);
+    head[len] = '\0';
+    long rows = -1, cols = -1, nf = 0;
+    kind = head[0];
+    if (kind == 't') {
+        if (sscanf(head + 1, "%ld %ld %ld %95s", &rows, &cols, &nf, name) != 4) return -1;
+    } else if (sscanf(head + 1, "%ld %ld %95s", &rows, &cols, name) != 3) return -1;
+    if (rows < 0 || cols < 0 || nf < 0 || (rows && cols > 100000000L / rows)) return -1;
+    const char *field = strcmp(name, "-") ? name : "";
+    const size_t n = (size_t)rows * (size_t)cols;
+    switch (kind) {
+    case 'n': case 'l': case 'z': {
+        double *re = malloc(sizeof(double) * (n ? n : 1)), *im = kind == 'z' ? malloc(sizeof(double) * (n ? n : 1)) : NULL;
+        if (!re || (kind == 'z' && !im)) abort();
+        int bad = parse_numbers(t, re, n) || (im && parse_numbers(t, im, n));
+        if (!bad) {
+            if (kind == 'l') mat_struct_logical(s, field, re, (size_t)rows, (size_t)cols);
+            else if (im) mat_struct_complex(s, field, re, im, (size_t)rows, (size_t)cols);
+            else mat_struct_double(s, field, re, (size_t)rows, (size_t)cols);
+        }
+        free(re);
+        free(im);
+        return bad ? -1 : 0;
+    }
+    case 's': {
+        char *m = malloc(n ? n : 1);                     /* column-major, rows padded with blanks */
+        if (!m) abort();
+        memset(m, ' ', n ? n : 1);
+        for (long r = 0; r < rows; r++) {
+            if (!next_line(t, &line, &len)) { free(m); return -1; }
+            char *u = unescape(line, len);
+            for (long c = 0; c < cols && u[c]; c++) m[r + rows * c] = u[c];
+            free(u);
+        }
+        mat_struct_char_matrix(s, field, m, (size_t)rows, (size_t)cols);
+        free(m);
+        return 0;
+    }
+    case 'u': {
+        if (!next_line(t, &line, &len)) return -1;
+        char *u = unescape(line, len);
+        mat_struct_char(s, field, u);
+        free(u);
+        return 0;
+    }
+    case 'c': case 't': {
+        MatStruct *c = kind == 'c' ? mat_cell_new((size_t)rows, (size_t)cols)
+                     : n == 1 ? mat_struct_new() : mat_struct_array_new((size_t)rows, (size_t)cols);
+        const size_t count = kind == 'c' ? n : n * (size_t)nf;
+        for (size_t i = 0; i < count; i++)
+            if (parse_value(t, c, depth + 1)) { mat_struct_free(c); return -1; }
+        mat_struct_struct(s, field, c);
+        return 0;
+    }
+    default:
+        return -1;
+    }
+}
+
+static const ConfigRecord *record(const RadarConfig *cfg, const char *name)
+{
+    for (int i = 0; i < cfg->nRecords; i++)
+        if (!strcmp(cfg->records[i].name, name)) return &cfg->records[i];
+    return NULL;
+}
+
+static void cfg_section(MatStruct *P, const RadarConfig *cfg)
+{
+    const ConfigRecord *r = record(cfg, "cfgText");
+    if (!r || r->isComplex) {
+        mat_struct_char(P, "cfg", "not in the configuration file (export it again with export_receiver_config.m "
+                                  "or radar_export_config)");
+        return;
+    }
+    const size_t n = (size_t)r->rows * r->cols;
+    char *txt = malloc(n + 1);
+    if (!txt) abort();
+    for (size_t i = 0; i < n; i++) {
+        const double c = r->data[i];
+        txt[i] = c >= 1 && c < 256 ? (char)(unsigned char)c : '?';
+    }
+    txt[n] = '\0';
+    /* the top value is struct 'cfg': parsed into a holder, so a broken text leaves no half struct */
+    MatStruct *holder = mat_struct_new();
+    Text t = { txt, txt + n };
+    if (parse_value(&t, holder, 0) == 0) mat_struct_append(P, holder);
+    else {
+        mat_struct_free(holder);
+        mat_struct_char(P, "cfg", "record cfgText of the configuration file could not be read");
+    }
+    free(txt);
+}
+
+static void exported_section(MatStruct *P, const RadarConfig *cfg)
+{
+    MatStruct *s = mat_struct_new();
+    for (int i = 0; i < cfg->nRecords; i++) {
+        const ConfigRecord *r = &cfg->records[i];
+        if (!strcmp(r->name, "cfgText") || !r->name[0]) continue;
+        const size_t n = (size_t)r->rows * r->cols;
+        if (r->isComplex) {
+            double *re = malloc(sizeof(double) * (n ? n : 1)), *im = malloc(sizeof(double) * (n ? n : 1));
+            if (!re || !im) abort();
+            for (size_t k = 0; k < n; k++) { re[k] = r->data[2 * k]; im[k] = r->data[2 * k + 1]; }
+            mat_struct_complex(s, r->name, re, im, r->rows, r->cols);
+            free(re);
+            free(im);
+        } else mat_struct_double(s, r->name, r->data, r->rows, r->cols);
+    }
+    mat_struct_struct(P, "exported", s);
 }
 
 int radar_parameters_write(const char *path, const RadarConfig *cfg, const RuntimeParams *rt)
@@ -189,6 +365,23 @@ int radar_parameters_write(const char *path, const RadarConfig *cfg, const Runti
         for (int k = 0; k < cfg->nPrf; k++) pri[k] = cfg->prf[k].pri_s;
         col_double(s, "prfPri_s", pri, cfg->nPrf);
         free(pri);
+        MatStruct *a = mat_struct_array_new((size_t)cfg->nPrf, 1);   /* slow-time settings of every PRF */
+        for (int k = 0; k < cfg->nPrf; k++) {
+            const PrfProfile *q = &cfg->prf[k];
+            SC(a, "pri_s", q->pri_s);
+            SC(a, "cpiLength", q->cpiLength);
+            SC(a, "rowLen", q->rowLen);
+            SC(a, "nfft", q->nfft);
+            SC(a, "notchBins", q->notchBins);
+            SC(a, "minHits", q->minHits);
+            col_single(a, "dopWindow", q->dopWindow, NULL, q->rowLen);
+            col_single(a, "noiseGain", q->noiseGain, NULL, q->nfft);
+            col_single(a, "noiseGainBypass", q->noiseGainBypass, NULL, q->nfft);
+            col_double(a, "dopFreq_Hz", q->dopFreq_Hz, q->nfft);
+            SC(a, "trackVrSpan", q->trackVrSpan);
+            mat_struct_double(a, "trackVrSpanPulse", q->trackVrSpanPulse, 1, 2);
+        }
+        mat_struct_struct(s, "prf", a);
     }
     mat_struct_char(s, "mtiType", cfg->mtiType == MTI_FIR ? "fir" : "canceller");
     matrix_double(s, "mtiCoeffs", cfg->mtiCoeffs, cfg->nStagger, cfg->nMtiTaps);
@@ -311,6 +504,9 @@ int radar_parameters_write(const char *path, const RadarConfig *cfg, const Runti
             SC(m, "varUnusedA", cfg->pmbmVarUnusedA);
             SC(m, "varUnusedW", cfg->pmbmVarUnusedW);
             SC(m, "ukfScale", cfg->pmbmUkfScale);
+            SC(m, "wm0", cfg->pmbmWm0);
+            SC(m, "wc0", cfg->pmbmWc0);
+            SC(m, "wi", cfg->pmbmWi);
             SC(m, "latency_s", cfg->pmbmLatency_s);
             SC(m, "maintStep_s", cfg->pmbmMaintStep_s);
             mat_struct_struct(s, "imm", m);
@@ -337,6 +533,9 @@ int radar_parameters_write(const char *path, const RadarConfig *cfg, const Runti
     SC(s, "rdRate_Hz", cfg->rdRate_Hz);
     SC(s, "consolePlots", cfg->consolePlots);
     mat_struct_struct(P, "runtime", s);
+
+    cfg_section(P, cfg);
+    exported_section(P, cfg);
 
     mat_write_tree(w, "params", P);
     return mat_write_close(w);

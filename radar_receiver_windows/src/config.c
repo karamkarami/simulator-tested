@@ -13,11 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct {
-    char     name[33];
-    uint32_t isComplex, rows, cols;
-    double  *data;          /* rows*cols values (complex: 2*rows*cols) */
-} Record;
+typedef ConfigRecord Record;   /* rows*cols values (complex: 2*rows*cols) */
 
 typedef struct {
     Record *rec;
@@ -605,6 +601,12 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             }
         }
     }
+    if (ok && !rs.failed) {                        /* the records stay with the configuration */
+        cfg->records = rs.rec;
+        cfg->nRecords = rs.n;
+        rs.rec = NULL;
+        rs.n = 0;
+    }
     free_records(&rs);
     if (!ok || rs.failed) {
         radar_config_free(cfg);
@@ -629,6 +631,8 @@ void radar_config_free(RadarConfig *cfg)
         free(q->dopWindow);  free(q->noiseGain);  free(q->noiseGainBypass);  free(q->dopFreq_Hz);
     }
     free(cfg->prf);
+    for (int i = 0; i < cfg->nRecords && cfg->records; i++) free(cfg->records[i].data);
+    free(cfg->records);
     memset(cfg, 0, sizeof(*cfg));
 }
 

@@ -2318,6 +2318,89 @@ static void export_config(void)
     }
 }
 
+/* Record cfgText: the whole cfg as text (format in export_receiver_config.m), for radar_parameters.mat
+ * of the receiver's logs. */
+typedef struct { char *p; size_t n, cap; } TextBuf;
+
+static void tb_put(TextBuf *b, const char *s, size_t n)
+{
+    if (b->n + n + 1 > b->cap) {
+        b->cap = 2 * (b->n + n + 1) + 4096;
+        b->p = realloc(b->p, b->cap);
+        if (!b->p) fail("out of memory");
+    }
+    memcpy(b->p + b->n, s, n);
+    b->n += n;
+    b->p[b->n] = '\0';
+}
+
+static void tb_printf(TextBuf *b, const char *fmt, ...)
+{
+    char tmp[512];
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = vsnprintf(tmp, sizeof tmp, fmt, ap);
+    va_end(ap);
+    tb_put(b, tmp, n < 0 ? 0 : (size_t)n < sizeof tmp ? (size_t)n : sizeof tmp - 1);
+}
+
+static void tb_text(TextBuf *b, const char *s)                    /* escaped, one line */
+{
+    for (; s && *s; s++) {
+        if (*s == '\\') tb_put(b, "\\\\", 2);
+        else if (*s == '\n') tb_put(b, "\\n", 2);
+        else if (*s == '\r') tb_put(b, "\\r", 2);
+        else if (*s == '\t') tb_put(b, "\\t", 2);
+        else tb_put(b, s, 1);
+    }
+    tb_put(b, "\n", 1);
+}
+
+static void tb_number(TextBuf *b, double x)
+{
+    if (isnan(x)) tb_printf(b, "NaN ");
+    else if (isinf(x)) tb_printf(b, x > 0 ? "Inf " : "-Inf ");
+    else tb_printf(b, "%.17g ", x);
+}
+
+static void cfg_text(TextBuf *b, const MValue *v, const char *name)
+{
+    switch (v->type) {
+    case MV_NUM:
+        tb_printf(b, "n %d %d %s\n", v->rows, v->cols, name);
+        for (int i = 0; i < v->rows * v->cols; i++) tb_number(b, v->re[i]);
+        tb_put(b, "\n", 1);
+        break;
+    case MV_STR:
+        tb_printf(b, "s %d %d %s\n", v->str && *v->str ? 1 : 0, v->str ? (int)strlen(v->str) : 0, name);
+        if (v->str && *v->str) tb_text(b, v->str);
+        break;
+    case MV_CELL:
+        tb_printf(b, "c %d %d %s\n", v->rows, v->cols, name);
+        for (int i = 0; i < v->rows * v->cols; i++) cfg_text(b, v->cells[i], "-");
+        break;
+    case MV_STRUCT:
+        tb_printf(b, "t 1 1 %d %s\n", v->nFields, name);
+        for (int k = 0; k < v->nFields; k++) cfg_text(b, v->fields[k], v->names[k]);
+        break;
+    default: {                                     /* not evaluated (e.g. target_scenario(...)) */
+        char txt[600];
+        snprintf(txt, sizeof txt, "<not evaluated: %s>", v->str ? v->str : "");
+        tb_printf(b, "u 1 %d %s\n", (int)strlen(txt), name);
+        tb_text(b, txt);
+    }
+    }
+}
+
+static void export_cfg_text(void)
+{
+    TextBuf b = { 0 };
+    cfg_text(&b, g_cfg, "cfg");
+    Rec *r = add_rec("cfgText", 1, (int)b.n, 0);
+    for (size_t i = 0; i < b.n; i++) r->re[i] = (unsigned char)b.p[i];
+    free(b.p);
+}
+
 /* The export and the file (errors of export_config() come back here). */
 static int run_export(const char *outPath)
 {
@@ -2326,6 +2409,7 @@ static int run_export(const char *outPath)
         return 1;
     }
     export_config();
+    export_cfg_text();
     if (write_file(outPath) != 0) {
         fprintf(stderr, "radar_export_config: cannot write %s\n", outPath);
         return 1;

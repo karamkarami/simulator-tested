@@ -44,6 +44,18 @@ void mat_struct_scalar(MatStruct *s, const char *field, double v);
 void mat_struct_single(MatStruct *s, const char *field, const float *re, const float *im, const size_t *dims, int nd);
 void mat_struct_char(MatStruct *s, const char *field, const char *text);
 void mat_struct_struct(MatStruct *s, const char *field, MatStruct *child);
+void mat_struct_complex(MatStruct *s, const char *field, const double *re, const double *im, size_t rows, size_t cols);
+void mat_struct_logical(MatStruct *s, const char *field, const double *v, size_t rows, size_t cols);
+/* char matrix [rows x cols], column-major text (no terminating zero needed) */
+void mat_struct_char_matrix(MatStruct *s, const char *field, const char *text, size_t rows, size_t cols);
+/* A cell array [rows x cols]: its rows*cols values are added in column-major order with the
+ * mat_struct_* functions above (the field name is ignored), then it is put into a struct with
+ * mat_struct_struct. A struct array [rows x cols]: the fields of every element are added element
+ * after element, always the same fields in the same order. */
+MatStruct *mat_cell_new(size_t rows, size_t cols);
+/* moves the fields of src to the end of dst and frees src */
+void mat_struct_append(MatStruct *dst, MatStruct *src);
+MatStruct *mat_struct_array_new(size_t rows, size_t cols);
 void mat_struct_free(MatStruct *s);
 void mat_write_tree(MatWriter *w, const char *name, MatStruct *s);
 /* 1 if built with zlib. */

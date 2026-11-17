@@ -20,6 +20,16 @@ function export_receiver_config(cfg, fileName)
 %   uint32 number of records, then per record: char name[32] (zero padded),
 %   uint32 type (0 = real, 1 = complex), uint32 rows, uint32 cols, and
 %   rows*cols doubles in column-major order (complex: re, im pairs).
+%
+%   Record cfgText holds the whole cfg (every setting of radar_config.m and
+%   of the radar mode) as text, character codes 1 x N: per value a line
+%   "<kind> <rows> <cols> [<fields>] <name>" and its data. Kinds: n (double:
+%   one line of the values, column-major), l (logical, as n), z (complex: a
+%   line of real, a line of imaginary parts), s (char: one line per row, \\,
+%   \n, \r, \t escaped), u (other, e.g. a function handle: one line of text),
+%   c (cell: its rows*cols values follow, name -), t (struct with <fields>
+%   fields: its values follow element after element). The receiver puts it
+%   into params.cfg of radar_parameters.mat of its logs.
 
 root = fileparts(mfilename('fullpath'));
 addpath(root, fullfile(root, 'src'));
@@ -209,6 +219,7 @@ if strcmp(tk.method, 'tomht')                                            % TOMHT
     q = tk.tomht;
     r{end+1} = {'tomhtParams', [q.pd, q.maxHyp, q.kBest, q.logHypPrune, q.nScan, q.confirmScore, q.deleteScore, q.pDelete]};
 end
+r{end+1} = {'cfgText', double(cfg_text(cfg, 'cfg'))};   % the whole cfg (radar_parameters.mat of the logs)
 
 for kFile = 1:numel(fileNames)
     fileName = fileNames{kFile};
@@ -236,4 +247,45 @@ for kFile = 1:numel(fileNames)
     clear cleanFile;                              % close before reporting / next destination
     fprintf('Receiver configuration (%d records, %s PRF) written to %s\n', numel(r), cfg.prf.mode, fileName);
 end
+end
+
+function t = cfg_text(v, name)
+%CFG_TEXT  One value of cfg as text (record cfgText, format in the help above).
+nl = char(10);
+if isa(v, 'string'), v = char(join(v, nl)); end
+if isstruct(v)
+    f = fieldnames(v);
+    t = sprintf('t %d %d %d %s\n', size(v, 1), size(v, 2), numel(f), name);
+    parts = cell(1, numel(v) * numel(f));
+    for e = 1:numel(v)
+        for k = 1:numel(f)
+            parts{(e - 1) * numel(f) + k} = cfg_text(v(e).(f{k}), f{k});
+        end
+    end
+    t = [t parts{:}];
+elseif iscell(v)
+    parts = cell(1, numel(v));
+    for e = 1:numel(v), parts{e} = cfg_text(v{e}, '-'); end
+    t = [sprintf('c %d %d %s\n', size(v, 1), size(v, 2), name) parts{:}];
+elseif ischar(v) && ndims(v) == 2
+    t = sprintf('s %d %d %s\n', size(v, 1), size(v, 2), name);
+    for k = 1:size(v, 1), t = [t text_escape(v(k, :)) nl]; end %#ok<AGROW>
+elseif isnumeric(v) || islogical(v)
+    v = reshape(v, size(v, 1), []);                    % N-D: [rows x the rest]
+    kind = 'n';
+    if islogical(v), kind = 'l'; elseif ~isreal(v), kind = 'z'; end
+    t = [sprintf('%s %d %d %s\n', kind, size(v, 1), size(v, 2), name) sprintf('%.17g ', real(double(v(:)))) nl];
+    if kind == 'z', t = [t sprintf('%.17g ', imag(double(v(:)))) nl]; end
+else
+    if isa(v, 'function_handle'), txt = func2str(v); else, txt = ['<' class(v) '>']; end
+    txt = text_escape(txt);
+    t = sprintf('u 1 %d %s\n%s\n', numel(txt), name, txt);
+end
+end
+
+function s = text_escape(s)
+s = strrep(s, '\', '\\');
+s = strrep(s, char(10), '\n');
+s = strrep(s, char(13), '\r');
+s = strrep(s, char(9), '\t');
 end

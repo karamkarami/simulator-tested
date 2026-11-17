@@ -87,6 +87,13 @@ typedef struct {
     double  trackVrSpan, trackVrSpanPulse[N_PULSES];
 } PrfProfile;
 
+/* A record of the configuration file as read (radar_parameters.mat of the logs) */
+typedef struct {
+    char     name[33];
+    uint32_t isComplex, rows, cols;
+    double  *data;          /* rows*cols values, column-major (complex: re, im pairs) */
+} ConfigRecord;
+
 typedef struct {
     /* antenna and beamforming */
     int     nCh;           /* receive elements: channels of the DDC output (cfg.ant.nElements) */
@@ -234,6 +241,11 @@ typedef struct {
     double  tomhtPd, tomhtLogHypPrune, tomhtConfirmScore, tomhtDeleteScore, tomhtPDelete;
     int     tomhtMaxHyp, tomhtKBest, tomhtNScan;
 
+    /* every record of the file (params.exported of radar_parameters.mat), with cfgText: the whole cfg
+     * of the MATLAB configuration as text (params.cfg; optional in the file) */
+    int           nRecords;
+    ConfigRecord *records;
+
     /* run-time option (not in the file): matched filter method,
      * MF_AUTO (the faster one for the thread count), MF_DIRECT or MF_FFT */
     int     mfMethod;
@@ -375,7 +387,9 @@ enum { PROFILE_NONE = 0, PROFILE_DBF = 1, PROFILE_MF = 2 };
 enum { LOG_DDC = 1, LOG_DBF = 2, LOG_MF = 4, LOG_DOPPLER = 8, LOG_DETECTION = 16 };
 /* LOG_SCREEN: the PPI records its window (with the microphone) to <log>/screen_record.mp4 (ppi_qt.cpp);
  * not a block of the processing (a log with only this bit holds radar_parameters.mat and the video) */
-enum { LOG_SCREEN = 32, LOG_BLOCKS = LOG_DDC | LOG_DBF | LOG_MF | LOG_DOPPLER | LOG_DETECTION };
+enum { LOG_SCREEN = 32 };
+/* LOG_TRACK: the track reports of the tracker (written by the application, the track callback) */
+enum { LOG_TRACK = 64, LOG_BLOCKS = LOG_DDC | LOG_DBF | LOG_MF | LOG_DOPPLER | LOG_DETECTION | LOG_TRACK };
 
 typedef struct {
     int          kind;         /* LOG_DBF, LOG_MF or LOG_DOPPLER                              */
@@ -501,6 +515,7 @@ void logger_begin_pri(Logger *L, const PriData *pri);
 void logger_block(Logger *L, const BlockOutput *out);
 void logger_detections(Logger *L, const Detection *dets, int n);
 void logger_plot(Logger *L, const Detection *plot);
+void logger_track(Logger *L, const Track *t);      /* a track report (LOG_TRACK) */
 void logger_end_pri(Logger *L);
 void logger_stats(Logger *L, LoggerStats *s);
 const char *logger_dir(const Logger *L);
@@ -622,11 +637,16 @@ void ppi_set_log_defaults(const char *folder, const char *name, int mask);
 int  ppi_take_log_request(int *start, char *folder, size_t folderLen, char *name, size_t nameLen, int *mask);
 void ppi_post_log_status(int active, const char *dir, int mask, const LoggerStats *stats, const char *error);
 /* Screen recording of a log with LOG_SCREEN (call before ppi_run; NULL / 0: the defaults): the
- * ffmpeg program (default: next to the program, else on PATH), the sound input ("auto": the
- * default microphone, "none", or "FORMAT:DEVICE" as ffmpeg's -f FORMAT -i DEVICE) and the frame
- * rate (default 10). The window (with the mouse pointer drawn) and the sound go to
+ * ffmpeg program (ffmpeg backend; default: next to the program, else on PATH), the sound input
+ * ("auto": the default microphone, "none"; Qt Multimedia: a part of the microphone's name; ffmpeg:
+ * "FORMAT:DEVICE" as ffmpeg's -f FORMAT -i DEVICE; the tab Controls also has a list of the
+ * microphones with Qt Multimedia) and the frame rate (default 10). The window (with the mouse pointer drawn) and the sound go to
  * <log>/screen_record.mp4 (H.264 + AAC) until the log stops. */
 void ppi_set_screen_record(const char *ffmpeg, const char *audio, double fps);
+/* The program that records: "auto" (default) / "qt" Qt Multimedia when built with it (Qt 6.8 or newer),
+ * else ffmpeg; "ffmpeg" ffmpeg. ppi_record_backend_qt: 1 when Qt Multimedia records. */
+void ppi_set_record_backend(const char *backend);
+int  ppi_record_backend_qt(void);
 /* Accumulated processing times: the panel shows the mean per PRI of every
  * block [us]. detectionName / trackingName label the CFAR and tracking rows
  * (e.g. "CFAR 2-D", "Track 3D CV"; NULL keeps the previous; the panel shortens

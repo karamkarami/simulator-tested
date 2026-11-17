@@ -459,7 +459,7 @@ static void test_log(const char *configPath)
     CHECK(proc != NULL);
     if (!proc) return;
     make_dir("test_log_dir");
-    const int mask = LOG_DDC | LOG_DBF | LOG_MF | LOG_DOPPLER | LOG_DETECTION;
+    const int mask = LOG_DDC | LOG_DBF | LOG_MF | LOG_DOPPLER | LOG_DETECTION | LOG_TRACK;
     LogSink sink = { NULL, 0, 0 };
     sink.log = logger_start("test_log_dir", "run", mask, &cfg, NULL, err, sizeof err);
     CHECK(sink.log != NULL);
@@ -490,6 +490,13 @@ static void test_log(const char *configPath)
         }
         logger_begin_pri(sink.log, &pri);
         processor_process(proc, &pri, &cb);
+        if (k == 3) {                                    /* a track report (the application's track callback) */
+            Track t;
+            memset(&t, 0, sizeof t);
+            t.id = 17; t.confirmed = 1; t.dim = 3; t.time_s = pri.time_s; t.hits = 4;
+            t.pos_m[0] = 3000; t.pos_m[1] = 4000; t.vel_mps[1] = -100; t.alt_m = NAN; t.existence = NAN;
+            logger_track(sink.log, &t);
+        }
         logger_end_pri(sink.log);
     }
     processor_flush(proc, &cb);
@@ -497,7 +504,8 @@ static void test_log(const char *configPath)
     LoggerStats st;
     logger_stop(sink.log, &st);
     const int updates = nPri - cfg.cpiLength + 1;
-    const uint64_t expFiles = 4u * (uint64_t)nPri + (uint64_t)updates;   /* ddc, dbf, mf, detection + doppler */
+    const uint64_t expFiles = 4u * (uint64_t)nPri + (uint64_t)updates + 1;   /* ddc, dbf, mf, detection + doppler
+                                                                                + the PRI with the track report */
     printf("log: %llu PRIs, %llu files, %.2f MB, %llu dropped, %llu errors (expected %llu files)\n",
            (unsigned long long)st.pris, (unsigned long long)st.files, st.bytes / 1e6, (unsigned long long)st.dropped,
            (unsigned long long)st.errors, (unsigned long long)expFiles);
@@ -542,9 +550,34 @@ static void test_log(const char *configPath)
     v = mat_get(&m, "dets");
     CHECK(v && v->cols == 13 && mat_get(&m, "plots") && mat_get(&m, "columns"));
     mat_free(&m);
+    /* the tracking file of the PRI with the report (the files count above: only that one) */
+    snprintf(path, sizeof path, "test_log_dir/run/tracking/tracking_%07u.mat", 503u);
+    CHECK(mat_load(path, &m, err, sizeof err) == 0);
+    v = mat_get(&m, "tracks");
+    CHECK(v && v->rows == 1 && v->cols == 27 && v->re[0] == 17 && fabs(v->re[13] - 5000) < 1e-9 &&
+          fabs(v->re[14] - 36.86989764584402) < 1e-9 && fabs(v->re[17] - 100) < 1e-9 && fabs(v->re[19] + 80) < 1e-9);
+    CHECK(mat_get(&m, "columns") && mat_get(&m, "hdr"));
+    mat_free(&m);
     /* the settings at the start (struct params) and the change noted during the log */
     CHECK(mat_load("test_log_dir/run/radar_parameters.mat", &m, err, sizeof err) == 0);
     CHECK(mat_get(&m, "params") != NULL);
+    {   /* the whole MATLAB cfg (record cfgText of an exported file) and every record of the file */
+        const MatVar *P = mat_get(&m, "params");
+        const MatVar *ex = P ? mat_field(P, "exported") : NULL, *nCh = ex ? mat_field(ex, "nCh") : NULL;
+        CHECK(nCh && nCh->numel == 1 && nCh->re[0] == cfg.nCh);
+        int haveText = 0;
+        for (int i = 0; i < cfg.nRecords; i++) haveText |= !strcmp(cfg.records[i].name, "cfgText");
+        if (haveText) {
+            const MatVar *c = P ? mat_field(P, "cfg") : NULL;
+            const MatVar *wave = c ? mat_field(c, "wave") : NULL, *sh = wave ? mat_field(wave, "short") : NULL;
+            const MatVar *width = sh ? mat_field(sh, "width_s") : NULL, *ant = c ? mat_field(c, "ant") : NULL;
+            const MatVar *nEl = ant ? mat_field(ant, "nElements") : NULL;
+            CHECK(c && c->mxClass == MAT_CLASS_STRUCT && width && width->numel == 1 && width->re[0] > 0);
+            CHECK(nEl && nEl->numel == 1 && nEl->re[0] == cfg.nCh);
+            printf("params.cfg: %d fields, short pulse %.1f us, %g elements\n", c ? c->nFields : 0,
+                   width ? 1e6 * width->re[0] : 0.0, nEl ? nEl->re[0] : 0.0);
+        }
+    }
     mat_free(&m);
     {
         FILE *f = fopen("test_log_dir/run/log_info.txt", "r");

@@ -17,10 +17,10 @@
 #  include <zlib.h>
 #endif
 
-enum { miINT8 = 1, miINT16 = 3, miUINT16 = 4, miINT32 = 5, miUINT32 = 6, miSINGLE = 7, miDOUBLE = 9, miMATRIX = 14,
+enum { miINT8 = 1, miUINT8 = 2, miINT16 = 3, miUINT16 = 4, miINT32 = 5, miUINT32 = 6, miSINGLE = 7, miDOUBLE = 9, miMATRIX = 14,
        miCOMPRESSED = 15 };
-enum { mxCHAR = 4, mxSTRUCT = 2, mxDOUBLE = 6, mxSINGLE = 7, mxINT16 = 10 };
-enum { mxCOMPLEX_FLAG = 0x0800 };
+enum { mxCELL = 1, mxCHAR = 4, mxSTRUCT = 2, mxDOUBLE = 6, mxSINGLE = 7, mxINT16 = 10, mxUINT8 = 9 };
+enum { mxCOMPLEX_FLAG = 0x0800, mxLOGICAL_FLAG = 0x0200 };
 
 typedef struct { unsigned char *p; size_t n, cap; } Buf;
 
@@ -228,15 +228,38 @@ void mat_write_char(MatWriter *w, const char *name, const char *text)
 
 typedef struct { char name[64]; Buf body; } MatField;   /* body: a complete miMATRIX element (no name) */
 
+enum { NODE_STRUCT = 0, NODE_CELL = 1, NODE_STRUCT_ARRAY = 2 };
+
 struct MatStruct {
     MatField *f;
     int       n, cap;
+    int       kind;              /* NODE_...                                              */
+    uint32_t  rows, cols;        /* cell, struct array                                    */
 };
 
 MatStruct *mat_struct_new(void)
 {
     MatStruct *s = calloc(1, sizeof *s);
     if (!s) abort();
+    s->rows = s->cols = 1;
+    return s;
+}
+
+MatStruct *mat_cell_new(size_t rows, size_t cols)
+{
+    MatStruct *s = mat_struct_new();
+    s->kind = NODE_CELL;
+    s->rows = (uint32_t)rows;
+    s->cols = (uint32_t)cols;
+    return s;
+}
+
+MatStruct *mat_struct_array_new(size_t rows, size_t cols)
+{
+    MatStruct *s = mat_struct_new();
+    s->kind = NODE_STRUCT_ARRAY;
+    s->rows = (uint32_t)rows;
+    s->cols = (uint32_t)cols;
     return s;
 }
 
@@ -263,6 +286,49 @@ void mat_struct_double(MatStruct *s, const char *field, const double *v, size_t 
 }
 
 void mat_struct_scalar(MatStruct *s, const char *field, double v) { mat_struct_double(s, field, &v, 1, 1); }
+
+void mat_struct_complex(MatStruct *s, const char *field, const double *re, const double *im, size_t rows, size_t cols)
+{
+    Buf m = { 0 };
+    const uint32_t flags[2] = { mxDOUBLE | mxCOMPLEX_FLAG, 0 };
+    const int32_t dims[2] = { (int32_t)rows, (int32_t)cols };
+    element(&m, miUINT32, flags, 8);
+    element(&m, miINT32, dims, 8);
+    element(&m, miINT8, "", 0);
+    element(&m, miDOUBLE, re, (uint32_t)(sizeof(double) * rows * cols));
+    element(&m, miDOUBLE, im, (uint32_t)(sizeof(double) * rows * cols));
+    matrix_end(add_field(s, field), &m);
+}
+
+void mat_struct_logical(MatStruct *s, const char *field, const double *v, size_t rows, size_t cols)
+{
+    Buf m = { 0 };
+    const uint32_t flags[2] = { mxUINT8 | mxLOGICAL_FLAG, 0 };
+    const int32_t dims[2] = { (int32_t)rows, (int32_t)cols };
+    const size_t n = rows * cols;
+    unsigned char *b = malloc(n > 0 ? n : 1);
+    if (!b) abort();
+    for (size_t i = 0; i < rows * cols; i++) b[i] = v[i] != 0.0;
+    element(&m, miUINT32, flags, 8);
+    element(&m, miINT32, dims, 8);
+    element(&m, miINT8, "", 0);
+    element(&m, miUINT8, b, (uint32_t)(rows * cols));
+    free(b);
+    matrix_end(add_field(s, field), &m);
+}
+
+void mat_struct_char_matrix(MatStruct *s, const char *field, const char *text, size_t rows, size_t cols)
+{
+    Buf m = { 0 };
+    const size_t n = rows * cols;
+    uint16_t *c = malloc(sizeof(uint16_t) * (n ? n : 1));
+    if (!c) abort();
+    for (size_t i = 0; i < n; i++) c[i] = (unsigned char)text[i];
+    matrix_head(&m, mxCHAR, (uint32_t)rows, (uint32_t)cols, "");
+    element(&m, miUINT16, c, (uint32_t)(sizeof(uint16_t) * n));
+    free(c);
+    matrix_end(add_field(s, field), &m);
+}
 
 void mat_struct_single(MatStruct *s, const char *field, const float *re, const float *im, const size_t *dims, int nd)
 {
@@ -303,18 +369,25 @@ void mat_struct_char(MatStruct *s, const char *field, const char *text)
 static void struct_element(Buf *out, const char *name, MatStruct *s)
 {
     Buf m = { 0 };
-    int32_t len = 1;
-    for (int k = 0; k < s->n; k++) {
-        const int32_t l = (int32_t)strlen(s->f[k].name) + 1;
-        if (l > len) len = l;
+    if (s->kind == NODE_CELL) {
+        matrix_head(&m, mxCELL, s->rows, s->cols, name);
+    } else {
+        /* struct array: the values are element after element, the fields of the first give the names */
+        const size_t nEl = (size_t)s->rows * s->cols;
+        const int nf = s->kind == NODE_STRUCT ? s->n : nEl ? (int)(s->n / nEl) : 0;
+        int32_t len = 1;
+        for (int k = 0; k < nf; k++) {
+            const int32_t l = (int32_t)strlen(s->f[k].name) + 1;
+            if (l > len) len = l;
+        }
+        char *names = calloc((size_t)(nf ? nf : 1), (size_t)len);
+        if (!names) abort();
+        for (int k = 0; k < nf; k++) memcpy(names + (size_t)k * len, s->f[k].name, strlen(s->f[k].name));
+        matrix_head(&m, mxSTRUCT, s->rows, s->cols, name);
+        element(&m, miINT32, &len, 4);
+        element(&m, miINT8, names, (uint32_t)(len * nf));
+        free(names);
     }
-    char *names = calloc((size_t)(s->n ? s->n : 1), (size_t)len);
-    if (!names) abort();
-    for (int k = 0; k < s->n; k++) memcpy(names + (size_t)k * len, s->f[k].name, strlen(s->f[k].name));
-    matrix_head(&m, mxSTRUCT, 1, 1, name);
-    element(&m, miINT32, &len, 4);
-    element(&m, miINT8, names, (uint32_t)(len * s->n));
-    free(names);
     for (int k = 0; k < s->n; k++) {
         put(&m, s->f[k].body.p, s->f[k].body.n);
         free(s->f[k].body.p);
@@ -327,6 +400,16 @@ static void struct_element(Buf *out, const char *name, MatStruct *s)
 void mat_struct_struct(MatStruct *s, const char *field, MatStruct *child)
 {
     struct_element(add_field(s, field), "", child);
+}
+
+void mat_struct_append(MatStruct *dst, MatStruct *src)
+{
+    for (int k = 0; k < src->n; k++) {
+        Buf *b = add_field(dst, src->f[k].name);
+        *b = src->f[k].body;
+    }
+    free(src->f);
+    free(src);
 }
 
 void mat_struct_free(MatStruct *s)

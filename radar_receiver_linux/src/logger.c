@@ -27,6 +27,9 @@
  *   <folder>/<name>/detection/detection_<n>.mat  the CFAR detections after the pruning (dets) and the
  *                                           plots closed in the PRI (plots), one row each, columns
  *                                           in 'columns', hdr
+ *   <folder>/<name>/tracking/tracking_<n>.mat    the track reports of the tracker in the PRI (only PRIs
+ *                                           with reports): tracks, one row per report (updates and
+ *                                           deletions), columns in 'columns', tracker (its name), hdr
  *
  * <n> is the pulse number (7 digits). The processing thread only copies the
  * data of a PRI (logger_begin_pri ... logger_end_pri); a writer thread of its
@@ -86,11 +89,15 @@ typedef struct Job {
     /* detections and plots: rows of LOG_COLS doubles */
     double  *dets, *plots;
     int      nDets, capDets, nPlots, capPlots;
+    /* track reports: rows of TRACK_COLS doubles */
+    double  *tracks;
+    int      nTracks, capTracks;
     size_t   bytes;
     struct Job *next;
 } Job;
 
 #define LOG_COLS 13
+#define TRACK_COLS 27
 
 struct Logger {
     char     dir[1024];
@@ -125,6 +132,7 @@ static void job_free(Job *j)
     }
     free(j->dets);
     free(j->plots);
+    free(j->tracks);
     free(j);
 }
 
@@ -281,6 +289,27 @@ static void write_job(Logger *L, const Job *j)
         }
         files += finish(L, w, path);
     }
+    if ((j->mask & LOG_TRACK) && j->nTracks > 0) {
+        snprintf(path, sizeof path, "%s/tracking/tracking_%07u.mat", L->dir, j->pulseNumber);
+        MatWriter *w = mat_write_open(path, 0);
+        if (w) {
+            const int n = j->nTracks;
+            double *m = malloc(sizeof(double) * (size_t)n * TRACK_COLS);
+            if (!m) abort();
+            for (int i = 0; i < n; i++)                          /* rows -> column-major [n x TRACK_COLS] */
+                for (int c = 0; c < TRACK_COLS; c++) m[i + (size_t)n * c] = j->tracks[(size_t)i * TRACK_COLS + c];
+            mat_write_double(w, "tracks", m, (size_t)n, TRACK_COLS);
+            free(m);
+            mat_write_char(w, "columns", "id, confirmed, deleted, time_s, x_m (East), y_m (North), z_m (up), vx_mps, vy_mps, "
+                                         "vz_mps, ax_mps2, ay_mps2, az_mps2, range_m, az_deg, el_deg, alt_m, speed_mps, "
+                                         "heading_deg, vr_mps, hits, misses, existence, pCV, pCA, pCT, dim");
+            char name[96];
+            tracker_name(cfg, name, sizeof name);
+            mat_write_char(w, "tracker", name);
+            write_hdr(w, j);
+        }
+        files += finish(L, w, path);
+    }
     mutex_lock(&L->lock);
     L->files += (uint64_t)files;
     mutex_unlock(&L->lock);
@@ -353,14 +382,15 @@ Logger *logger_start(const char *folder, const char *name, int mask, const Radar
         name = stamp;
     }
     snprintf(L->dir, sizeof L->dir, "%s/%s", folder, name);
-    static const struct { int bit; const char *sub; } subs[5] = {
-        { LOG_DDC, "ddc" }, { LOG_DBF, "dbf" }, { LOG_MF, "mf" }, { LOG_DOPPLER, "doppler" }, { LOG_DETECTION, "detection" } };
+    static const struct { int bit; const char *sub; } subs[6] = {
+        { LOG_DDC, "ddc" }, { LOG_DBF, "dbf" }, { LOG_MF, "mf" }, { LOG_DOPPLER, "doppler" }, { LOG_DETECTION, "detection" },
+        { LOG_TRACK, "tracking" } };
     if (make_dirs(L->dir) != 0) {
         snprintf(err, errLen, "cannot create the folder %s", L->dir);
         free(L);
         return NULL;
     }
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         if (!(mask & subs[i].bit)) continue;
         char p[1200];
         snprintf(p, sizeof p, "%s/%s", L->dir, subs[i].sub);
@@ -374,9 +404,9 @@ Logger *logger_start(const char *folder, const char *name, int mask, const Radar
     {
         const time_t now = time(NULL);
         strftime(started, sizeof started, "%Y-%m-%d %H:%M:%S", localtime(&now));
-        snprintf(blocks, sizeof blocks, "%s%s%s%s%s%s", mask & LOG_DDC ? " ddc" : "", mask & LOG_DBF ? " dbf" : "",
+        snprintf(blocks, sizeof blocks, "%s%s%s%s%s%s%s", mask & LOG_DDC ? " ddc" : "", mask & LOG_DBF ? " dbf" : "",
                  mask & LOG_MF ? " mf" : "", mask & LOG_DOPPLER ? " doppler" : "", mask & LOG_DETECTION ? " detection" : "",
-                 mask & LOG_SCREEN ? " screen" : "");
+                 mask & LOG_TRACK ? " tracking" : "", mask & LOG_SCREEN ? " screen" : "");
     }
     {                                                    /* the settings of the processing chain now */
         char p[1200];
@@ -404,6 +434,11 @@ Logger *logger_start(const char *folder, const char *name, int mask, const Radar
                        "Doppler %d bins (%s), CPI %d pulses, radar mode %d\n", cfg->nCh, cfg->nChUsed, cfg->nBeams,
                     cfg->nDdc, cfg->fsOut_Hz, cfg->pulse[0].nRange, cfg->pulse[1].nRange, cfg->nfft,
                     cfg->dopplerMethod == DOPPLER_NUFFT ? "NUFFT" : "FFT", cfg->cpiLength, cfg->radarMode);
+            if (mask & LOG_TRACK) {
+                char tn[96];
+                tracker_name(cfg, tn, sizeof tn);
+                fprintf(f, "tracker: %s\n", cfg->trackEnable ? tn : "off (cfg.track.enable): no tracking files");
+            }
             fprintf(f, "CFAR threshold %.2f dB at the start\n", 10.0 * log10(rt && rt->alpha > 0 ? rt->alpha : cfg->alpha));
             fprintf(f, "files: radar_parameters.mat (every setting at the start), <block>/<block>_<pulse number>.mat%s "
                        "(see logger.c / README)\n", mask & LOG_SCREEN ? ", screen_record.mp4" : "");
@@ -584,6 +619,38 @@ void logger_plot(Logger *L, const Detection *plot)
     if (!L || !L->cur || !(L->mask & LOG_DETECTION)) return;
     add_row(&L->cur->plots, &L->cur->nPlots, &L->cur->capPlots, plot);
     L->cur->bytes += sizeof(double) * LOG_COLS;
+}
+
+void logger_track(Logger *L, const Track *t)
+{
+    if (!L || !L->cur || !(L->mask & LOG_TRACK)) return;
+    Job *j = L->cur;
+    if (j->nTracks == j->capTracks) {
+        const int c = j->capTracks ? 2 * j->capTracks : 32;
+        double *p = realloc(j->tracks, sizeof(double) * (size_t)c * TRACK_COLS);
+        if (!p) return;
+        j->tracks = p;
+        j->capTracks = c;
+    }
+    double *r = j->tracks + (size_t)j->nTracks * TRACK_COLS;
+    const double R = sqrt(t->pos_m[0] * t->pos_m[0] + t->pos_m[1] * t->pos_m[1] + t->pos_m[2] * t->pos_m[2]);
+    const double rad = 57.29577951308232;
+    double pm[3] = { NAN, NAN, NAN };                     /* PMBM / TOMHT: probabilities of CV, CA, CT */
+    for (int k = 0; k < t->nModes && k < 3; k++)
+        if (t->modes[k] >= 0 && t->modes[k] < 3) pm[t->modes[k]] = t->modeProb[k];
+    r[0] = t->id;  r[1] = t->confirmed;  r[2] = t->deleted;  r[3] = t->time_s;
+    for (int k = 0; k < 3; k++) { r[4 + k] = t->pos_m[k]; r[7 + k] = t->vel_mps[k]; r[10 + k] = t->acc_mps2[k]; }
+    r[13] = R;
+    r[14] = fmod(atan2(t->pos_m[0], t->pos_m[1]) * rad + 360.0, 360.0);
+    r[15] = R > 0 ? asin(t->pos_m[2] / R) * rad : 0.0;
+    r[16] = t->alt_m;
+    r[17] = sqrt(t->vel_mps[0] * t->vel_mps[0] + t->vel_mps[1] * t->vel_mps[1] + t->vel_mps[2] * t->vel_mps[2]);
+    r[18] = fmod(atan2(t->vel_mps[0], t->vel_mps[1]) * rad + 360.0, 360.0);
+    r[19] = R > 0 ? (t->pos_m[0] * t->vel_mps[0] + t->pos_m[1] * t->vel_mps[1] + t->pos_m[2] * t->vel_mps[2]) / R : 0.0;
+    r[20] = t->hits;  r[21] = t->misses;  r[22] = t->existence;
+    r[23] = pm[0];  r[24] = pm[1];  r[25] = pm[2];  r[26] = t->dim;
+    j->nTracks++;
+    j->bytes += sizeof(double) * TRACK_COLS;
 }
 
 void logger_end_pri(Logger *L)
