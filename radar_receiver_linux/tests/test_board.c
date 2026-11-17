@@ -118,7 +118,7 @@ int main(int argc, char **argv)
         return 1;
     }
     CHECK(bi.nModes == 3 && bi.modes[0].mode == 0 && bi.modes[2].mode == 2 && bi.port == 50211);
-    CHECK(bi.fcMin_MHz == 150 && bi.fcMax_MHz == 190 && bi.nOperationModes == 4);
+    CHECK(bi.fcMin_MHz == 150 && bi.fcMax_MHz == 200 && bi.nOperationModes == 4);
     const ModeInfo *m0 = board_mode_info(&bi, 0), *m1 = board_mode_info(&bi, 1);
     CHECK(m0 && m0->nCodes == 4 && m0->defaults.code == 1 && m0->defaults.f1_MHz == 170 && m0->nRpm == 2);
     CHECK(m1 && m1->nCodes == 0 && m1->defaults.code == 0);           /* LFM: no phase code */

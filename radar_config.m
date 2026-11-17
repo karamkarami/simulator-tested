@@ -40,7 +40,7 @@ cfg.files.dbf     = fullfile(root, 'inputs', 'dbf_matrix.mat');      % elevation
 %% Radar site and antenna
 cfg.fc            = 170e6; % center frequency [Hz] (VHF; wavelength 1.76 m)
 cfg.fcMin_Hz      = 150e6; % carrier range of the VBDR board [Hz]: the commands F1 (short pulse) and F2
-cfg.fcMax_Hz      = 190e6; % (long pulse) set the carrier fcMin_Hz + 0 ... 255 MHz in steps of 1 MHz;
+cfg.fcMax_Hz      = 200e6; % (long pulse) set the carrier fcMin_Hz + 0 ... 255 MHz in steps of 1 MHz;
                            % with cfg.udp.format = 'vbdr' the carriers of the modes must be whole MHz in this range
 cfg.ant.nElements = 48;   % receive elements in elevation (1 = single antenna, beamforming disabled)
 cfg.rx.nChannelsUsed = [];  % channels of the DDC output the receiver processes: the first nChannelsUsed

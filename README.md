@@ -1503,7 +1503,7 @@ The meaning of the operation mode, STC and gain options is not defined yet:
 the receiver sends the option number and does not change its processing.
 With `cfg.udp.format = 'vbdr'` the carriers of the sub-pulses of every mode
 must be whole MHz in `cfg.fcMin_Hz ... cfg.fcMax_Hz` (at most 255 MHz
-apart; default 150 ... 190 MHz).
+apart; default 150 ... 200 MHz).
 
 Configuration (`radar_config.m`): `cfg.fcMin_Hz`, `cfg.fcMax_Hz`,
 `cfg.board.host`, `port`, `pcHost`, `replyPort`, `timeout_s` (0.5),

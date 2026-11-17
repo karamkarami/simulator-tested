@@ -1341,7 +1341,7 @@ static int vbdr_check(int nDdc, int nChUsed, const Wave *wv)
              "%.0f packets of %.0f bytes (2*ceil((64 + 8*nDdc)/payloadBytes)); set nPackets = %.0f (or [] = computed).",
              num("udp.vbdr.nPackets"), nDdc, halfBytes, nPk, payload, nPk);
     if (nPk > 65535) fail("cfg.udp.vbdr.payloadBytes = %.0f gives %.0f packets per stream: use a larger payload.", payload, nPk);
-    const double fMin = num_or("fcMin_Hz", 150e6), fMax = num_or("fcMax_Hz", 190e6);
+    const double fMin = num_or("fcMin_Hz", 150e6), fMax = num_or("fcMax_Hz", 200e6);
     if (!(fMin > 0) || !(fMax >= fMin) || fmod(fMin, 1e6) != 0 || fmod(fMax, 1e6) != 0 || fMax - fMin > 255e6)
         fail("cfg.fcMin_Hz and cfg.fcMax_Hz must be whole MHz, fcMin_Hz <= fcMax_Hz <= fcMin_Hz + 255 MHz "
              "(the F1 / F2 registers hold carrier - fcMin in MHz, one byte).");
