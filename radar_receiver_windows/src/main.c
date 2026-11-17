@@ -5,6 +5,14 @@
  *     --config FILE          receiver configuration from export_receiver_config.m
  *                            (default config/radar_config.bin)
  *     --port N               UDP port of the DDC stream (default 50000)
+ *     --format rddc|vbdr     packet format of the DDC stream (default: of the configuration,
+ *                            cfg.udp.format): 'rddc' or 'vbdr' (the VBDR board, README)
+ *   Radar Settings of the PPI (tab Controls; the VBDR board, README "VBDR stream and board control"):
+ *     --config-m FILE        radar_config.m of the modes (default ../radar_config.m of this project):
+ *                            the settings of every mode and the configuration of a new mode
+ *     --config-set STMT      a MATLAB assignment run after it (repeatable, as radar_export_config --set;
+ *                            give the ones the configuration file was exported with)
+ *     --no-board             no Radar Settings (no commands to the board)
  *     --record FILE          also store the received datagrams in FILE
  *     --replay FILE          read the datagrams from FILE instead of the network
  *     --ppi                  show the PPI (Qt build only)
@@ -57,6 +65,10 @@
  */
 #include "radar_rx.h"
 
+#ifndef RADAR_SOURCE_DIR
+#  define RADAR_SOURCE_DIR "."
+#endif
+
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -65,6 +77,10 @@
 
 typedef struct {
     const char *configPath, *recordPath, *replayPath, *snapshotPath;
+    const char *format;           /* --format (NULL: of the configuration) */
+    const char *configM;          /* --config-m */
+    const char *configSets[16];   /* --config-set */
+    int nConfigSets, noBoard;
     const char *serialDevice, *serialContent, *plotsCsv, *detectionsCsv, *tracksCsv, *mf, *ppiShow, *ppiTab, *ppiRdPlot;
     int ppiBeam;                  /* 1-based */
     int port, baud, threads, updateEvery, ppi, quiet, queue, noSkip;
@@ -91,6 +107,7 @@ typedef struct {
     double console_ms, display_ms;   /* time in the console output and in the PPI calls */
     double log_ms;                /* time of the logging in the processing thread (copies) */
     Logger *log;                  /* the running log (NULL: none) */
+    BoardControl *board;          /* Radar Settings of the PPI (NULL: off) */
     int havePri;                  /* the last PRI processed (radar_parameters.mat) */
     uint32_t lastPulse;
     double lastTime_s, lastAz_deg;
@@ -107,7 +124,8 @@ static void on_signal(int sig)
 
 static void usage(void)
 {
-    puts("usage: radar_receiver [--config FILE] [--port N] [--record FILE] [--replay FILE]\n"
+    puts("usage: radar_receiver [--config FILE] [--port N] [--format rddc|vbdr] [--record FILE] [--replay FILE]\n"
+         "                      [--config-m FILE] [--config-set STMT]... [--no-board]\n"
          "                      [--ppi] [--ppi-snapshot FILE] [--ppi-show plots|detections|both|video|dbf|mf]\n"
          "                      [--ppi-beam N] [--ppi-tab ppi|rd] [--ppi-rd-rate HZ]\n"
          "                      [--ppi-rd-plot spectrum|range]\n"
@@ -144,6 +162,10 @@ static int parse_options(int argc, char **argv, Options *o)
 #define TAKE(field) do { if (!v) { fprintf(stderr, "%s needs a value\n", a); return -1; } field; i++; } while (0)
         if      (!strcmp(a, "--config"))         TAKE(o->configPath = v);
         else if (!strcmp(a, "--port"))           TAKE(o->port = atoi(v));
+        else if (!strcmp(a, "--format"))         TAKE(o->format = v);
+        else if (!strcmp(a, "--config-m"))       TAKE(o->configM = v);
+        else if (!strcmp(a, "--config-set"))     TAKE((o->nConfigSets < 16 ? (void)(o->configSets[o->nConfigSets++] = v) : (void)0));
+        else if (!strcmp(a, "--no-board"))       o->noBoard = 1;
         else if (!strcmp(a, "--record"))         TAKE(o->recordPath = v);
         else if (!strcmp(a, "--replay"))         TAKE(o->replayPath = v);
         else if (!strcmp(a, "--ppi"))            o->ppi = 1;
@@ -181,6 +203,10 @@ static int parse_options(int argc, char **argv, Options *o)
         else if (!strcmp(a, "--help") || !strcmp(a, "-h")) { usage(); return 1; }
         else { fprintf(stderr, "unknown option %s\n", a); usage(); return -1; }
 #undef TAKE
+    }
+    if (o->format && strcmp(o->format, "rddc") && strcmp(o->format, "vbdr")) {
+        fprintf(stderr, "--format must be 'rddc' or 'vbdr'\n");
+        return -1;
     }
     if (strcmp(o->mf, "auto") && strcmp(o->mf, "direct") && strcmp(o->mf, "fft")) {
         fprintf(stderr, "--mf must be 'auto', 'direct' or 'fft'\n");
@@ -241,6 +267,39 @@ static int parse_options(int argc, char **argv, Options *o)
             fprintf(stderr, "--log-blocks screen: the screen recording needs --ppi (ignored)\n");
     }
     return 0;
+}
+
+/* The options that change a loaded configuration (also of a new radar mode). */
+static void apply_options(App *app, RadarConfig *cfg)
+{
+    if (app->opt.format) cfg->udpFormat = !strcmp(app->opt.format, "vbdr") ? UDP_FORMAT_VBDR : UDP_FORMAT_RDDC;
+    cfg->mfMethod = !strcmp(app->opt.mf, "direct") ? MF_DIRECT : !strcmp(app->opt.mf, "fft") ? MF_FFT : MF_AUTO;
+    if (app->opt.rdRate > 0) cfg->rdRate_Hz = app->opt.rdRate;
+    if (app->opt.updateEvery > 0 && app->opt.updateEvery != cfg->updateEvery) {
+        /* the plot extractor needs the same azimuth extent with the new update interval */
+        cfg->updateEvery = app->opt.updateEvery;
+        const double step_deg = cfg->rate_dps * cfg->meanPri_s * cfg->updateEvery;
+        const int minHits = (int)ceil(cfg->minExtent_deg / step_deg);     /* as run_radar_sim.m */
+        cfg->minHits = minHits > 1 ? minHits : 1;
+        for (int j = 0; j < cfg->nPrf; j++) {                              /* every PRF of the scans */
+            const int h = (int)ceil(cfg->minExtent_deg / (cfg->rate_dps * cfg->prf[j].pri_s * cfg->updateEvery));
+            cfg->prf[j].minHits = h > 1 ? h : 1;
+        }
+    }
+    app->detArc_deg = cfg->rate_dps * cfg->meanPri_s * cfg->updateEvery;
+}
+
+/* Doppler axis of the range-Doppler tab [m/s] (the long pulse, else the short one). */
+static void rd_axis(const RadarConfig *cfg, double *v0, double *v1)
+{
+    const int vp = cfg->pulse[PULSE_LONG].enable ? PULSE_LONG : PULSE_SHORT;
+    *v0 = INFINITY;
+    *v1 = -INFINITY;
+    for (int d = 0; d < cfg->nfft; d++) {
+        const double v = -cfg->dopFreq_Hz[d] * cfg->pulse[vp].lambda_m / 2;
+        *v0 = v < *v0 ? v : *v0;
+        *v1 = v > *v1 ? v : *v1;
+    }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -458,7 +517,7 @@ static void stop_log(App *app, Processor *proc)
     LoggerStats st;
     char dir[1024];
     snprintf(dir, sizeof dir, "%s", logger_dir(app->log));
-    processor_set_log(proc, 0);
+    if (proc) processor_set_log(proc, 0);
     Logger *L = app->log;
     app->log = NULL;
     logger_stop(L, &st);                           /* writes the queued files; st: the final state */
@@ -528,6 +587,79 @@ static void report_cfar(App *app, const Processor *proc, double default_dB, int 
 #endif
 }
 
+/* Labels of the CFAR and tracking rows of the timing panel (15 characters). */
+static void block_names(const RadarConfig *cfg, char *det, size_t detLen, char *trk, size_t trkLen)
+{
+    snprintf(det, detLen, "CFAR %s %s", cfar_type_name(cfg->cfarType), cfar_method_name(cfg->cfarMethod));
+    if (!cfg->trackEnable) snprintf(trk, trkLen, "Track (off)");
+    else if (cfg->trackMethod == TRACK_METHOD_PMBM) snprintf(trk, trkLen, "Track PMBM %dD", cfg->trackDim);
+    else if (cfg->trackMethod == TRACK_METHOD_TOMHT) snprintf(trk, trkLen, "Track MHT %dD", cfg->trackDim);
+    else snprintf(trk, trkLen, "Track EKF %dD %s", cfg->trackDim, cfg->trackModel == TRACK_CA ? "CA" : "CV");
+}
+
+/* Radar Settings of the PPI: the settings of the modes from radar_config.m and the board control
+ * thread, which first reads the settings of the board (no command is written at the start). */
+static void start_board(App *app)
+{
+    if (app->opt.noBoard) return;
+    char err[1024];
+    BoardInfo *bi = calloc(1, sizeof *bi);
+    if (!bi) return;
+    const char *mPath = app->opt.configM ? app->opt.configM : RADAR_SOURCE_DIR "/../radar_config.m";
+    if (board_info_load(mPath, app->opt.configSets, app->opt.nConfigSets, bi, err, sizeof err) != 0) {
+        fprintf(stderr, "Radar Settings off (the modes of %s: %s)\n", mPath, err);
+        free(bi);
+        return;
+    }
+    ModeSettings cur;
+    board_settings_of_config(bi, &app->cfg, &cur);
+    app->board = board_control_start(bi, app->cfg.radarMode, &cur, err, sizeof err);
+    if (!app->board) fprintf(stderr, "Radar Settings off: %s\n", err);
+    else {
+        fprintf(stderr, "Radar Settings: board %s:%d, answers on UDP port %d, %d mode(s) of %s\n", bi->host, bi->port,
+                bi->replyPort, bi->nModes, mPath);
+        board_control_request(app->board, BOARD_REQ_CHECK, 0, 0, NULL);
+    }
+    free(bi);
+}
+
+typedef struct { App *app; RadarConfig *next; } SwapArg;
+
+static void swap_config(void *arg)                 /* (the logger's writer is idle) */
+{
+    SwapArg *a = arg;
+    radar_config_free(&a->app->cfg);
+    a->app->cfg = *a->next;
+}
+
+/* A new radar mode (or code, stagger pair, rotation speed, carrier) from the Radar Settings: the
+ * open plots are closed, the processing starts again with the new configuration. Returns the new
+ * processor (the old one when the new configuration cannot be used). */
+static Processor *change_config(App *app, Processor *proc, RadarConfig *next, int mode, const ProcessorCallbacks *cb,
+                                int threads)
+{
+    apply_options(app, next);
+    if (next->udpFormat == UDP_FORMAT_VBDR && next->nChUsed > 4) {
+        fprintf(stderr, "Radar Settings: mode %d processes %d channels, the VBDR stream carries 4: not used\n", mode,
+                next->nChUsed);
+        radar_config_free(next);
+        return proc;
+    }
+    processor_flush(proc, cb);
+    const int logMask = app->log ? logger_mask(app->log) & LOG_BLOCKS : 0;
+    processor_destroy(proc);
+    SwapArg a = { app, next };
+    logger_when_idle(app->log, swap_config, &a);      /* the logger reads app->cfg */
+    proc = processor_create(&app->cfg, threads);
+    if (!proc) return NULL;
+    processor_set_log(proc, logMask);
+    app->detArc_deg = app->cfg.rate_dps * app->cfg.meanPri_s * app->cfg.updateEvery;
+    fprintf(stderr, "Radar mode %d in use: DDC %d samples, short %d / long %d range cells, CPI %d pulses, %.3g rpm\n",
+            app->cfg.radarMode, app->cfg.nDdc, app->cfg.pulse[0].nRange, app->cfg.pulse[1].nRange, app->cfg.cpiLength,
+            app->cfg.rate_dps * 60.0 / 360.0);
+    return proc;
+}
+
 static int worker(void *arg)
 {
     App *app = arg;
@@ -538,6 +670,9 @@ static int worker(void *arg)
         app->exitCode = 1;
         return 1;
     }
+    udp_input_set_format(in, app->cfg.udpFormat);
+    VbdrTiming vbdrTiming;                                 /* VBDR: time, scan and stagger of the PRIs */
+    memset(&vbdrTiming, 0, sizeof vbdrTiming);
     /* real time (Linux): the processing thread gets its priority and CPUs before
      * the OpenMP workers exist, so they inherit them */
     char rtErr[512];
@@ -565,23 +700,13 @@ static int worker(void *arg)
     if (app->opt.logDir) start_log(app, proc, app->opt.logDir, app->opt.logName, app->opt.logMask);
 #ifdef RADAR_WITH_QT
     char detName[48], trackName[64];
-    snprintf(detName, sizeof detName, "CFAR %s %s", cfar_type_name(app->cfg.cfarType), cfar_method_name(app->cfg.cfarMethod));
-    if (app->cfg.trackEnable) {       /* short: the timing panel has 15 characters for a label */
-        if (app->cfg.trackMethod == TRACK_METHOD_PMBM)
-            snprintf(trackName, sizeof trackName, "Track PMBM %dD", app->cfg.trackDim);
-        else if (app->cfg.trackMethod == TRACK_METHOD_TOMHT)
-            snprintf(trackName, sizeof trackName, "Track MHT %dD", app->cfg.trackDim);
-        else
-            snprintf(trackName, sizeof trackName, "Track EKF %dD %s", app->cfg.trackDim, app->cfg.trackModel == TRACK_CA ? "CA" : "CV");
-    } else {
-        snprintf(trackName, sizeof trackName, "Track (off)");
-    }
+    block_names(&app->cfg, detName, sizeof detName, trackName, sizeof trackName);
     double lastTiming = 0.0;
     VideoLayout video;                       /* raw video of the PPI (made when first shown) */
     memset(&video, 0, sizeof video);
     float *videoRow = NULL;
 #endif
-    const double default_dB = 10.0 * log10(app->cfg.alpha);
+    double default_dB = 10.0 * log10(app->cfg.alpha);
     if (!isnan(app->opt.cfarThreshold_dB))
         set_cfar_threshold(app, proc, app->opt.cfarThreshold_dB);
     report_cfar(app, proc, default_dB, 0);
@@ -651,6 +776,37 @@ static int worker(void *arg)
             }
         }
 #endif
+        if (app->board) {                                       /* Radar Settings of the PPI */
+            char text[300];
+            while (board_control_take_note(app->board, text, sizeof text)) {
+                fprintf(stderr, "%s\n", text);
+                if (app->log) logger_note(app->log, text);
+            }
+            RadarConfig next;
+            int mode = 0;
+            if (board_control_take_config(app->board, &next, &mode, NULL)) {
+                proc = change_config(app, proc, &next, mode, &cb, threads);
+                if (!proc) {
+                    fprintf(stderr, "cannot create the processor of radar mode %d\n", mode);
+                    app->exitCode = 1;
+                    break;
+                }
+                default_dB = 10.0 * log10(app->cfg.alpha);
+                report_cfar(app, proc, default_dB, 1);
+#ifdef RADAR_WITH_QT
+                block_names(&app->cfg, detName, sizeof detName, trackName, sizeof trackName);
+                free(videoRow);                                 /* the video layout of the new mode */
+                videoRow = NULL;
+                video_layout_free(&video);
+                memset(&video, 0, sizeof video);
+                if (app->opt.ppi) {
+                    double v0, v1;
+                    rd_axis(&app->cfg, &v0, &v1);
+                    ppi_post_geometry(app->cfg.maxRange_m, v0, v1);
+                }
+#endif
+            }
+        }
         PriData *pri = NULL;
         int r = input_thread_next(input, &pri, 200);
         if (r < 0) break;                                      /* end of the replay file */
@@ -659,6 +815,7 @@ static int worker(void *arg)
             continue;
         }
         lastData = now_seconds();
+        if (pri->format == UDP_FORMAT_VBDR) vbdr_complete_pri(&vbdrTiming, &app->cfg, pri);
 #ifdef RADAR_WITH_QT
         double request_dB;
         const double tReq = now_seconds();
@@ -724,9 +881,20 @@ static int worker(void *arg)
     }
     const uint64_t queueDrops = input_thread_dropped(input);
     input_thread_stop(input);
+    if (!proc) {
+        stop_log(app, NULL);
+        udp_input_close(in);
+        return 1;
+    }
     processor_flush(proc, &cb);
     stop_log(app, proc);
     print_timing(app, proc, in, queueDrops, now_seconds() - t0);
+    if (app->cfg.udpFormat == UDP_FORMAT_VBDR) {
+        UdpStats us;
+        udp_input_stats(in, &us);
+        fprintf(stderr, "VBDR stream: %llu stream(s) never arrived or were dropped, board \"Loss=\" %u\n",
+                (unsigned long long)vbdrTiming.missing, (unsigned)us.boardLoss);
+    }
 #ifdef RADAR_WITH_QT
     if (app->opt.ppi) {
         ProcessorTiming tm;
@@ -777,26 +945,21 @@ int main(int argc, char **argv)
         fprintf(stderr, "configuration: %s\n", err);
         return 1;
     }
-    app.cfg.mfMethod = !strcmp(app.opt.mf, "direct") ? MF_DIRECT : !strcmp(app.opt.mf, "fft") ? MF_FFT : MF_AUTO;
-    if (app.opt.quiet < 0) app.opt.quiet = !app.cfg.consolePlots;
-    if (app.opt.rdRate > 0) app.cfg.rdRate_Hz = app.opt.rdRate;
-    if (app.opt.updateEvery > 0 && app.opt.updateEvery != app.cfg.updateEvery) {
-        /* the plot extractor needs the same azimuth extent with the new update interval */
-        app.cfg.updateEvery = app.opt.updateEvery;
-        const double step_deg = app.cfg.rate_dps * app.cfg.meanPri_s * app.cfg.updateEvery;
-        const int minHits = (int)ceil(app.cfg.minExtent_deg / step_deg);     /* as run_radar_sim.m */
-        app.cfg.minHits = minHits > 1 ? minHits : 1;
-        for (int j = 0; j < app.cfg.nPrf; j++) {                              /* every PRF of the scans */
-            const int h = (int)ceil(app.cfg.minExtent_deg / (app.cfg.rate_dps * app.cfg.prf[j].pri_s * app.cfg.updateEvery));
-            app.cfg.prf[j].minHits = h > 1 ? h : 1;
-        }
+    if (app.opt.format) app.cfg.udpFormat = !strcmp(app.opt.format, "vbdr") ? UDP_FORMAT_VBDR : UDP_FORMAT_RDDC;
+    if (app.cfg.udpFormat == UDP_FORMAT_VBDR && app.cfg.nChUsed > 4) {
+        fprintf(stderr, "configuration: the VBDR stream carries 4 channels, the configuration processes %d "
+                "(cfg.rx.nChannelsUsed <= 4)\n", app.cfg.nChUsed);
+        return 1;
     }
-    app.detArc_deg = app.cfg.rate_dps * app.cfg.meanPri_s * app.cfg.updateEvery;
+    apply_options(&app, &app.cfg);
+    if (app.opt.quiet < 0) app.opt.quiet = !app.cfg.consolePlots;
     fprintf(stderr, "Configuration: %d element(s) (%d processed), %d beam(s), DDC %d samples, short %d / long %d range cells, "
             "CPI %d pulses, %s %d x %d row(s), update every %d pulse(s), plots need %d update(s)\n", app.cfg.nCh,
             app.cfg.nChUsed, app.cfg.nBeams, app.cfg.nDdc, app.cfg.pulse[0].nRange, app.cfg.pulse[1].nRange,
             app.cfg.cpiLength, app.cfg.dopplerMethod == DOPPLER_NUFFT ? "NUFFT" : "FFT", app.cfg.nfft, app.cfg.nRows,
             app.cfg.updateEvery, app.cfg.minHits);
+    fprintf(stderr, "DDC stream: %s format, UDP port %d\n", app.cfg.udpFormat == UDP_FORMAT_VBDR ? "VBDR" : "RDDC",
+            app.opt.port);
     fprintf(stderr, "Radar mode %d; DDC record %s: %d samples, the first at %.3f us", app.cfg.radarMode,
             app.cfg.ddcManual ? "manual" : "automatic", app.cfg.nDdc,
             app.cfg.ddcT0_s * 1e6);
@@ -878,14 +1041,11 @@ int main(int argc, char **argv)
             ppi_set_tab(!strcmp(app.opt.ppiTab, "rd"));
             ppi_set_rd_plot(!strcmp(app.opt.ppiRdPlot, "range"));
             /* the empty range-Doppler tab before the first map: the Doppler axis of the configuration */
-            const int vp = app.cfg.pulse[PULSE_LONG].enable ? PULSE_LONG : PULSE_SHORT;
-            double v0 = INFINITY, v1 = -INFINITY;
-            for (int d = 0; d < app.cfg.nfft; d++) {
-                const double v = -app.cfg.dopFreq_Hz[d] * app.cfg.pulse[vp].lambda_m / 2;
-                v0 = v < v0 ? v : v0;
-                v1 = v > v1 ? v : v1;
-            }
+            double v0, v1;
+            rd_axis(&app.cfg, &v0, &v1);
             ppi_set_rd_axes(v0, v1);
+            start_board(&app);
+            ppi_set_board_control(app.board);
             ppi_set_log_defaults(app.opt.logDir ? app.opt.logDir : "", app.opt.logName ? app.opt.logName : "", app.opt.logMask);
             ppi_set_screen_record(app.opt.ffmpeg, app.opt.recordAudio, app.opt.recordFps);
         }
@@ -909,6 +1069,7 @@ int main(int argc, char **argv)
     if (app.detFile) fclose(app.detFile);
     free(app.confirmedIds);
     if (app.trackFile) fclose(app.trackFile);
+    board_control_stop(app.board);
     radar_config_free(&app.cfg);
     return app.exitCode;
 }

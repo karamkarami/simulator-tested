@@ -360,6 +360,8 @@ Not supported: `cfg.adc.quantize = false` (analog ADC values, MATLAB only).
 |---|---|
 | `--config FILE` | configuration from `export_receiver_config.m` (default `config/radar_config.bin`) |
 | `--port N` | UDP port of the DDC stream (default 50000) |
+| `--format rddc\|vbdr` | packet format of the DDC stream (default: `cfg.udp.format` of the configuration; `vbdr`: the VBDR board, see below) |
+| `--config-m FILE`, `--config-set STMT`, `--no-board` | the Radar Settings of the PPI (see Radar Settings below) |
 | `--record FILE` | also store every received datagram in FILE |
 | `--replay FILE` | read the datagrams from a recorded FILE instead of the network (as fast as possible) |
 | `--ppi` | show the interactive PPI (Qt build, see below) |
@@ -428,6 +430,47 @@ per PRI and 1000 PRIs/s), the stream is 340 MB/s (2.7 Gbit/s). It needs
 10 Gbit Ethernet, and the socket receive buffer should be large. The
 receiver asks for 32 MB; on Linux, allow it with
 `sysctl -w net.core.rmem_max=33554432`.
+
+**VBDR stream** (`--format vbdr`, or `cfg.udp.format = 'vbdr'` in the
+configuration, see "VBDR stream and board control" in `../README.md`): every
+PRI is one stream of N packets with a 28-byte label (stream number, packet
+number, N, `Loss=`); the packets of a stream are kept until all N arrived
+(in any order, duplicates ignored), then the two halves are joined and the
+4 channels sorted into the PRI. A stream with a missing packet is dropped
+when the next one starts (counted as incomplete). The PRI time comes from
+the PRTs of the streams (the first at 0; lost streams estimated), the scan
+from the azimuth wrap, the stagger position from the current PRT and the
+DDC layout from the configuration; at the end the receiver prints the
+streams that never arrived and the last `Loss=` of the board.
+
+## Radar Settings (VBDR board)
+
+With `--ppi`, the tab *Controls* has the section **Radar Settings** below
+*Logging* (see "Radar Settings of the PPI" in `../README.md`): Radar Mode,
+Phase Code, Stagger Pattern, RPM, STC Main / J1 / J2 / J3, Gain Main / J1 /
+J2 / J3, Operation Mode, F1 and F2 with Apply, Reset defaults for this mode
+/ for all modes, Export / Import settings (MAT-file), and the status. A
+thread of its own (`board_control.c`) writes every change to the board
+(`board_link.c`: `CNTL W 0xAA 0xVV` to `cfg.board.host:port`, answers on
+`cfg.board.replyPort`), reads it back, and keeps the confirmed settings of
+every mode until the program ends. A new radar mode, phase code, stagger
+pattern, RPM, F1 or F2 confirmed by the board gives a new receiver
+configuration: `radar_settings.c` evaluates `radar_config.m` with these
+settings (the export of `radar_export_config`, built into the receiver), the
+worker closes the open plots and goes on with it (the logger first writes
+what it has queued); the change goes to the console and to `log_info.txt`
+of a running log. At the start the receiver reads the registers of the
+board and only warns when they differ (nothing is written).
+
+| Option | Meaning |
+|---|---|
+| `--config-m FILE` | `radar_config.m` with the modes (default `../radar_config.m` of this project) |
+| `--config-set STMT` | a MATLAB assignment run after it (repeatable): the `--set` statements the configuration file was exported with |
+| `--no-board` | no Radar Settings, no commands to the board |
+
+The settings of the modes come from `radar_config.m`, not from the
+configuration file: keep both in step (export the configuration again after
+a change of the mode files).
 
 ## Outputs
 
@@ -944,6 +987,10 @@ radar_stream_send stream.rec --port 50001 --loops 10
 | `--queue N` | 256 | PRIs read ahead (filled before the first PRI is sent) |
 | `--timing-csv FILE` | | scheduled and real send time and delay of every PRI |
 | `--quiet` | | only the summary |
+| `--format rddc\|vbdr` | rddc | `vbdr`: the DDC files as the streams of the VBDR board (the first 4 channels; a recorded VBDR stream is sent as it is), and the board commands are answered (printed) |
+| `--vbdr-payload BYTES` | 1400 | bytes per VBDR packet (`cfg.udp.vbdr.payloadBytes`) |
+| `--board-port N`, `--board-reply H:P` | 5000, 127.0.0.1:5100 | the board commands (VBDR) |
+| `--no-board` | | do not answer them |
 
 Timing:
 * The send time of every PRI is its PRI start time from the header
@@ -966,6 +1013,58 @@ Timing:
   4-vCPU VM, with `--threads 2 --update-every 8`, all 397 PRIs of a
   48-channel recording arrived complete and gave the MATLAB plot.
 
+## Real-time simulator (`radar_live_sim`)
+
+`radar_live_sim` (a run configuration in CLion) is `radar_generate_ddc` in
+real time: it simulates every PRI of `../radar_config.m` (targets, terrain
+clutter, leakage, STC, noise, ADC, fixed-point DDC) and sends it to the
+receiver at its PRI time, in the format of `cfg.udp.format` (RDDC or VBDR),
+until Ctrl+C. Producer threads (`--threads`, default all cores) simulate the
+next PRIs ahead into a ring of 64 PRIs; the main thread sends every PRI on
+one clock and answers the board commands in the idle time (it acts as the
+board: every command is printed, the registers are kept and read back).
+
+A write of the radar mode, the phase code, F1, F2, the stagger pattern or,
+with `cfg.board.sendRpm = true`, the rotation speed (0x32) changes the
+simulation: 0.3 s after the last command it evaluates `radar_config.m` with
+the new settings, drops the PRIs simulated ahead and goes on from the time,
+azimuth and pulse number reached. STC, gain and the operation mode are only
+stored. With the receiver's PPI (Radar Settings) this gives a closed loop:
+choose another mode in the PPI, the simulator switches, the receiver
+processes the new mode.
+
+```sh
+radar_live_sim                                        # cfg.udp, cfg.board of ../radar_config.m, until Ctrl+C
+radar_live_sim --format vbdr --set "cfg.ant.nElements = 1;" --fidelity fast
+radar_live_sim --set "cfg.sim.sectors_deg = [20 60];" --speed 0.25 --threads 2
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--config-m FILE`, `--set STMT` | `../radar_config.m` | as `radar_generate_ddc` |
+| `--host H`, `--port N` | `cfg.udp.host`, `cfg.udp.port` | the receiver |
+| `--format rddc\|vbdr` | `cfg.udp.format` | packet format |
+| `--payload BYTES` | `cfg.udp.payloadBytes` (VBDR: `cfg.udp.vbdr.payloadBytes`) | bytes per datagram |
+| `--threads N` | all cores | producer threads |
+| `--targets FILE.csv` | `cfg.scenario` | targets (as `radar_generate_ddc`) |
+| `--fidelity full\|fast` | `cfg.sim.liveFidelity` | `full`: as `radar_generate_ddc`; `fast`: the signal at the DDC rate (targets, leakage, STC, noise; no terrain clutter, no ADC clipping, the pulse not shaped by the DDC filters) |
+| `--board-port N`, `--board-reply H:P` | `cfg.board.port`, `cfg.board.pcHost:replyPort` | the board commands |
+| `--no-board` | | do not answer the board commands |
+| `--speed X` | 1 | send X times as fast as real time (e.g. 0.25 when the receiver runs on the same slow computer) |
+| `--max-pulses N`, `--duration S` | | stop after N PRIs / S seconds of simulated time |
+| `--quiet` | | only errors and the summary |
+
+The schedule is endless (`cfg.sim.nScans` is not used); `cfg.sim.sectors_deg`
+limits the PRIs simulated and sent, the time and azimuth advance outside
+the sectors too. When the producers cannot keep up, the PRIs go out later
+than their time and the simulated time runs slower than the real time: the
+PRTs in the stream stay those of the radar, and the progress line (every
+5 s) says how many PRIs were late and how far the simulation is behind.
+On this 4-vCPU VM: 48 elements with `full` took tens of milliseconds per PRI
+(far from real time); one element with `fast` kept up with 1000 PRIs/s on 2
+threads; the receiver on the same VM detected the target of the six-target
+scenario at 30 deg (11.9 km, -234 m/s) from both fidelities over VBDR.
+
 ## Tests
 
 | Test | What it checks |
@@ -980,7 +1079,9 @@ Timing:
 | `core_1ch` | the same core test with `config/radar_config_1ch.bin` (the default radar with one receive element, no DBF): four-step FFT and direct matched filter give the same plot |
 | `cfar` (`tests/test_cfar.c`) | the CFAR detectors of `cfar.c` (CA, GO, SO, OS) against the statistic computed directly from the training cells combined with the direct local peak test: every decision and noise estimate, for every detector with the 2-D, 1-D range and 1-D Doppler windows and tested range intervals in the middle, at both range edges (also when the whole interval lies within the cells of the shifted windows) and over all cells, with the beams of the configuration and with one beam split into range chunks over 4 threads; the noise floor median equals that of a sorted copy (400 maps: odd and even sizes, ties, zeros, a structured half; with and without a bracket from the previous median); the pruning of tens of thousands of CFAR detections (a strong target with sidelobes, 3000 strong cells) gives exactly the cells of the direct pairwise rules; the peak interpolation: a Gaussian peak gives its exact fractional Doppler bin and beam, the Doppler bin wraps at the edge of the axis, the lowest beam keeps its centre, nothing changes with the options off |
 | `cfar_1ch` | the same CFAR test with `config/radar_config_1ch.bin` |
-| `udp_input` | reassembly with shuffled, duplicate, missing and foreign datagrams; timeouts; record and replay; fuzzing |
+| `udp_input` | reassembly with shuffled, duplicate, missing and foreign datagrams; timeouts; record and replay; fuzzing; the VBDR stream: shuffled and duplicated packets, a stream with a missing packet, a lost stream, foreign packets, the 4 channels and the system parameters, the PRI time from the PRTs (with the lost stream), the scan from the azimuth wrap, the stagger position from the PRT, the DDC layout of the configuration |
+| `board` (`tests/test_board.c`) | the texts of the board commands and answers (those of the slides) and their parsing; the simulator as the board and the client over localhost; the settings of the modes of `../radar_config.m`; the control thread with the simulated board: the check at the start (a differing STC reported, nothing sent), a phase code, a gain, F2, a change to mode 2 and back (the kept settings sent again, the receiver configuration of each), the operation mode, export, reset of all modes, import, a missing file, a board that does not answer (not set, the mode stays) |
+| `live_sim_fast`, `live_sim_vbdr` | `radar_live_sim`: 300 PRIs with one element and the fidelity `fast`; 20 PRIs of the full simulation as VBDR streams |
 | `ddc_files` (`tests/test_ddc_files.c`) | MAT-file reader with files written as MATLAB writes them (data in smaller storage types, small elements, skipped char field, compressed `-v7`: with zlib, or stored blocks for the built-in inflate without zlib; with zlib the built-in inflate is checked against zlib's dynamic and fixed Huffman blocks); folder listing; the datagrams of a DDC file are accepted by `udp_input.c` and give back the same PRI; corrupted, truncated, `-v7.3` and big-endian files are refused |
 | `mfile` (`tests/test_mfile.c`) | the MATLAB subset of `radar_export_config`: function line, comments, block comments, continuation lines, matrices with spaces and unary minus, multi-line cells, `struct`, `fullfile`/`fileparts`/`mfilename`, precedence (`-2^2`), indexing, functions, `--set` statements, unevaluated MATLAB functions, subfunctions; function files with input arguments (in the caller's folder), `feval`, `sprintf`, a function file with an `if` block unevaluated, too many input arguments; errors with the line |
 | `export_config`, `core_exported` | `radar_export_config` writes the configuration of `../radar_config.m`, and the core test runs the whole chain with it |
@@ -989,5 +1090,5 @@ Timing:
 | `generate_ddc`, `generated_ddc_files` | `radar_generate_ddc` writes 4 PRIs of the default configuration (targets, terrain clutter, noise) and they are read back (`ddc_load`): the channels, consecutive pulses, the receive intervals of the header, signal present |
 | `serial` | frame encoding and CRC; real output to a pseudo-terminal (Linux): exact bytes, 200-detection split, non-blocking drops, close |
 | `ppi` | the Qt PPI runs off-screen with antenna updates, plots, detections and a CFAR threshold report and saves a snapshot |
-| `ppi_interactive` | mouse, wheel and key events: data tips, cursor readout, zoom around the cursor, pan, pin/unpin, reset, filters, persistence options, pause, clear; detections (display modes, arcs drawn, data tips, key D); window panel: display mode box, CFAR threshold Apply/Default and its report, screenshot of the whole window, program icon in the resources, mean block times (labels of at most 15 characters, the peak interpolation row); raw video (box and key D, rows of 160 azimuth bins, noise floor, echo drawn, nothing where the antenna did not pass, plots hidden, Clear); DBF out / MF out (beam selector, profile wanted only in these modes and for the selected beam, rows of another kind or beam not shown, noise floor of one-sample rows, echo bright); range-Doppler tab (map wanted in both tabs, the PPI moved next to it and back, map drawn with the peak bright and the noise dark, spectrum at the strongest detection, hover readout, data tips of a detection, a cell and a spectrum point, zoom of both axes around the cursor and of one (Shift), pan by dragging, pin and unpin by a click, zoom and pins kept by a new map, reset by double click, range profile through the detection's Doppler bin, a map of another beam ignored, screenshot of the tab); pause button (no new map or plot while paused, the newest on resume, follows Space); data tip readable in the window; tracks (triangle drawn around the plot, data tip, PMBM data tip with existence and model probabilities, checkbox and key T, deletion); the video noise floor stays within 0.5 dB while the antenna crosses a 45 deg sector whose rows are 95% clutter (the mountains; the earlier running mean drifted 1.2 dB there and re-coloured the map); the application id and the desktop entry with the icon file (Linux) |
+| `ppi_interactive` | mouse, wheel and key events: data tips, cursor readout, zoom around the cursor, pan, pin/unpin, reset, filters, persistence options, pause, clear; detections (display modes, arcs drawn, data tips, key D); window panel: display mode box, CFAR threshold Apply/Default and its report, screenshot of the whole window, program icon in the resources, mean block times (labels of at most 15 characters, the peak interpolation row); raw video (box and key D, rows of 160 azimuth bins, noise floor, echo drawn, nothing where the antenna did not pass, plots hidden, Clear); DBF out / MF out (beam selector, profile wanted only in these modes and for the selected beam, rows of another kind or beam not shown, noise floor of one-sample rows, echo bright); range-Doppler tab (map wanted in both tabs, the PPI moved next to it and back, map drawn with the peak bright and the noise dark, spectrum at the strongest detection, hover readout, data tips of a detection, a cell and a spectrum point, zoom of both axes around the cursor and of one (Shift), pan by dragging, pin and unpin by a click, zoom and pins kept by a new map, reset by double click, range profile through the detection's Doppler bin, a map of another beam ignored, screenshot of the tab); pause button (no new map or plot while paused, the newest on resume, follows Space); data tip readable in the window; tracks (triangle drawn around the plot, data tip, PMBM data tip with existence and model probabilities, checkbox and key T, deletion); the video noise floor stays within 0.5 dB while the antenna crosses a 45 deg sector whose rows are 95% clutter (the mountains; the earlier running mean drifted 1.2 dB there and re-coloured the map); the application id and the desktop entry with the icon file (Linux); Radar Settings with a simulated board: the dropdowns of mode 0, the check at the start, a phase code chosen in the dropdown is written and read back and gives the new configuration, mode 1 (its phase code dropdown off), F2 with Apply (written as F2 - fcMin), screenshot `ppi_radar_settings.png` |
 | `../tests/test_c_receiver.m` (Octave/MATLAB) | the six-target scenario streamed over UDP to this receiver: the C plots must match the MATLAB plots; the recording is replayed to check that the result is repeatable and to measure the time |

@@ -540,6 +540,16 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             if (r && r->rows * r->cols >= 2) { cfg->codeIndex[0] = (int)lround(r->data[0]); cfg->codeIndex[1] = (int)lround(r->data[1]); }
             r = find_optional(&rs, "staggerSet");
             if (r && r->rows * r->cols >= 1) cfg->staggerSet = (int)lround(r->data[0]);
+            r = find_optional(&rs, "udpFormat");           /* the DDC stream (optional: 'rddc') */
+            if (r && r->rows * r->cols >= 1) cfg->udpFormat = (int)lround(r->data[0]);
+            r = find_optional(&rs, "priSequence_s");       /* the PRIs of the stagger (optional) */
+            if (r && r->rows * r->cols >= 1) {
+                cfg->priSequence_s = malloc(sizeof(double) * (size_t)(r->rows * r->cols));
+                if (cfg->priSequence_s) {
+                    cfg->nPriSequence = r->rows * r->cols;
+                    memcpy(cfg->priSequence_s, r->data, sizeof(double) * (size_t)cfg->nPriSequence);
+                }
+            }
         }
         cfg->maxCpiLength = cfg->cpiLength;
         cfg->maxNfft = cfg->nfft;
@@ -623,7 +633,7 @@ void radar_config_free(RadarConfig *cfg)
     }
     free(cfg->mtiCoeffs);  free(cfg->dopWindow);  free(cfg->noiseGain);  free(cfg->dopFreq_Hz);
     free(cfg->noiseGainBypass);  free(cfg->nufftARe);  free(cfg->nufftAIm);  free(cfg->nufftBypassGain);
-    free(cfg->ceLogZ);  free(cfg->ceLogG);
+    free(cfg->ceLogZ);  free(cfg->ceLogG);  free(cfg->priSequence_s);
     for (int j = 0; j < cfg->nPrf && cfg->prf; j++) {
         PrfProfile *q = &cfg->prf[j];
         free(q->dopWindow);  free(q->noiseGain);  free(q->noiseGainBypass);  free(q->dopFreq_Hz);

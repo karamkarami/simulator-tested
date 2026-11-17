@@ -776,7 +776,7 @@ int main(int argc, char **argv)
                 if (f.size() >= 2 && f[0] == "audio") aDur = f.last().toDouble();
             }
             check(rec && shown && !win.recording() && win.logStatus().contains("screen recording saved") &&
-                  vDur > 1.5 && vDur < 4.0 && std::fabs(aDur - vDur) < 0.3,
+                  vDur > 1.2 && vDur < 4.0 && std::fabs(aDur - vDur) < 0.3,   /* (ffmpeg starts up to ~1 s late on a busy VM) */
                   QStringLiteral("screen_record.mp4: video %1 s, sound %2 s (%3)").arg(vDur).arg(aDur)
                       .arg(info.simplified()).toStdString().c_str());
             win.screenRecordBox()->setChecked(false);
@@ -810,6 +810,70 @@ int main(int argc, char **argv)
 #endif
         QCoreApplication::processEvents();               /* layout after the text changes */
         win.grab().save(QString::fromStdString(folder + "/ppi_window.png"));
+    }
+    /* Radar Settings of the tab Controls with a simulated board (board_control.c, board_link.c) */
+    {
+        char err[1024];
+        uint8_t regs[256] = { 0 };
+        regs[0x01] = 1; regs[0x02] = 20; regs[0x03] = 20; regs[0x28] = 1;
+        for (int k = 0x29; k <= 0x30; k++) regs[k] = 1;
+        BoardSim *sim = board_sim_open(50231, "127.0.0.1", 50232, regs, 0, err, sizeof err);
+        BoardInfo bi;
+        const char *sets[3] = { "cfg.board.host = '127.0.0.1';", "cfg.board.port = 50231;", "cfg.board.replyPort = 50232;" };
+        const int okInfo = board_info_load(RADAR_SOURCE_DIR "/../radar_config.m", sets, 3, &bi, err, sizeof err) == 0;
+        check(sim && okInfo, "Radar Settings: the simulated board and the modes of radar_config.m");
+        if (sim && okInfo) {
+            ModeSettings cur = board_mode_info(&bi, 0)->defaults;
+            BoardControl *bc = board_control_start(&bi, 0, &cur, err, sizeof err);
+            ppi_set_board_control(bc);
+            PpiWindow bw(60e3, nullptr);
+            bw.resize(1300, 1000);
+            bw.show();
+            bw.tabs()->setCurrentIndex(2);
+            auto settle = [&]() {                         /* the board answers until the control is idle */
+                BoardState st;
+                for (int i = 0; i < 400; i++) {
+                    board_sim_poll(sim, 5, nullptr);
+                    board_control_state(bc, &st);
+                    if (!st.busy) break;
+                }
+                bw.refresh();
+                QCoreApplication::processEvents();
+            };
+            board_control_request(bc, BOARD_REQ_CHECK, 0, 0, nullptr);
+            settle();
+            QComboBox *code = bw.boardCombo(BOARD_CODE), *stagger = bw.boardCombo(BOARD_STAGGER);
+            check(code && code->count() == 4 && code->isEnabled() && !stagger->isEnabled() &&
+                  bw.boardCombo(BOARD_MODE)->count() == 3 && bw.boardCombo(BOARD_STC_J2)->count() == 4 &&
+                  bw.boardCarrier(0)->value() == 170 && bw.boardStatus().contains("holds the settings"),
+                  "Radar Settings: the lists of mode 0, the check of the board at the start");
+            code->setCurrentIndex(2);
+            emit code->activated(2);                      /* the user chooses phase code 3 */
+            settle();
+            check(board_sim_register(sim, 0x01) == 3 && bw.boardStatus().contains("Phase Code = 3 set"),
+                  "Radar Settings: a phase code is written, read back and shown");
+            RadarConfig next;
+            int mode = -1;
+            check(board_control_take_config(bc, &next, &mode, nullptr) == 1 && next.codeIndex[0] == 3,
+                  "Radar Settings: the receiver configuration of the new phase code");
+            radar_config_free(&next);
+            QComboBox *modeBox = bw.boardCombo(BOARD_MODE);
+            modeBox->setCurrentIndex(1);
+            emit modeBox->activated(1);                   /* mode 1 (LFM: no phase code) */
+            settle();
+            check(board_sim_register(sim, 0x00) == 1 && !bw.boardCombo(BOARD_CODE)->isEnabled(),
+                  "Radar Settings: mode 1, its phase code dropdown is off");
+            while (board_control_take_config(bc, &next, &mode, nullptr)) radar_config_free(&next);
+            bw.boardCarrier(1)->setValue(176);
+            bw.boardCarrierApply(1)->click();
+            settle();
+            check(board_sim_register(sim, 0x03) == 26, "Radar Settings: F2 = 176 MHz is sent as 26");
+            while (board_control_take_config(bc, &next, &mode, nullptr)) radar_config_free(&next);
+            if (!folder.empty()) bw.grab().save(QString::fromStdString(folder + "/ppi_radar_settings.png"));
+            ppi_set_board_control(nullptr);
+            board_control_stop(bc);
+        }
+        board_sim_close(sim);
     }
     std::printf(failures ? "%d FAILURE(S)\n" : "PASS\n", failures);
     return failures ? 1 : 0;

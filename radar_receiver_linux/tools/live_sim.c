@@ -357,6 +357,7 @@ static void sched_next(Live *L, Pri *pr, double *prevPri, double *azUOut)
     pr->az = mod360(azU);
     *azUOut = azU;
     *prevPri = L->lastPri > 0 ? L->lastPri : pr->pri;
+    pr->prevPri = *prevPri;
     L->lastPri = pr->pri;
     L->nextT = t + pr->pri;
     L->nextAzU = azU + s->rate * pr->pri;

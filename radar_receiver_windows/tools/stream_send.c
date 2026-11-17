@@ -5,6 +5,8 @@
  *   radar_stream_send SOURCE [--host 127.0.0.1] [--port 50000] [--speed 1.0] [--loops 1]
  *                     [--payload 1400] [--spread 0] [--no-gaps] [--catch-up]
  *                     [--queue 256] [--timing-csv FILE] [--quiet]
+ *                     [--format rddc|vbdr] [--vbdr-payload 1400]
+ *                     [--board-port 5000] [--board-reply HOST:PORT] [--no-board]
  *
  * SOURCE is either
  *   - a folder of DDC files ddc_<n>.mat (run_radar_sim with cfg.io.saveDdc = true,
@@ -31,6 +33,12 @@
  * With --loops > 1 the pulse numbers and times of later loops are continued,
  * so the receiver sees one long stream. --timing-csv writes the scheduled
  * and real send time of every PRI.
+ *
+ * --format vbdr: the DDC files are sent as the stream of the VBDR board (udp_make_vbdr.m: per PRI
+ * one stream of N packets with a 28-byte label, the first 4 channels, --vbdr-payload bytes per
+ * packet; README "VBDR stream and board control"); a recorded VBDR stream is sent as it is. The
+ * sender then also answers the board commands of the receiver (listens on --board-port, answers
+ * to --board-reply, default 127.0.0.1:5100; every command is printed; --no-board: not).
  */
 #if defined(_WIN32)
 #  ifndef _CRT_SECURE_NO_WARNINGS
@@ -159,6 +167,8 @@ typedef struct {
     int       folder;           /* 1: ddc_*.mat files, 0: recorded stream       */
     const char *path;
     int       payload;
+    int       vbdr;             /* the VBDR stream (--format vbdr)              */
+    int       vbdrPayload;
     /* folder */
     char    **files;
     int       nFiles, next;
@@ -173,6 +183,9 @@ typedef struct {
     uint32_t  pulseOffset, lastPulse;
     double    timeShift, t0, lastTime, lastPri;
     int       haveT0;
+    /* recorded VBDR stream: the PRI times from the PRTs */
+    int       vbdrHave;
+    double    vbdrTime, vbdrCur;
 } Source;
 
 static int source_open(Source *s, const char *path, int payload, int loops, char *err, size_t errLen)
@@ -214,6 +227,21 @@ static long read_datagram(FILE *f, unsigned char *buf)
 
 static int is_rddc(const unsigned char *d, uint32_t len) { return len >= 64 && get_u32(d) == RDDC_MAGIC; }
 
+/* A packet of the VBDR stream: a label with a valid packet number and count. */
+static int is_vbdr(const unsigned char *d, uint32_t len)
+{
+    if (len <= 28) return 0;
+    const uint32_t k = get_u32(d + 4), n = get_u32(d + 8);
+    return n >= 2 && n % 2 == 0 && k >= 1 && k <= n;
+}
+
+/* The first packet of a PRI of the source format: its key (pulse / stream number). */
+static int is_ours(const Source *s, const unsigned char *d, uint32_t len)
+{
+    return s->vbdr ? is_vbdr(d, len) : is_rddc(d, len);
+}
+static uint32_t pulse_of(const Source *s, const unsigned char *d) { return s->vbdr ? get_u32(d) : get_u32(d + 4); }
+
 static double header_time(const unsigned char *d) { double t; memcpy(&t, d + 32, 8); return t; }
 
 /* Next PRI of the recorded stream: the datagrams up to the next pulse number
@@ -236,21 +264,31 @@ static int next_recorded(Source *s, Pri *p, char *err, size_t errLen)
             if (n < 0) break;
             d = p->data + used;
             len = (uint32_t)n;
-            if (have && is_rddc(d, len) && get_u32(d + 4) != p->pulse) {   /* next PRI begins */
+            if (have && is_ours(s, d, len) && pulse_of(s, d) != p->pulse) {   /* next PRI begins */
                 memcpy(s->pending, d, len);
                 s->pendingLen = len;
                 s->havePending = 1;
-                p->pri_s = header_time(d) - p->time_s;
+                p->pri_s = s->vbdr ? s->vbdrCur : header_time(d) - p->time_s;
                 return 1;
             }
         }
         if (pri_reserve(p, used + len, p->nPkt + 1)) goto oom;
         if (d == s->pending) memcpy(p->data + used, d, len);
         d = p->data + used;
-        if (is_rddc(d, len) && !have) {
+        if (is_ours(s, d, len) && !have) {
             have = 1;
-            p->pulse = get_u32(d + 4);
-            p->time_s = header_time(d);
+            p->pulse = pulse_of(s, d);
+            if (s->vbdr) {                            /* the time: the sum of the PRTs */
+                p->time_s = s->vbdrHave ? s->vbdrTime + s->vbdrCur : 0;
+                s->vbdrHave = 1;
+                s->vbdrTime = p->time_s;
+            } else {
+                p->time_s = header_time(d);
+            }
+        }
+        if (s->vbdr && is_vbdr(d, len) && get_u32(d + 4) == 1 && len >= 28 + 12) {   /* PRTs of the stream */
+            const double cur = (d[28 + 10] | d[28 + 11] << 8) * 1e-6;
+            if (cur > 0) s->vbdrCur = cur;
         }
         p->len[p->nPkt++] = len;
         used += len;
@@ -270,6 +308,18 @@ static int next_file(Source *s, Pri *p, char *err, size_t errLen)
     size_t bytes;
     if (s->next >= s->nFiles) return 0;
     if (ddc_load(s->files[s->next++], &s->ddc, err, errLen)) return -1;
+    if (s->vbdr) {
+        const int n = ddc_vbdr_count(s->ddc.nSamples, s->vbdrPayload, &bytes);
+        if (pri_reserve(p, bytes, n)) {
+            snprintf(err, errLen, "out of memory");
+            return -1;
+        }
+        p->nPkt = ddc_make_vbdr(&s->ddc, s->vbdrPayload, 0, p->data, p->len);
+        p->pulse = s->ddc.pulseNumber;
+        p->time_s = s->ddc.time_s;
+        p->pri_s = s->ddc.pri_s;
+        return p->nPkt > 0 ? 1 : -1;
+    }
     const int n = ddc_datagram_count(&s->ddc, s->payload, &bytes);
     if (n > 65535) {                                  /* the packet index and count are 16-bit */
         snprintf(err, errLen, "%d datagrams per PRI with --payload %d (at most 65535): use a larger payload",
@@ -315,6 +365,10 @@ static int source_next(Source *s, Pri *p, char *err, size_t errLen)
         size_t off = 0;
         for (int i = 0; i < p->nPkt; off += p->len[i++]) {
             unsigned char *d = p->data + off;
+            if (s->vbdr) {                             /* the stream number of the label */
+                if (is_vbdr(d, p->len[i])) put_u32(d, get_u32(d) + s->pulseOffset);
+                continue;
+            }
             if (!is_rddc(d, p->len[i])) continue;
             put_u32(d + 4, get_u32(d + 4) + s->pulseOffset);
             const double t = header_time(d) + s->timeShift;
@@ -423,12 +477,15 @@ static void usage(void)
     fprintf(stderr,
             "usage: radar_stream_send SOURCE [--host H] [--port N] [--speed X] [--loops N] [--payload BYTES]\n"
             "                         [--spread F] [--no-gaps] [--catch-up] [--queue N] [--timing-csv FILE] [--quiet]\n"
+            "                         [--format rddc|vbdr] [--vbdr-payload BYTES] [--board-port N]\n"
+            "                         [--board-reply HOST:PORT] [--no-board]\n"
             "  SOURCE: a folder of ddc_<n>.mat files (cfg.io.saveDdc) or a stream recorded with radar_receiver --record\n");
 }
 
 int main(int argc, char **argv)
 {
-    const char *path = NULL, *host = "127.0.0.1", *timingCsv = NULL;
+    const char *path = NULL, *host = "127.0.0.1", *timingCsv = NULL, *format = "rddc", *boardReply = "127.0.0.1:5100";
+    int vbdrPayload = 1400, boardPort = 5000, noBoard = 0;
     int port = 50000, loops = 1, payload = 1400, queue = 256, keepGaps = 1, catchUp = 0, quiet = 0;
     double speed = 1.0, spread = 0.0;
     for (int i = 1; i < argc; i++) {
@@ -444,12 +501,26 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--no-gaps")) keepGaps = 0;
         else if (!strcmp(a, "--catch-up")) catchUp = 1;
         else if (!strcmp(a, "--quiet")) quiet = 1;
+        else if (!strcmp(a, "--format") && i + 1 < argc) format = argv[++i];
+        else if (!strcmp(a, "--vbdr-payload") && i + 1 < argc) vbdrPayload = atoi(argv[++i]);
+        else if (!strcmp(a, "--board-port") && i + 1 < argc) boardPort = atoi(argv[++i]);
+        else if (!strcmp(a, "--board-reply") && i + 1 < argc) boardReply = argv[++i];
+        else if (!strcmp(a, "--no-board")) noBoard = 1;
         else if (a[0] != '-' && !path) path = a;
         else { usage(); return 2; }
     }
     if (!path) { usage(); return 2; }
     if (payload < 4 || payload > MAX_DATAGRAM - 64 - 8 - 20) {
         fprintf(stderr, "--payload must be 4 ... %d bytes\n", MAX_DATAGRAM - 64 - 8 - 20);
+        return 2;
+    }
+    if (strcmp(format, "rddc") && strcmp(format, "vbdr")) {
+        fprintf(stderr, "--format must be 'rddc' or 'vbdr'\n");
+        return 2;
+    }
+    const int vbdr = !strcmp(format, "vbdr");
+    if (vbdrPayload < 2 || vbdrPayload > 65479) {
+        fprintf(stderr, "--vbdr-payload must be 2 ... 65479 bytes\n");
         return 2;
     }
     if (queue < 2) queue = 2;
@@ -461,6 +532,19 @@ int main(int argc, char **argv)
     if (source_open(&src, path, payload, loops, err, sizeof err)) {
         fprintf(stderr, "%s\n", err);
         return 1;
+    }
+    src.vbdr = vbdr;
+    src.vbdrPayload = vbdrPayload;
+    BoardSim *board = NULL;                          /* VBDR: answer the board commands */
+    if (vbdr && !noBoard) {
+        char replyHost[128];
+        int replyPort = 5100;
+        snprintf(replyHost, sizeof replyHost, "%s", boardReply);
+        char *colon = strrchr(replyHost, ':');
+        if (colon) { *colon = 0; replyPort = atoi(colon + 1); }
+        uint8_t regs[256] = { 0 };
+        board = board_sim_open(boardPort, replyHost, replyPort, regs, 1, err, sizeof err);
+        if (!board) fprintf(stderr, "warning: the board commands are not answered: %s\n", err);
     }
 
 #ifdef _WIN32
@@ -530,6 +614,12 @@ int main(int argc, char **argv)
         size_t off = 0;
         double tSent = 0;
         for (int j = 0; j < p->nPkt; off += p->len[j++]) {
+            if (board && j == 0) {                     /* the board commands in the idle time */
+                double left;
+                board_sim_poll(board, 0, NULL);
+                while (speed > 0 && (left = tPri - now_seconds()) > 5e-3)
+                    board_sim_poll(board, (int)((left - 4e-3) * 1e3 < 50 ? (left - 4e-3) * 1e3 : 50), NULL);
+            }
             if (speed > 0) wait_until(tPri + j * dtPkt);
             if (j == 0) {
                 tSent = now_seconds();
@@ -614,5 +704,6 @@ int main(int argc, char **argv)
     }
     free(rd.slots);
     source_close(&src);
+    board_sim_close(board);
     return rd.failed ? 1 : 0;
 }

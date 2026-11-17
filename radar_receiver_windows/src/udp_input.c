@@ -12,6 +12,15 @@
  *   44  float  time of the first DDC sample 48 uint32 x4 short/long first/last sample
  *   64  int16  I, Q, I, Q, ... channel after channel
  *
+ * VBDR stream (udp_input_set_format(in, UDP_FORMAT_VBDR)): every PRI is one stream of N packets,
+ * each with a 28-byte label (uint32 stream number, uint32 packet number 1 ... N, uint32 N, 16 bytes
+ * ASCII "Loss=<n>") and a part of its half of the stream: packets 1 ... N/2 = half 1 (CH1 & CH2),
+ * N/2+1 ... N = half 2 (CH3 & CH4). A half = 32 uint16 system parameters (1 PRF number, 2 azimuth
+ * 0 ... 65535 = 0 ... 360 deg, 4 0x5555, 5 previous PRT [us], 6 current PRT [us], ...) + int16
+ * CHa_I, CHa_Q, CHb_I, CHb_Q of every DDC sample. The packets of a stream are kept until all N
+ * have arrived, then the halves are joined (their sizes found from the packets themselves) and the
+ * samples sorted into the channel-after-channel order of PriData (4 channels).
+ *
  * Record file: every datagram as [uint32 length (little-endian)][bytes]; it
  * is created (truncated) by udp_input_open.
  *
@@ -45,7 +54,9 @@
 #  include <unistd.h>
 #endif
 
+#include <math.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,6 +117,13 @@ struct UdpInput {
     int16_t     *buf;            /* assembly buffer                                 */
     size_t       bufCap;         /* allocated int16 values in buf                   */
     uint8_t      got[65536];     /* got[i] = 1 when packet i has been received      */
+    /* VBDR stream being assembled */
+    int          format;         /* UDP_FORMAT_RDDC or UDP_FORMAT_VBDR              */
+    int          vHave, vActive; /* vStream holds a stream number / it is still open */
+    uint32_t     vStream, vCount, vReceived, vLoss;
+    uint8_t     *vBuf;           /* payloads of the packets in arrival order        */
+    size_t       vLen, vCap;
+    uint32_t    *vOff, *vSize;   /* [65536] offset and size of packet k (0-based)   */
     uint8_t      dgram[MAX_DATAGRAM];
 };
 
@@ -280,6 +298,7 @@ static void deliver(UdpInput *in, PriData *pri)
     pri->longIdx[1]   = h->idx[3];
     pri->nSamples     = (int)h->nSamples;
     pri->nCh          = (int)h->nCh;
+    pri->format       = UDP_FORMAT_RDDC;
     pri->iq           = in->buf;
     pri->capacity     = in->bufCap;
 
@@ -312,6 +331,142 @@ static int add_packet(UdpInput *in, const PacketHeader *h, size_t len, PriData *
     return 1;
 }
 
+/* ------------------------------------------------------------------------ */
+/* VBDR stream                                                               */
+/* ------------------------------------------------------------------------ */
+
+#define VBDR_LABEL 28
+
+/* Joins the packets of the complete stream and delivers it in 'pri'. Returns 1, or 0 when the
+ * halves do not fit (counted as incomplete). */
+static int vbdr_deliver(UdpInput *in, PriData *pri)
+{
+    const uint32_t nHalf = in->vCount / 2;
+    uint64_t halfBytes[2] = { 0, 0 };
+    for (uint32_t k = 0; k < in->vCount; k++) halfBytes[k >= nHalf] += in->vSize[k];
+    if (halfBytes[0] != halfBytes[1] || halfBytes[0] < 64 || (halfBytes[0] - 64) % 8 != 0 ||
+        halfBytes[0] > MAX_PRI_BYTES / 2) {
+        in->stats.prisIncomplete++;
+        return 0;
+    }
+    const size_t nS = (size_t)((halfBytes[0] - 64) / 8);
+    const size_t need = nS * 4 * 2;                          /* int16 values of 4 channels */
+    if (need > in->bufCap) {
+        int16_t *p = (int16_t *)realloc(in->buf, (need ? need : 1) * sizeof *p);
+        if (!p) {
+            in->stats.prisIncomplete++;
+            return 0;
+        }
+        in->buf = p;
+        in->bufCap = need;
+    }
+    uint8_t par[64];
+    for (int h = 0; h < 2; h++) {
+        /* walk through the bytes of half h: 64 parameter bytes, then 8 bytes per sample */
+        uint64_t pos = 0;                                    /* byte of the half */
+        int16_t *ch0 = in->buf + 2 * (size_t)(2 * h) * nS, *ch1 = in->buf + 2 * (size_t)(2 * h + 1) * nS;
+        uint8_t smp[8];
+        int nb = 0;
+        size_t n = 0;
+        for (uint32_t k = h * nHalf; k < (uint32_t)(h + 1) * nHalf; k++) {
+            const uint8_t *b = in->vBuf + in->vOff[k];
+            uint32_t len = in->vSize[k], i = 0;
+            if (pos < 64) {                                  /* system parameters */
+                const uint32_t m = (uint32_t)(64 - pos) < len ? (uint32_t)(64 - pos) : len;
+                if (h == 0) memcpy(par + pos, b, m);
+                pos += m;
+                i = m;
+            }
+            for (; i < len; i++) {                           /* samples (also across packet edges) */
+                smp[nb++] = b[i];
+                if (nb == 8) {
+                    memcpy(&ch0[2 * n], smp, 4);             /* CHa I, Q */
+                    memcpy(&ch1[2 * n], smp + 4, 4);         /* CHb I, Q */
+                    n++;
+                    nb = 0;
+                }
+            }
+        }
+    }
+    int16_t *oldIq = pri->iq;
+    size_t oldCap = pri->capacity;
+    pri->scanNumber   = 0;                                   /* vbdr_complete_pri() */
+    pri->time_s       = 0;
+    pri->ddcFs_Hz     = 0;
+    pri->ddcT0_s      = 0;
+    pri->shortIdx[0]  = pri->shortIdx[1] = pri->longIdx[0] = pri->longIdx[1] = 0;
+    pri->pulseNumber  = in->vStream;
+    pri->az_deg       = (float)(get_u16(par + 2) * (360.0 / 65536.0));
+    pri->staggerIndex = 1;
+    pri->nSamples     = (int)nS;
+    pri->nCh          = 4;
+    pri->format       = UDP_FORMAT_VBDR;
+    pri->prfNumber    = get_u16(par + 0);
+    pri->prevPrt_s    = get_u16(par + 8) * 1e-6;
+    pri->curPrt_s     = get_u16(par + 10) * 1e-6;
+    pri->loss         = in->vLoss;
+    pri->iq           = in->buf;
+    pri->capacity     = in->bufCap;
+    in->buf = oldIq;
+    in->bufCap = oldIq ? oldCap : 0;
+    in->stats.prisComplete++;
+    return 1;
+}
+
+/* Handles a datagram of the VBDR stream. Returns 1 when a PRI was delivered. */
+static int vbdr_datagram(UdpInput *in, size_t len, PriData *pri)
+{
+    if (len <= VBDR_LABEL) { in->stats.foreign++; return 0; }
+    const uint32_t stream = get_u32(in->dgram), pk = get_u32(in->dgram + 4), count = get_u32(in->dgram + 8);
+    if (count < 2 || count % 2 || count > 65534 || pk < 1 || pk > count) { in->stats.foreign++; return 0; }
+    if (!in->vOff) {
+        in->vOff = (uint32_t *)malloc(sizeof(uint32_t) * 65536);
+        in->vSize = (uint32_t *)malloc(sizeof(uint32_t) * 65536);
+        if (!in->vOff || !in->vSize) return 0;
+    }
+    const int32_t age = in->vHave ? (int32_t)(stream - in->vStream) : 1;
+    if (age < 0 && ++in->olderRun <= RESYNC_AFTER) { in->stats.foreign++; return 0; }   /* late packet */
+    if (age == 0) {
+        in->olderRun = 0;
+        if (!in->vActive) return 0;                          /* late duplicate of a delivered stream */
+        if (count != in->vCount) { in->stats.foreign++; return 0; }
+    } else {                                                 /* a new stream (or the sender restarted) */
+        in->olderRun = 0;
+        if (in->vActive) in->stats.prisIncomplete++;
+        in->vHave = 1;
+        in->vActive = 1;
+        in->vStream = stream;
+        in->vCount = count;
+        in->vReceived = 0;
+        in->vLen = 0;
+        memset(in->got, 0, count);
+        char txt[17];
+        memcpy(txt, in->dgram + 12, 16);
+        txt[16] = 0;
+        unsigned loss = 0;
+        in->vLoss = sscanf(txt, "Loss=%u", &loss) == 1 ? loss : 0;
+        in->stats.boardLoss = in->vLoss;
+    }
+    if (in->got[pk - 1]) return 0;                           /* duplicate packet */
+    const size_t payload = len - VBDR_LABEL;
+    if (in->vLen + payload > in->vCap) {
+        size_t cap = in->vCap ? 2 * in->vCap : (size_t)1 << 20;
+        while (cap < in->vLen + payload) cap *= 2;
+        uint8_t *p = (uint8_t *)realloc(in->vBuf, cap);
+        if (!p) return 0;
+        in->vBuf = p;
+        in->vCap = cap;
+    }
+    memcpy(in->vBuf + in->vLen, in->dgram + VBDR_LABEL, payload);
+    in->got[pk - 1] = 1;
+    in->vOff[pk - 1] = (uint32_t)in->vLen;
+    in->vSize[pk - 1] = (uint32_t)payload;
+    in->vLen += payload;
+    if (++in->vReceived < in->vCount) return 0;
+    in->vActive = 0;
+    return vbdr_deliver(in, pri);
+}
+
 static void record_datagram(UdpInput *in, size_t len)
 {
     uint8_t prefix[4];
@@ -332,6 +487,8 @@ static int handle_datagram(UdpInput *in, size_t len, PriData *pri)
 
     in->stats.datagrams++;
     record_datagram(in, len);
+    if (in->format == UDP_FORMAT_VBDR)
+        return vbdr_datagram(in, len, pri);
     if (!parse_valid(in->dgram, len, &h)) {
         in->stats.foreign++;
         return 0;
@@ -538,9 +695,10 @@ static int next_from_replay(UdpInput *in, PriData *pri)
     for (;;) {
         long n = read_replay(in);
         if (n < 0) {
-            if (in->active) {                  /* the last PRI never completed */
+            if (in->active || in->vActive) {   /* the last PRI never completed */
                 in->stats.prisIncomplete++;
                 in->active = 0;
+                in->vActive = 0;
             }
             return -1;
         }
@@ -633,7 +791,15 @@ void udp_input_close(UdpInput *in)
     if (in->replay)
         fclose(in->replay);
     free(in->buf);
+    free(in->vBuf);
+    free(in->vOff);
+    free(in->vSize);
     free(in);
+}
+
+void udp_input_set_format(UdpInput *in, int format)
+{
+    if (in) in->format = format == UDP_FORMAT_VBDR ? UDP_FORMAT_VBDR : UDP_FORMAT_RDDC;
 }
 
 void pri_data_free(PriData *pri)
@@ -642,4 +808,90 @@ void pri_data_free(PriData *pri)
         return;
     free(pri->iq);
     memset(pri, 0, sizeof *pri);
+}
+
+/* ------------------------------------------------------------------------ */
+/* VBDR: the fields of a PRI the stream does not carry                       */
+/* ------------------------------------------------------------------------ */
+
+/* Stagger position (1-based) of a PRT: the expected next position when it fits, else the closest
+ * PRI of the sequence (within 1 us: the PRT is sent in whole us); 'expected' when none fits. */
+static int stagger_of(const double *seq, int n, double prt, int expected)
+{
+    const double tol = 1.0e-6;
+    if (expected >= 1 && expected <= n && fabs(seq[expected - 1] - prt) <= tol) return expected;
+    int best = 0;
+    double bestErr = tol;
+    for (int k = 0; k < n; k++) {
+        const double e = fabs(seq[k] - prt);
+        if (e <= bestErr) { bestErr = e; best = k + 1; if (e == 0) break; }
+    }
+    return best ? best : expected;
+}
+
+void vbdr_complete_pri(VbdrTiming *st, const RadarConfig *cfg, PriData *pri)
+{
+    /* layout of the DDC record (the configuration of the mode) */
+    pri->ddcFs_Hz = (float)cfg->fsOut_Hz;
+    pri->ddcT0_s = (float)cfg->ddcT0_s;
+    const PulseConfig *ps = &cfg->pulse[PULSE_SHORT], *pl = &cfg->pulse[PULSE_LONG];
+    pri->shortIdx[0] = ps->enable && ps->rxCount > 0 ? (uint32_t)ps->rxFirst + 1 : 0;
+    pri->shortIdx[1] = ps->enable && ps->rxCount > 0 ? (uint32_t)(ps->rxFirst + ps->rxCount) : 0;
+    pri->longIdx[0]  = pl->enable && pl->rxCount > 0 ? (uint32_t)pl->rxFirst + 1 : 0;
+    pri->longIdx[1]  = pl->enable && pl->rxCount > 0 ? (uint32_t)(pl->rxFirst + pl->rxCount) : 0;
+
+    /* streams between the last PRI and this one */
+    const int32_t gap = st->have ? (int32_t)(pri->pulseNumber - st->lastStream) : 1;
+    const int nSeq = cfg->nPriSequence;
+    const double meanPrt = cfg->meanPri_s > 0 ? cfg->meanPri_s : pri->curPrt_s;
+
+    /* stagger index from the current PRT */
+    int stagger = 1;
+    if (cfg->scan2scan && cfg->nPrf > 0) {
+        stagger = st->have ? st->lastStagger : 1;
+        double bestErr = 1.0e-6;
+        for (int j = 0; j < cfg->nPrf; j++) {
+            const double e = fabs(cfg->prf[j].pri_s - pri->curPrt_s);
+            if (e <= bestErr) { bestErr = e; stagger = j + 1; }
+        }
+    } else if (cfg->staggered && nSeq > 1) {
+        const int expected = st->have && gap > 0 ? (int)((st->lastStagger - 1 + (int64_t)gap) % nSeq) + 1 : 1;
+        stagger = stagger_of(cfg->priSequence_s, nSeq, pri->curPrt_s, expected);
+    }
+    pri->staggerIndex = (uint16_t)(stagger > 0 ? stagger : 1);
+
+    /* PRI start time: the sum of the PRTs (the first PRI at 0) */
+    double t = 0;
+    if (st->have) {
+        if (gap == 1) {
+            t = st->lastTime_s + (pri->prevPrt_s > 0 ? pri->prevPrt_s : st->lastCurPrt_s);
+        } else if (gap > 1) {
+            /* the last PRI lasted lastCurPrt; the PRIs that never arrived (all but the one just before
+             * this, which lasted prevPrt) are estimated: the stagger sequence or the last PRT */
+            t = st->lastTime_s + st->lastCurPrt_s;
+            const int64_t nUnknown = (int64_t)gap - 2;
+            if (cfg->staggered && nSeq > 1 && nUnknown < 1000000) {
+                for (int64_t j = 1; j <= nUnknown; j++) t += cfg->priSequence_s[(st->lastStagger - 1 + j) % nSeq];
+            } else {
+                t += (double)nUnknown * (cfg->staggered ? meanPrt : st->lastCurPrt_s);
+            }
+            t += pri->prevPrt_s > 0 ? pri->prevPrt_s : st->lastCurPrt_s;
+            st->missing += (uint64_t)(gap - 1);
+        } else {                                             /* older stream number: the sender restarted */
+            t = st->lastTime_s + st->lastCurPrt_s;
+        }
+    }
+    pri->time_s = t;
+
+    /* scan number from the azimuth wrap */
+    if (!st->have) st->scan = 1;
+    else if (pri->az_deg < st->lastAz_deg - 180.0f) st->scan++;
+    pri->scanNumber = st->scan;
+
+    st->have = 1;
+    st->lastStream = pri->pulseNumber;
+    st->lastTime_s = t;
+    st->lastCurPrt_s = pri->curPrt_s > 0 ? pri->curPrt_s : meanPrt;
+    st->lastAz_deg = pri->az_deg;
+    st->lastStagger = pri->staggerIndex;
 }

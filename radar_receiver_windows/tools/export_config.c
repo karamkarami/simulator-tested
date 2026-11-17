@@ -1301,6 +1301,73 @@ static SlowTime slow_time(const SlowIn *in)
     return st;
 }
 
+/* ------------------------------------------------------------------------ */
+/* VBDR stream and board settings (vbdr_setup.m)                            */
+/* ------------------------------------------------------------------------ */
+
+/* The 4 numbers cfg.board.<f> (default 4 4 4 4 / 1 1 1 1): whole numbers 1 ... max[i] (255). */
+static void board_four(const char *path, const double *max, double *out, double def)
+{
+    for (int i = 0; i < 4; i++) out[i] = def;
+    if (!has(path) || empty(path)) return;
+    const MValue *v = field(path, 1);
+    int ok = v->type == MV_NUM && v->rows * v->cols == 4;
+    for (int i = 0; ok && i < 4; i++) {
+        out[i] = v->re[i];
+        ok = out[i] == floor(out[i]) && out[i] >= 1 && out[i] <= (max ? max[i] : 255);
+    }
+    if (!ok) {
+        if (max) fail("cfg.%s must hold 4 whole numbers 1 ... cfg.%sOptions (Main, J1, J2, J3).", path, path);
+        fail("cfg.%s must hold 4 whole numbers 1 ... 255 (options of Main, J1, J2, J3).", path);
+    }
+}
+
+/* Checks of the VBDR stream (cfg.udp.format, cfg.udp.vbdr) and of the board settings (cfg.board,
+ * cfg.fcMin_Hz / fcMax_Hz) as vbdr_setup.m. Returns 1 for the format 'vbdr', 0 for 'rddc'. */
+static int vbdr_check(int nDdc, int nChUsed, const Wave *wv)
+{
+    int isVbdr = 0;
+    if (has("udp.format") && !empty("udp.format")) {
+        const char *f = str("udp.format");
+        if (same_text(f, "vbdr")) isVbdr = 1;
+        else if (!same_text(f, "rddc")) fail("cfg.udp.format must be 'rddc' or 'vbdr'.");
+    }
+    const double payload = has("udp.vbdr.payloadBytes") && !empty("udp.vbdr.payloadBytes") ? num("udp.vbdr.payloadBytes") : 1400;
+    if (!(payload == floor(payload) && payload >= 2 && payload <= 65479))
+        fail("cfg.udp.vbdr.payloadBytes must be a whole number 2 ... 65479 (bytes per packet after the 28-byte label).");
+    const double halfBytes = 64.0 + 8.0 * nDdc, nPk = 2 * ceil(halfBytes / payload);
+    if (isVbdr && has("udp.vbdr.nPackets") && !empty("udp.vbdr.nPackets") && num("udp.vbdr.nPackets") != nPk)
+        fail("cfg.udp.vbdr.nPackets = %g does not fit the DDC record of the mode: %d samples per PRI give 2 x %.0f bytes, "
+             "%.0f packets of %.0f bytes (2*ceil((64 + 8*nDdc)/payloadBytes)); set nPackets = %.0f (or [] = computed).",
+             num("udp.vbdr.nPackets"), nDdc, halfBytes, nPk, payload, nPk);
+    if (nPk > 65535) fail("cfg.udp.vbdr.payloadBytes = %.0f gives %.0f packets per stream: use a larger payload.", payload, nPk);
+    const double fMin = num_or("fcMin_Hz", 150e6), fMax = num_or("fcMax_Hz", 405e6);
+    if (!(fMin > 0) || !(fMax >= fMin) || fmod(fMin, 1e6) != 0 || fmod(fMax, 1e6) != 0 || fMax - fMin > 255e6)
+        fail("cfg.fcMin_Hz and cfg.fcMax_Hz must be whole MHz, fcMin_Hz <= fcMax_Hz <= fcMin_Hz + 255 MHz "
+             "(the F1 / F2 registers hold carrier - fcMin in MHz, one byte).");
+    static const char *names[2] = { "short", "long" }, *regs[2] = { "F1", "F2" };
+    for (int i = 0; i < 2 && isVbdr; i++) {
+        const double fc = wv[i].fc_Hz;
+        if (wv[i].enable && !(fmod(fc, 1e6) == 0 && fc >= fMin && fc <= fMax))
+            fail("The %s-pulse carrier %.6g MHz (cfg.wave.%s.fc_Hz or cfg.fc) is not a whole MHz in cfg.fcMin_Hz ... "
+                 "cfg.fcMax_Hz = %g ... %g MHz (the VBDR board sets it with %s).", names[i], fc / 1e6, names[i],
+                 fMin / 1e6, fMax / 1e6, regs[i]);
+    }
+    double stcN[4], stc[4], gainN[4], gain[4];
+    board_four("board.stcOptions", NULL, stcN, 4);
+    board_four("board.stc", stcN, stc, 1);
+    board_four("board.gainOptions", NULL, gainN, 4);
+    board_four("board.gain", gainN, gain, 1);
+    const double nOp = num_or("board.nOperationModes", 1), op = num_or("board.operationMode", 1);
+    if (!(nOp == floor(nOp) && nOp >= 1 && nOp <= 255)) fail("cfg.board.nOperationModes must be a whole number 1 ... 255.");
+    if (!(op == floor(op) && op >= 1 && op <= nOp))
+        fail("cfg.board.operationMode must be a whole number 1 ... cfg.board.nOperationModes = %.0f.", nOp);
+    if (isVbdr && nChUsed > 4)
+        fail("cfg.udp.format = 'vbdr' carries 4 channels (CH1 main, CH2 ... CH4 = J1 ... J3): the receiver can process at "
+             "most 4 (cfg.rx.nChannelsUsed = %d; set cfg.rx.nChannelsUsed or cfg.ant.nElements <= 4).", nChUsed);
+    return isVbdr;
+}
+
 static void export_config(void)
 {
     const char *names[2] = { "short", "long" };
@@ -1751,6 +1818,7 @@ static void export_config(void)
         const double t1 = (double)(m0 + (long)k * ddc.D2 * ddc.D1) / fs + (ddc.L1 - 1) / 2.0 / fs;
         tDdc[k] = t1 + (ddc.L2 - 1) / 2.0 / fs1;
     }
+    const int udpFormat = vbdr_check(nDdc, nChUsed, wv);   /* cfg.udp.format: 0 rddc, 1 vbdr */
 
     /* CFAR window size check of the receive intervals */
     for (int i = 0; i < 2; i++) {
@@ -2121,6 +2189,8 @@ static void export_config(void)
         rec_vec("codeIndex", ci, 2, 0);
         rec_scalar("staggerSet", staggered ? staggerSet : 0);
     }
+    rec_vec("priSequence_s", pri, nStagger, 0);           /* the PRIs of the stagger (fixed PRF: one) */
+    rec_scalar("udpFormat", udpFormat);                  /* the DDC stream: 0 'rddc', 1 'vbdr' */
 
     /* scan-to-scan PRF: the slow-time settings above are those of PRF 1; one set per PRF (prefix
      * s2s<j>_), selected by the receiver with the stagger index of the PRI header */
@@ -2318,6 +2388,7 @@ static void export_config(void)
     }
 }
 
+#ifndef RADAR_EXPORT_LIBRARY
 /* The export and the file (errors of export_config() come back here). */
 static int run_export(const char *outPath)
 {
@@ -2334,6 +2405,46 @@ static int run_export(const char *outPath)
     return 0;
 }
 
+#endif
+#ifdef RADAR_EXPORT_LIBRARY
+/* The export as a function of the receiver (runtime change of the radar mode and its settings,
+ * radar_settings.c): evaluates mPath with the statements sets[] and writes outPath. Not thread
+ * safe (globals): one call at a time. Returns 0, or -1 with the message in err. */
+int radar_export_run(const char *mPath, const char *const *sets, int nSets, const char *outPath, char *err, size_t errLen)
+{
+    char e[1024];
+    g_quiet = 1;
+    MValue *cfg = mfile_eval(mPath, sets, nSets, e, sizeof e);
+    if (!cfg) {
+        snprintf(err, errLen, "%s", e);
+        return -1;
+    }
+    if (cfg->type != MV_STRUCT) {
+        snprintf(err, errLen, "%s: %s", mPath, cfg->type == MV_UNEVAL ? cfg->str : "does not return a struct");
+        mvalue_free(cfg);
+        return -1;
+    }
+    g_cfg = cfg;
+    int r = 0;
+    if (setjmp(g_jb) != 0) {
+        snprintf(err, errLen, "%s", g_err);
+        r = -1;
+    } else {
+        export_config();
+        if (write_file(outPath) != 0) {
+            snprintf(err, errLen, "cannot write %s", outPath);
+            r = -1;
+        }
+    }
+    for (int i = 0; i < g_nRec; i++) { free(g_rec[i].re); free(g_rec[i].im); }
+    free(g_rec);
+    g_rec = NULL;
+    g_nRec = g_capRec = 0;
+    g_cfg = NULL;
+    mvalue_free(cfg);
+    return r;
+}
+#else
 static void usage(void)
 {
     puts("usage: radar_export_config [--config-m FILE] [--out FILE] [--set STATEMENT]... [--quiet]\n"
@@ -2389,3 +2500,4 @@ int main(int argc, char **argv)
     mvalue_free(cfg);
     return 0;
 }
+#endif /* RADAR_EXPORT_LIBRARY */

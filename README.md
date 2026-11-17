@@ -1387,6 +1387,211 @@ datagrams.
 
 `src/udp_receive_pulse.m` is a reference receiver that reassembles one PRI.
 
+`cfg.udp.format = 'vbdr'` sends the stream of the VBDR board instead (see
+"VBDR stream and board control" below).
+
+## VBDR stream and board control
+
+The receiver PC can also be connected to a **VBDR board** that sends the DDC
+output in its own format and is set with ASCII commands (the format of the
+board's documentation, `Data_Structure.pptx`). `cfg.udp.format` of
+`radar_config.m` selects the stream of the simulator and of the receiver:
+`'rddc'` (default, the 64-byte header above) or `'vbdr'`.
+
+### VBDR stream
+
+Every PRI is one **stream** of N UDP packets (little-endian). Packets
+1 ... N/2 carry the first half (CH1 and CH2), packets N/2+1 ... N the second
+half (CH3 and CH4). CH1 is the main channel, the one the receiver processes;
+CH2 ... CH4 are the auxiliary channels J1 ... J3, carried along. The
+simulator sends its first 4 elements (missing ones as zeros); with
+`'vbdr'` the receiver processes at most these 4 channels
+(`cfg.rx.nChannelsUsed <= 4`, checked by `setup_radar` and the export).
+
+Every packet starts with a 28-byte label:
+
+| Bytes | Type | Field |
+|---|---|---|
+| 0-3 | uint32 | stream number (the simulator: the pulse number) |
+| 4-7 | uint32 | packet number (1 ... N) |
+| 8-11 | uint32 | packets per stream N |
+| 12-27 | 16 x char | ASCII `Loss=<n>`, zero padded: packets the sender lost so far |
+
+Without the labels, the packets of a half joined give 32 uint16 **system
+parameters** followed by the samples:
+
+| Parameter | Field |
+|---|---|
+| 1 | PRF number (the pulse number mod 65536) |
+| 2 | azimuth: 0 ... 65535 = 0 ... 360 deg |
+| 3 | N/A (test; 0) |
+| 4 | 0x5555 |
+| 5 | previous PRT [us] (the PRI before this one) |
+| 6 | current PRT [us] (this PRI) |
+| 7, 8 | N/A (test; 0) |
+| 9 ... 12 | Code1[0:63] (0) |
+| 13 ... 32 | Code2[0:319] (0) |
+
+then int16 `CHa_I, CHa_Q, CHb_I, CHb_Q` of every DDC sample from the start
+of the DDC record (half 1: CH1, CH2; half 2: CH3, CH4). A half is
+64 + 8 nDdc bytes, cut into N/2 packets of `cfg.udp.vbdr.payloadBytes`
+bytes (the last one shorter, no padding). Both are set **per mode**
+(`modes/radar_config_mode_<k>.m`):
+
+```matlab
+cfg.udp.vbdr.payloadBytes = 1400;   % bytes of the half-stream per packet (after the label)
+cfg.udp.vbdr.nPackets     = 22;     % N = 2*ceil((64 + 8*nDdc)/payloadBytes), checked ([] = computed)
+```
+
+Mode 0 and 1 (1770 DDC samples): 2 x 14224 bytes, N = 22; mode 2 (3556
+samples): N = 42.
+
+The stream does not carry the PRI time, the scan, the stagger position and
+the DDC layout of the RDDC header. The receiver derives them:
+
+* **PRI time**: the first stream at 0, then the sum of the PRTs (previous
+  PRT of every stream). Streams that never arrived (gaps of the stream
+  numbers) are estimated with the stagger sequence of the mode (or the last
+  PRT).
+* **scan number**: from the azimuth wrap (first scan 1).
+* **stagger position**: the current PRT in the PRIs of the stagger
+  (`priSequence_s` of the configuration file); scan-to-scan PRF: the PRF of
+  the scan.
+* **DDC rate, time of the first sample, receive intervals**: from the
+  configuration of the mode.
+
+The PRF number, the codes and `Loss=` are not used yet (the receiver prints
+the last `Loss=` at the end).
+
+MATLAB: `udp_make_vbdr.m` makes the packets (`udp_make_packets(hdr, I, Q, [], sys.vbdr, loss)`),
+`udp_send_pulse` sends them (`udp_sender_open(cfg.udp, sys.vbdr)`, done by
+`run_radar_sim`), `udp_receive_pulse(rx, 'vbdr')` is the reference receiver
+(its `hdr`: stream number, packets, loss, PRF number, azimuth, previous and
+current PRT, the parameters), `replay_ddc_udp(folder, 'format', 'vbdr')`
+replays DDC files as VBDR streams. C: `radar_stream_send --format vbdr`,
+`radar_live_sim`, the receiver (`--format`, default `cfg.udp.format` of the
+configuration file). `tests/test_vbdr.m` checks the packets and the
+settings.
+
+### Board commands
+
+The board listens on `cfg.board.host:cfg.board.port` (real board
+192.168.100.17:5000) and answers to `cfg.board.pcHost:cfg.board.replyPort`
+(the receiver PC, 192.168.100.18:5100). The DDC stream goes to
+`cfg.udp.host:cfg.udp.port` (its own port). The commands are ASCII text
+with spaces:
+
+| Command | Answer |
+|---|---|
+| write: `CNTL W 0x02 0x1C` | `CNTL W 0x02 0x1C Returned Value = 0x00000000` |
+| read: `CNTL R 0x02 0x00` | `CNTL R 0x02 0x00 Returned Value = 0x0000001C` (the value in the low byte) |
+
+| Address | Register | Value sent by the receiver |
+|---|---|---|
+| 0x00 | Radar_Mode | the radar mode 0 ... 7 |
+| 0x01 | Code_index | the phase code pair (1-based; both sub-pulses) |
+| 0x02 | F1_Freq | carrier of the short pulse - `cfg.fcMin_Hz`, in MHz (0 ... 255) |
+| 0x03 | F2_Freq | carrier of the long pulse - `cfg.fcMin_Hz`, in MHz |
+| 0x05 | PRF_index | the stagger pattern (`cfg.prf.staggerSet`, 1-based) |
+| 0x28 | Operation_Mode | 1 ... `cfg.board.nOperationModes` (one value for all modes) |
+| 0x29 ... 0x2C | STC_Main, STC_J1, STC_J2, STC_J3 | 1 ... `cfg.board.stcOptions` of the mode |
+| 0x2D ... 0x30 | Gain_Main, Gain_J1, Gain_J2, Gain_J3 | 1 ... `cfg.board.gainOptions` of the mode |
+| 0x31 | Ext_Trig | (a command function of the receiver, no control in the PPI) |
+| 0x32 | RPM (simulator only) | the rotation speed [rev/min], only with `cfg.board.sendRpm = true` |
+
+The meaning of the operation mode, STC and gain options is not defined yet:
+the receiver sends the option number and does not change its processing.
+With `cfg.udp.format = 'vbdr'` the carriers of the sub-pulses of every mode
+must be whole MHz in `cfg.fcMin_Hz ... cfg.fcMax_Hz` (at most 255 MHz
+apart; default 150 ... 200 MHz).
+
+Configuration (`radar_config.m`): `cfg.fcMin_Hz`, `cfg.fcMax_Hz`,
+`cfg.board.host`, `port`, `pcHost`, `replyPort`, `timeout_s` (0.5),
+`retries` (1), `sendRpm`, `nOperationModes`, `operationMode`; per mode:
+`cfg.board.stcOptions`, `stc`, `gainOptions`, `gain` (4 numbers each: Main,
+J1, J2, J3).
+
+**The simulator as the board.** `run_radar_sim` (with `cfg.udp.enable` and
+`'vbdr'`), `replay_ddc_udp(..., 'format', 'vbdr')`, `radar_stream_send
+--format vbdr` and `radar_live_sim` listen on `cfg.board.port`, print every
+command, keep the written values (a read returns them; they start with the
+settings of the simulation) and answer like the board. `run_radar_sim`,
+`replay_ddc_udp` and `radar_stream_send` do not change their data: after
+another mode in the receiver, run them again in that mode (else the
+receiver ignores the PRIs whose layout differs, or processes them with the
+wrong settings). `radar_live_sim` changes its simulation with the commands
+(below).
+
+### Radar Settings of the PPI
+
+The tab *Controls* of the C receiver's PPI has, below *Logging*, the
+section **Radar Settings**: the dropdowns Radar Mode (the modes of
+`cfg.modes.available`), Phase Code (off when the mode has no phase-coded
+sub-pulse), Stagger Pattern (off without a staggered PRF), RPM (the
+`cfg.ant.availableRpm` of the mode), STC Main / J1 / J2 / J3, Gain Main /
+J1 / J2 / J3 and Operation Mode, the fields F1 and F2 [MHz] with Apply (off
+for a sub-pulse the mode does not use), the buttons *Reset defaults for this
+mode*, *Reset defaults for all modes*, *Export settings ...*, *Import
+settings ...* and the status.
+
+* Every change is written to the board, then read back; the status says
+  that it is set, that it is not set (the board reads back another value),
+  or that the board did not respond (timeout 0.5 s, one retry).
+* The receiver uses a new **radar mode, phase code, stagger pattern, RPM,
+  F1 or F2** when the board confirms it: it evaluates `radar_config.m` with
+  the new settings (`cfg.modes.active` and the settings, as
+  `radar_export_config --set`), closes the open plots and goes on with the
+  new configuration (the PPI takes the new instrumented range). The RPM goes
+  to the board only with `cfg.board.sendRpm = true` (address 0x32, for the
+  simulator); else only the receiver uses it. STC, gain and the operation
+  mode are only sent.
+* A new radar mode gets its settings sent in turn: the ones kept for it, or
+  the defaults of its mode file. The confirmed settings of every mode are
+  kept until the program ends; *Reset defaults for this mode* sends the
+  defaults of the current mode at once, *Reset defaults for all modes*
+  forgets every mode (the current one is sent at once, the others when they
+  are chosen).
+* *Export settings* writes a MAT-file: `settings` [n x 14] (one row per
+  mode: mode, code, stagger, rpm, F1_MHz, F2_MHz, stcMain, stcJ1, stcJ2,
+  stcJ3, gainMain, gainJ1, gainJ2, gainJ3), `operationMode`, `activeMode`,
+  `columns`. *Import settings* checks every row against its mode (a file
+  with an invalid value is refused with the reason), replaces the kept
+  settings and sends those of the current mode and the operation mode at
+  once; the active mode stays.
+* At the start the dropdowns show the settings of the configuration file;
+  the receiver reads the registers of the board and warns when they differ
+  or the board does not answer (nothing is sent at the start).
+* Every change goes to the console and, while a log runs, to its
+  `log_info.txt`.
+
+The receiver reads the settings of the modes from `radar_config.m` (option
+`--config-m`, default `../radar_config.m`; give the `--set` statements of
+the export again with `--config-set`). `--no-board` switches the section
+off.
+
+### radar_live_sim
+
+`radar_live_sim` (C, a run configuration in CLion) simulates the PRIs as
+`radar_generate_ddc` does and sends every one to the receiver at its PRI
+time, in the format of `cfg.udp.format`, until Ctrl+C: threads simulate the
+next PRIs ahead, the main thread sends them on one clock and answers the
+board commands. A write of the radar mode, the phase code, F1, F2, the
+stagger pattern or (with `cfg.board.sendRpm`) the rotation speed sets the
+simulation up again with these settings (after 0.3 s without a further
+command); the schedule goes on from the time, azimuth and pulse number
+reached. `cfg.sim.sectors_deg` limits the simulated PRIs (the time and the
+azimuth advance outside the sectors too). `cfg.sim.liveFidelity`
+(`--fidelity`): `'full'` (ADC at 120 MHz and the fixed-point DDC, as
+`radar_generate_ddc`) or `'fast'` (the signal at the DDC rate: targets,
+leakage, STC and noise with the gains of the ADC and DDC measured once; no
+terrain clutter, no ADC clipping, and the pulse is not shaped by the DDC
+filters, so the range sidelobes of the mismatch filter can be a little
+higher). When the computer is too slow, the PRIs go out later than real
+time (the PRTs of the stream stay those of the radar) and a warning says by
+how much; `--speed 0.2` slows it down on purpose. With 48 elements,
+`'full'` takes tens of milliseconds per PRI on 4 cores (far slower than real
+time); one element and `'fast'` keeps up with 1000 PRIs/s on 2 cores. See `radar_receiver_<os>/README.md`.
+
 ## SNR budget
 
 `print_snr_budget` (called at the start of every run) prints the expected

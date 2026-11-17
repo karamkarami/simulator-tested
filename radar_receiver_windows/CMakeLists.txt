@@ -60,6 +60,7 @@ add_library(radar_core STATIC
     src/tracker_tomht.c
     src/processor.c
     src/udp_input.c
+    src/board_link.c
     src/serial_out.c
     src/platform.c
     src/input_thread.c
@@ -140,7 +141,8 @@ if(WIN32)                                   # the program icon of radar_receiver
     enable_language(RC)
     target_sources(radar_receiver PRIVATE src/radar_receiver.rc)
 endif()
-target_link_libraries(radar_receiver PRIVATE radar_core)
+target_link_libraries(radar_receiver PRIVATE radar_core radar_board)
+target_compile_definitions(radar_receiver PRIVATE RADAR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")   # ../radar_config.m
 if(RADAR_QT_FOUND)
     target_compile_definitions(radar_receiver PRIVATE RADAR_WITH_QT)
     target_link_libraries(radar_receiver PRIVATE radar_ppi)
@@ -163,6 +165,17 @@ else()
 endif()
 if(NOT WIN32)
     target_link_libraries(radar_ddc_files PUBLIC m)
+endif()
+
+# Radar Settings of the PPI: the settings of the radar modes from radar_config.m (mfile.c), the
+# receiver configuration of a new mode built at run time (export_config.c as a library) and the
+# board control thread (board_control.c)
+add_library(radar_board STATIC src/board_control.c src/radar_settings.c tools/export_config.c tools/mfile.c)
+target_include_directories(radar_board PUBLIC src tools)
+target_compile_definitions(radar_board PRIVATE RADAR_EXPORT_LIBRARY)
+target_link_libraries(radar_board PUBLIC radar_core radar_ddc_files)
+if(RADAR_QT_FOUND)
+    target_link_libraries(radar_ppi PUBLIC radar_board)
 endif()
 
 # Sends the DDC files (ddc_<n>.mat) or a recorded stream (--record) over UDP
@@ -205,6 +218,27 @@ if(RADAR_OPENMP AND OpenMP_C_FOUND)
 endif()
 if(NOT WIN32)
     target_link_libraries(radar_generate_ddc PRIVATE m)
+endif()
+
+# The simulator of radar_generate_ddc in real time: every PRI goes to the receiver over UDP at its
+# PRI time (RDDC or VBDR), the board commands of the receiver change its mode and settings: a run
+# configuration "radar_live_sim" in CLion (until Ctrl+C; see --help and README "radar_live_sim").
+add_executable(radar_live_sim tools/generate_ddc.c)
+target_include_directories(radar_live_sim PRIVATE tools src)
+target_compile_definitions(radar_live_sim PRIVATE RADAR_LIVE_SIM RADAR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+if(NOT WIN32)
+    target_compile_definitions(radar_live_sim PRIVATE _POSIX_C_SOURCE=200809L)
+endif()
+target_link_libraries(radar_live_sim PRIVATE radar_board radar_ddc_files)
+if(ZLIB_FOUND)
+    target_compile_definitions(radar_live_sim PRIVATE RADAR_HAVE_ZLIB)
+    target_link_libraries(radar_live_sim PRIVATE ZLIB::ZLIB)
+endif()
+if(RADAR_OPENMP AND OpenMP_C_FOUND)
+    target_link_libraries(radar_live_sim PRIVATE OpenMP::OpenMP_C)
+    if(NOT MSVC AND OpenMP_C_FLAGS)                 # (MinGW of CLion, see radar_generate_ddc)
+        target_link_options(radar_live_sim PRIVATE ${OpenMP_C_FLAGS})
+    endif()
 endif()
 
 # Processing time per block on synthetic PRIs (no network, display or console):
@@ -359,6 +393,15 @@ if(RADAR_BUILD_TESTS)
     set_tests_properties(generate_ddc PROPERTIES FIXTURES_SETUP generated_ddc)
     set_tests_properties(generated_ddc_files PROPERTIES FIXTURES_REQUIRED generated_ddc)
 
+    # the board commands and the Radar Settings (localhost, radar_config.m of this project)
+    add_executable(test_board tests/test_board.c)
+    target_link_libraries(test_board PRIVATE radar_board)
+    add_test(NAME board COMMAND test_board ${CMAKE_CURRENT_SOURCE_DIR}/../radar_config.m)
+    # radar_live_sim: a short run (fidelity fast, one element, no board) and a VBDR run of the full simulation
+    add_test(NAME live_sim_fast COMMAND radar_live_sim --quiet --no-board --fidelity fast --max-pulses 300 --port 50471
+             --set "cfg.ant.nElements = 1;" --set "cfg.clutter.enable = false;")
+    add_test(NAME live_sim_vbdr COMMAND radar_live_sim --quiet --no-board --format vbdr --max-pulses 20 --speed 0.1 --port 50472
+             --set "cfg.sim.sectors_deg = [0 1];" --set "cfg.rx.nChannelsUsed = 4;")
     add_executable(test_udp_input tests/test_udp_input.c)
     target_link_libraries(test_udp_input PRIVATE radar_core)
     add_test(NAME udp_input COMMAND test_udp_input)
@@ -384,7 +427,8 @@ if(RADAR_BUILD_TESTS)
         add_executable(test_ppi_interactive tests/test_ppi_interactive.cpp src/ppi.qrc)
         set_target_properties(test_ppi_interactive PROPERTIES AUTORCC ON)
         target_include_directories(test_ppi_interactive PRIVATE src)
-        target_link_libraries(test_ppi_interactive PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Threads::Threads)
+        target_link_libraries(test_ppi_interactive PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Threads::Threads radar_board)
+        target_compile_definitions(test_ppi_interactive PRIVATE RADAR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME ppi_interactive COMMAND test_ppi_interactive ${CMAKE_CURRENT_BINARY_DIR})
         set_tests_properties(ppi_interactive PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
         radar_deploy_qt(test_ppi_interactive)

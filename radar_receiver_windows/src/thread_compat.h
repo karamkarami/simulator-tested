@@ -23,6 +23,7 @@ typedef CONDITION_VARIABLE Cond;
 #  define cond_init(c)        InitializeConditionVariable(c)
 #  define cond_destroy(c)     ((void)0)
 #  define cond_signal(c)      WakeConditionVariable(c)
+#  define cond_broadcast(c)   WakeAllConditionVariable(c)
 #  define cond_wait_ms(c, m, ms) SleepConditionVariableCS(c, m, (DWORD)(ms))
 #else
 #  include <pthread.h>
@@ -36,6 +37,7 @@ typedef pthread_cond_t  Cond;
 #  define cond_init(c)        pthread_cond_init(c, NULL)
 #  define cond_destroy(c)     pthread_cond_destroy(c)
 #  define cond_signal(c)      pthread_cond_signal(c)
+#  define cond_broadcast(c)   pthread_cond_broadcast(c)
 static inline void cond_wait_ms(Cond *c, Mutex *m, int ms)
 {
     struct timespec ts;

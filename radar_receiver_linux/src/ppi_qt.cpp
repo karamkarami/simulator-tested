@@ -2935,6 +2935,21 @@ public:
     QCheckBox *microphoneBox() { return micBox_; }
     bool recording() const { return recorder_.active(); }
     QPushButton *logButton() { return logButton_; }
+    /* the Radar Settings (tests): the dropdown of an item (BOARD_MODE, BOARD_CODE, ...), the status */
+    QComboBox *boardCombo(int item)
+    {
+        if (item == BOARD_MODE) return bMode_;
+        if (item == BOARD_CODE) return bCode_;
+        if (item == BOARD_STAGGER) return bStagger_;
+        if (item == BOARD_RPM) return bRpm_;
+        if (item == BOARD_OPMODE) return bOp_;
+        if (item >= BOARD_STC_MAIN && item <= BOARD_STC_J3) return bStc_[item - BOARD_STC_MAIN];
+        if (item >= BOARD_GAIN_MAIN && item <= BOARD_GAIN_J3) return bGain_[item - BOARD_GAIN_MAIN];
+        return nullptr;
+    }
+    QSpinBox *boardCarrier(int i) { return bF_[i]; }
+    QPushButton *boardCarrierApply(int i) { return bFApply_[i]; }
+    QString boardStatus() const { return bStatus_ ? bStatus_->text() : QString(); }
     QString logStatus() const { return logStatus_->text(); }
     QWidget *panel() { return panel_; }
 protected:
@@ -3153,6 +3168,9 @@ private:
             "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
             "QLineEdit, QPushButton { background: #2a2a2a; border: 1px solid #555; padding: 4px; }"
             "QPushButton:hover { background: #383838; }"
+            "QComboBox, QSpinBox { background: #2a2a2a; color: #e0e0e0; border: 1px solid #555; padding: 3px 6px; }"
+            "QComboBox QAbstractItemView { background: #2a2a2a; color: #e0e0e0; selection-background-color: #3d5a80; }"
+            "QComboBox:disabled, QSpinBox:disabled, QPushButton:disabled { color: #666; background: #1e1e1e; border-color: #333; }"
             "QLabel#info { color: #a0e0a0; font-weight: normal; }"
             "QLabel#note { color: #909090; font-weight: normal; }"));
         QVBoxLayout *v = new QVBoxLayout(page);

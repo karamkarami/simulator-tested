@@ -1618,7 +1618,7 @@ static void run_ddc(const Radar *s, Work *wk)
     }
 }
 
-typedef struct { int pulse, scan, staggerIdx; double t, az, pri; } Pri;
+typedef struct { int pulse, scan, staggerIdx; double t, az, pri, prevPri; } Pri;
 
 /* Received signal, ADC, DDC of one PRI (generate_rx_signal.m, adc_sample.m, ddc.m); returns the
  * fraction of the receive samples at full scale. */
@@ -1769,6 +1769,7 @@ static void write_file(const char *folder, const char *prefix, int compressed, c
     if (varB) mat_write_int16(w, varB, b, rows, (size_t)s->nCh);
     const Wave *ws = &s->w[0], *wl = &s->w[1];
     const double v_pulse = pr->pulse, v_scan = pr->scan, v_t = pr->t, v_az = pr->az, v_pri = pr->pri, v_st = pr->staggerIdx;
+    const double v_prev = pr->prevPri;
     const double v_fs = s->fs, v_fif = s->fIF, v_fc = s->fc, v_rx0 = (double)s->m0 / s->fs;
     const double sTx[2] = { ws->tTx, ws->width }, lTx[2] = { wl->tTx, wl->width };
     const double v_dfs = s->fsOut, v_t0 = s->ddcT0;
@@ -1776,11 +1777,11 @@ static void write_file(const char *folder, const char *prefix, int compressed, c
     const double sFc = ws->fc, lFc = wl->fc;
     static const char *const names[] = { "pulseNumber", "scanNumber", "time_s", "antennaAz_deg", "pri_s", "staggerIndex",
                                          "fs_Hz", "fIF_Hz", "fc_Hz", "rxStart_s", "shortTx_s", "longTx_s", "ddcFs_Hz",
-                                         "ddcT0_s", "shortDdcIdx", "longDdcIdx", "shortFc_Hz", "longFc_Hz" };
-    const double *vals[18] = { &v_pulse, &v_scan, &v_t, &v_az, &v_pri, &v_st, &v_fs, &v_fif, &v_fc, &v_rx0, sTx, lTx,
-                               &v_dfs, &v_t0, sIdx, lIdx, &sFc, &lFc };
-    const int n[18] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1 };
-    mat_write_struct(w, "hdr", 18, names, vals, n);
+                                         "ddcT0_s", "shortDdcIdx", "longDdcIdx", "shortFc_Hz", "longFc_Hz", "prevPri_s" };
+    const double *vals[19] = { &v_pulse, &v_scan, &v_t, &v_az, &v_pri, &v_st, &v_fs, &v_fif, &v_fc, &v_rx0, sTx, lTx,
+                               &v_dfs, &v_t0, sIdx, lIdx, &sFc, &lFc, &v_prev };
+    const int n[19] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 1 };
+    mat_write_struct(w, "hdr", 19, names, vals, n);
     if (mat_write_close(w) != 0) { fprintf(stderr, "radar_generate_ddc: error writing %s\n", path); exit(1); }
 }
 
@@ -1843,6 +1844,7 @@ static int run(const Options *opt)
         p->pulse = k + 1;
         p->staggerIdx = stIdx;
         p->pri = pk;
+        p->prevPri = nSched > 1 ? sched[nSched - 2].pri : pk;   /* the PRI before (VBDR: previous PRT) */
         p->t = tt;
         const double azU = s.az0 + s.rate * tt;
         p->az = mod360(azU);

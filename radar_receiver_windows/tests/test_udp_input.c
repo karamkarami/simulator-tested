@@ -10,6 +10,12 @@
  *   - a restarted sender (pulse numbers start again from 1).
  * Replay part: the record file is replayed and must give the same PRIs and
  * statistics, then -1. Fuzz part: random datagrams are replayed (no crash).
+ * VBDR part: streams of the VBDR board are written to a record file (packets
+ * shuffled and duplicated, a stream with a missing packet, a lost stream,
+ * a late packet) and replayed with the format UDP_FORMAT_VBDR: the 4 channels,
+ * the system parameters and vbdr_complete_pri() (time from the PRTs with a lost
+ * stream, scan from the azimuth wrap, stagger position from the PRT, layout of
+ * the configuration).
  *
  * Prints PASS or FAIL and returns 0 on success.
  */
@@ -38,6 +44,7 @@ typedef int sock_t;
 #  define close_socket close
 #endif
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,6 +53,7 @@ typedef int sock_t;
 
 #define RECORD_FILE "test_udp_input.rec"
 #define FUZZ_FILE   "test_udp_input_fuzz.rec"
+#define VBDR_FILE   "test_udp_input_vbdr.rec"
 #define MAGIC       0x52444443u
 #define RESYNC_RUN  64          /* RESYNC_AFTER of udp_input.c */
 
@@ -611,6 +619,145 @@ static void test_open_errors(void)
     pri_data_free(NULL);
 }
 
+/* ------------------------------------------------------------------------ */
+/* VBDR stream                                                               */
+/* ------------------------------------------------------------------------ */
+
+static int16_t vbdr_value(uint32_t stream, int ch, int n, int q)
+{
+    return (int16_t)((int)((stream * 131u + (uint32_t)ch * 7919u + (uint32_t)n * 3u + (uint32_t)q) % 60001u) - 30000);
+}
+
+static void put_rec(FILE *f, const uint8_t *b, size_t len)
+{
+    uint8_t pre[4] = { (uint8_t)len, (uint8_t)(len >> 8), (uint8_t)(len >> 16), (uint8_t)(len >> 24) };
+    fwrite(pre, 1, 4, f);
+    fwrite(b, 1, len, f);
+}
+
+/* The packets of one stream: nS samples, payload bytes per packet, azimuth [0, 65535], PRTs [us].
+ * Returns the number of packets; packet k (0-based) in pk[k] with length len[k]. */
+static int vbdr_stream(uint32_t stream, int nS, int payload, uint16_t az, uint16_t prev, uint16_t cur, unsigned loss,
+                       uint8_t pk[][1500], size_t *len)
+{
+    const int halfBytes = 64 + 8 * nS, nHalf = (halfBytes + payload - 1) / payload, count = 2 * nHalf;
+    uint8_t *half = malloc((size_t)halfBytes);
+    for (int h = 0; h < 2; h++) {
+        uint16_t par[32];
+        memset(par, 0, sizeof par);
+        par[0] = (uint16_t)stream; par[1] = az; par[3] = 0x5555; par[4] = prev; par[5] = cur;
+        memcpy(half, par, 64);
+        for (int n = 0; n < nS; n++)
+            for (int c = 0; c < 2; c++)
+                for (int q = 0; q < 2; q++) {
+                    int16_t v = vbdr_value(stream, 2 * h + c, n, q);
+                    memcpy(half + 64 + 8 * n + 4 * c + 2 * q, &v, 2);
+                }
+        for (int j = 0; j < nHalf; j++) {
+            const int k = h * nHalf + j, n = (j + 1) * payload <= halfBytes ? payload : halfBytes - j * payload;
+            put32(pk[k], 0, stream);
+            put32(pk[k], 4, (uint32_t)k + 1);
+            put32(pk[k], 8, (uint32_t)count);
+            memset(pk[k] + 12, 0, 16);
+            snprintf((char *)pk[k] + 12, 16, "Loss=%u", loss);
+            memcpy(pk[k] + 28, half + j * payload, (size_t)n);
+            len[k] = 28 + (size_t)n;
+        }
+    }
+    free(half);
+    return count;
+}
+
+static void check_vbdr_samples(const PriData *d, uint32_t stream, int nS)
+{
+    int bad = 0;
+    CHECK(d->nCh == 4 && d->nSamples == nS && d->format == UDP_FORMAT_VBDR);
+    for (int ch = 0; ch < 4 && d->nCh == 4; ch++)
+        for (int n = 0; n < nS; n++)
+            for (int q = 0; q < 2; q++)
+                bad += d->iq[2 * ((size_t)ch * nS + n) + q] != vbdr_value(stream, ch, n, q);
+    CHECK(bad == 0);
+}
+
+static void test_vbdr(void)
+{
+    static uint8_t pk[64][1500];
+    size_t len[64];
+    const int nS = 300, payload = 700;            /* half = 2464 bytes: 4 packets, the last 364 */
+    FILE *f = fopen(VBDR_FILE, "wb");
+    CHECK(f != NULL);
+    if (!f) return;
+    /* stream 10: shuffled with a duplicate; staggered PRTs 1000, 1100, 1250 us (positions 1, 2, 3) */
+    int n = vbdr_stream(10, nS, payload, 65000, 1250, 1000, 0, pk, len);
+    CHECK(n == 8 && len[3] == 28 + 364);
+    const int order1[9] = { 7, 0, 3, 3, 1, 6, 2, 5, 4 };
+    for (int i = 0; i < 9; i++) put_rec(f, pk[order1[i]], len[order1[i]]);
+    put_rec(f, pk[2], len[2]);                    /* late duplicate of the delivered stream */
+    /* stream 11: one packet missing (dropped when stream 12 starts) */
+    n = vbdr_stream(11, nS, payload, 65300, 1000, 1100, 0, pk, len);
+    for (int i = 0; i < n; i++) if (i != 5) put_rec(f, pk[i], len[i]);
+    /* stream 12: complete, the azimuth wraps (scan 2) */
+    n = vbdr_stream(12, nS, payload, 100, 1100, 1250, 2, pk, len);
+    for (int i = n - 1; i >= 0; i--) put_rec(f, pk[i], len[i]);
+    /* stream 13 never sent; stream 14 (position 2: previous PRT 1000 = position 1) */
+    n = vbdr_stream(14, nS, payload, 400, 1000, 1100, 2, pk, len);
+    for (int i = 0; i < n; i++) put_rec(f, pk[i], len[i]);
+    {   /* a packet of a foreign size and a label of a wrong count */
+        uint8_t junk[40];
+        memset(junk, 0, sizeof junk);
+        put_rec(f, junk, 20);
+        put32(junk, 0, 15); put32(junk, 4, 1); put32(junk, 8, 3);
+        put_rec(f, junk, 40);
+    }
+    fclose(f);
+
+    char err[256];
+    UdpInput *in = udp_input_open(0, NULL, VBDR_FILE, err, sizeof err);
+    CHECK(in != NULL);
+    if (!in) return;
+    udp_input_set_format(in, UDP_FORMAT_VBDR);
+    RadarConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    double seq[3] = { 1000e-6, 1100e-6, 1250e-6 };
+    cfg.fsOut_Hz = 2e6; cfg.ddcT0_s = 3e-6; cfg.staggered = 1; cfg.nStagger = 3; cfg.nPriSequence = 3;
+    cfg.priSequence_s = seq; cfg.meanPri_s = (seq[0] + seq[1] + seq[2]) / 3;
+    cfg.pulse[PULSE_SHORT].enable = 1; cfg.pulse[PULSE_SHORT].rxFirst = 10; cfg.pulse[PULSE_SHORT].rxCount = 90;
+    cfg.pulse[PULSE_LONG].enable = 1;  cfg.pulse[PULSE_LONG].rxFirst = 120; cfg.pulse[PULSE_LONG].rxCount = 180;
+    VbdrTiming vt;
+    memset(&vt, 0, sizeof vt);
+    PriData d;
+    memset(&d, 0, sizeof d);
+
+    CHECK(udp_input_next(in, &d, 0) == 1);       /* stream 10 */
+    vbdr_complete_pri(&vt, &cfg, &d);
+    CHECK(d.pulseNumber == 10 && d.time_s == 0 && d.scanNumber == 1 && d.staggerIndex == 1);
+    CHECK(fabs(d.az_deg - 65000 * 360.0 / 65536) < 1e-3 && d.prfNumber == 10 && d.loss == 0);
+    CHECK(fabs(d.prevPrt_s - 1250e-6) < 1e-12 && fabs(d.curPrt_s - 1000e-6) < 1e-12);
+    CHECK(d.ddcFs_Hz == 2e6f && d.shortIdx[0] == 11 && d.shortIdx[1] == 100 && d.longIdx[0] == 121 && d.longIdx[1] == 300);
+    check_vbdr_samples(&d, 10, nS);
+
+    CHECK(udp_input_next(in, &d, 0) == 1);       /* stream 12 (11 is incomplete) */
+    vbdr_complete_pri(&vt, &cfg, &d);
+    /* stream 10 lasted 1000 us, 11 lasted 1100 (previous PRT of 12) */
+    CHECK(d.pulseNumber == 12 && fabs(d.time_s - 2100e-6) < 1e-12 && d.scanNumber == 2 && d.staggerIndex == 3 && d.loss == 2);
+    check_vbdr_samples(&d, 12, nS);
+
+    CHECK(udp_input_next(in, &d, 0) == 1);       /* stream 14 (13 lost) */
+    vbdr_complete_pri(&vt, &cfg, &d);
+    /* 12 lasted 1250, 13 lasted 1000 (previous PRT of 14) */
+    CHECK(d.pulseNumber == 14 && fabs(d.time_s - 4350e-6) < 1e-12 && d.scanNumber == 2 && d.staggerIndex == 2);
+    check_vbdr_samples(&d, 14, nS);
+    CHECK(vt.missing == 2);
+
+    CHECK(udp_input_next(in, &d, 0) == -1);
+    UdpStats st;
+    udp_input_stats(in, &st);
+    CHECK(st.prisComplete == 3 && st.prisIncomplete == 1 && st.foreign == 2 && st.boardLoss == 2);
+    udp_input_close(in);
+    pri_data_free(&d);
+    remove(VBDR_FILE);
+}
+
 int main(void)
 {
     UdpStats netStats;
@@ -641,6 +788,8 @@ int main(void)
     test_fuzz();
     test_open_errors();
     remove(RECORD_FILE);
+    printf("VBDR test\n");
+    test_vbdr();
 
 #ifdef _WIN32
     WSACleanup();
