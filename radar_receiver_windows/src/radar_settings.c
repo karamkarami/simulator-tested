@@ -168,7 +168,7 @@ int board_info_load(const char *mPath, const char *const *sets, int nSets, Board
     bi->activeMode = (int)num_or(cfg, "modes.active", 0);
     if (nAv == 0) { av[0] = bi->activeMode; nAv = 1; }
     bi->fcMin_MHz = (int)lround(num_or(cfg, "fcMin_Hz", 150e6) / 1e6);
-    bi->fcMax_MHz = (int)lround(num_or(cfg, "fcMax_Hz", 405e6) / 1e6);
+    bi->fcMax_MHz = (int)lround(num_or(cfg, "fcMax_Hz", 190e6) / 1e6);
     bi->nOperationModes = (int)num_or(cfg, "board.nOperationModes", 1);
     bi->operationMode = (int)num_or(cfg, "board.operationMode", 1);
     bi->sendRpm = num_or(cfg, "board.sendRpm", 0) != 0;

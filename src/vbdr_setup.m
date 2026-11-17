@@ -48,7 +48,7 @@ end
 
 % carriers (F1 = short pulse, F2 = long pulse)
 v.fcMin_Hz = field_or(cfg, 'fcMin_Hz', 150e6);
-v.fcMax_Hz = field_or(cfg, 'fcMax_Hz', 405e6);
+v.fcMax_Hz = field_or(cfg, 'fcMax_Hz', 190e6);
 if ~isscalar(v.fcMin_Hz) || ~isscalar(v.fcMax_Hz) || ~(v.fcMin_Hz > 0) || ~(v.fcMax_Hz >= v.fcMin_Hz) || ...
         mod(v.fcMin_Hz, 1e6) ~= 0 || mod(v.fcMax_Hz, 1e6) ~= 0 || v.fcMax_Hz - v.fcMin_Hz > 255e6
     error(['cfg.fcMin_Hz and cfg.fcMax_Hz must be whole MHz, fcMin_Hz <= fcMax_Hz <= fcMin_Hz + 255 MHz ', ...

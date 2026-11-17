@@ -509,7 +509,7 @@ there, at the same beam and Doppler, behind very strong far targets.
 * **Received signal** (`generate_rx_signal.m`, `adc_sample.m`), built in
   this order for every PRI:
   1. For every target, its position from its motion and the received power
-     from the radar equation (20 kW, antenna patterns, 3 dB losses, RCS of
+     from the radar equation (4 kW, antenna patterns, 3 dB losses, RCS of
      the current scan). The echo of both sub-pulses on the 30 MHz IF has the
      element phases of the tilted column and the Doppler inside each pulse
      (stop-and-hop between pulses).
@@ -1503,7 +1503,7 @@ The meaning of the operation mode, STC and gain options is not defined yet:
 the receiver sends the option number and does not change its processing.
 With `cfg.udp.format = 'vbdr'` the carriers of the sub-pulses of every mode
 must be whole MHz in `cfg.fcMin_Hz ... cfg.fcMax_Hz` (at most 255 MHz
-apart; default 150 ... 200 MHz).
+apart; default 150 ... 190 MHz).
 
 Configuration (`radar_config.m`): `cfg.fcMin_Hz`, `cfg.fcMax_Hz`,
 `cfg.board.host`, `port`, `pcHost`, `replyPort`, `timeout_s` (0.5),

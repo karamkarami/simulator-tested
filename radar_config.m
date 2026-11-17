@@ -40,7 +40,7 @@ cfg.files.dbf     = fullfile(root, 'inputs', 'dbf_matrix.mat');      % elevation
 %% Radar site and antenna
 cfg.fc            = 170e6; % center frequency [Hz] (VHF; wavelength 1.76 m)
 cfg.fcMin_Hz      = 150e6; % carrier range of the VBDR board [Hz]: the commands F1 (short pulse) and F2
-cfg.fcMax_Hz      = 200e6; % (long pulse) set the carrier fcMin_Hz + 0 ... 255 MHz in steps of 1 MHz;
+cfg.fcMax_Hz      = 190e6; % (long pulse) set the carrier fcMin_Hz + 0 ... 255 MHz in steps of 1 MHz;
                            % with cfg.udp.format = 'vbdr' the carriers of the modes must be whole MHz in this range
 cfg.ant.nElements = 48;   % receive elements in elevation (1 = single antenna, beamforming disabled)
 cfg.rx.nChannelsUsed = [];  % channels of the DDC output the receiver processes: the first nChannelsUsed
@@ -55,7 +55,7 @@ cfg.ant.tilt_deg  = 11;   % array tilt above the horizon [deg]
 cfg.ant.az0_deg   = 0;    % antenna azimuth at t = 0, clockwise from North [deg]
 
 %% Transmitter and receiver
-cfg.tx.peakPower_W     = 20e3;   % peak transmit power [W]
+cfg.tx.peakPower_W     = 4e3;    % peak transmit power [W]
 cfg.rx.noiseFigure_dB  = 4;      % receiver noise figure [dB]
 cfg.rx.losses_dB       = 3;      % system losses not modelled elsewhere (RF, radome, ...) [dB]
 cfg.rx.gain_dB         = 60;     % gain of the receiver path from the antenna to the ADC [dB]: the
