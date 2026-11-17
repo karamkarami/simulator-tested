@@ -5,6 +5,8 @@
  *     --config FILE          receiver configuration from export_receiver_config.m
  *                            (default config/radar_config.bin)
  *     --port N               UDP port of the DDC stream (default 50000)
+ *     --format rddc|vbdr     packet format of the DDC stream (default: of the configuration,
+ *                            cfg.udp.format): 'rddc' or 'vbdr' (the VBDR board, README)
  *     --record FILE          also store the received datagrams in FILE
  *     --replay FILE          read the datagrams from FILE instead of the network
  *     --ppi                  show the PPI (Qt build only)
@@ -65,6 +67,7 @@
 
 typedef struct {
     const char *configPath, *recordPath, *replayPath, *snapshotPath;
+    const char *format;           /* --format (NULL: of the configuration) */
     const char *serialDevice, *serialContent, *plotsCsv, *detectionsCsv, *tracksCsv, *mf, *ppiShow, *ppiTab, *ppiRdPlot;
     int ppiBeam;                  /* 1-based */
     int port, baud, threads, updateEvery, ppi, quiet, queue, noSkip;
@@ -107,7 +110,7 @@ static void on_signal(int sig)
 
 static void usage(void)
 {
-    puts("usage: radar_receiver [--config FILE] [--port N] [--record FILE] [--replay FILE]\n"
+    puts("usage: radar_receiver [--config FILE] [--port N] [--format rddc|vbdr] [--record FILE] [--replay FILE]\n"
          "                      [--ppi] [--ppi-snapshot FILE] [--ppi-show plots|detections|both|video|dbf|mf]\n"
          "                      [--ppi-beam N] [--ppi-tab ppi|rd] [--ppi-rd-rate HZ]\n"
          "                      [--ppi-rd-plot spectrum|range]\n"
@@ -144,6 +147,7 @@ static int parse_options(int argc, char **argv, Options *o)
 #define TAKE(field) do { if (!v) { fprintf(stderr, "%s needs a value\n", a); return -1; } field; i++; } while (0)
         if      (!strcmp(a, "--config"))         TAKE(o->configPath = v);
         else if (!strcmp(a, "--port"))           TAKE(o->port = atoi(v));
+        else if (!strcmp(a, "--format"))         TAKE(o->format = v);
         else if (!strcmp(a, "--record"))         TAKE(o->recordPath = v);
         else if (!strcmp(a, "--replay"))         TAKE(o->replayPath = v);
         else if (!strcmp(a, "--ppi"))            o->ppi = 1;
@@ -181,6 +185,10 @@ static int parse_options(int argc, char **argv, Options *o)
         else if (!strcmp(a, "--help") || !strcmp(a, "-h")) { usage(); return 1; }
         else { fprintf(stderr, "unknown option %s\n", a); usage(); return -1; }
 #undef TAKE
+    }
+    if (o->format && strcmp(o->format, "rddc") && strcmp(o->format, "vbdr")) {
+        fprintf(stderr, "--format must be 'rddc' or 'vbdr'\n");
+        return -1;
     }
     if (strcmp(o->mf, "auto") && strcmp(o->mf, "direct") && strcmp(o->mf, "fft")) {
         fprintf(stderr, "--mf must be 'auto', 'direct' or 'fft'\n");
@@ -538,6 +546,9 @@ static int worker(void *arg)
         app->exitCode = 1;
         return 1;
     }
+    udp_input_set_format(in, app->cfg.udpFormat);
+    VbdrTiming vbdrTiming;                                 /* VBDR: time, scan and stagger of the PRIs */
+    memset(&vbdrTiming, 0, sizeof vbdrTiming);
     /* real time (Linux): the processing thread gets its priority and CPUs before
      * the OpenMP workers exist, so they inherit them */
     char rtErr[512];
@@ -659,6 +670,7 @@ static int worker(void *arg)
             continue;
         }
         lastData = now_seconds();
+        if (pri->format == UDP_FORMAT_VBDR) vbdr_complete_pri(&vbdrTiming, &app->cfg, pri);
 #ifdef RADAR_WITH_QT
         double request_dB;
         const double tReq = now_seconds();
@@ -727,6 +739,12 @@ static int worker(void *arg)
     processor_flush(proc, &cb);
     stop_log(app, proc);
     print_timing(app, proc, in, queueDrops, now_seconds() - t0);
+    if (app->cfg.udpFormat == UDP_FORMAT_VBDR) {
+        UdpStats us;
+        udp_input_stats(in, &us);
+        fprintf(stderr, "VBDR stream: %llu stream(s) never arrived or were dropped, board \"Loss=\" %u\n",
+                (unsigned long long)vbdrTiming.missing, (unsigned)us.boardLoss);
+    }
 #ifdef RADAR_WITH_QT
     if (app->opt.ppi) {
         ProcessorTiming tm;
@@ -777,6 +795,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "configuration: %s\n", err);
         return 1;
     }
+    if (app.opt.format) app.cfg.udpFormat = !strcmp(app.opt.format, "vbdr") ? UDP_FORMAT_VBDR : UDP_FORMAT_RDDC;
+    if (app.cfg.udpFormat == UDP_FORMAT_VBDR && app.cfg.nChUsed > 4) {
+        fprintf(stderr, "configuration: the VBDR stream carries 4 channels, the configuration processes %d "
+                "(cfg.rx.nChannelsUsed <= 4)\n", app.cfg.nChUsed);
+        return 1;
+    }
     app.cfg.mfMethod = !strcmp(app.opt.mf, "direct") ? MF_DIRECT : !strcmp(app.opt.mf, "fft") ? MF_FFT : MF_AUTO;
     if (app.opt.quiet < 0) app.opt.quiet = !app.cfg.consolePlots;
     if (app.opt.rdRate > 0) app.cfg.rdRate_Hz = app.opt.rdRate;
@@ -797,6 +821,8 @@ int main(int argc, char **argv)
             app.cfg.nChUsed, app.cfg.nBeams, app.cfg.nDdc, app.cfg.pulse[0].nRange, app.cfg.pulse[1].nRange,
             app.cfg.cpiLength, app.cfg.dopplerMethod == DOPPLER_NUFFT ? "NUFFT" : "FFT", app.cfg.nfft, app.cfg.nRows,
             app.cfg.updateEvery, app.cfg.minHits);
+    fprintf(stderr, "DDC stream: %s format, UDP port %d\n", app.cfg.udpFormat == UDP_FORMAT_VBDR ? "VBDR" : "RDDC",
+            app.opt.port);
     fprintf(stderr, "Radar mode %d; DDC record %s: %d samples, the first at %.3f us", app.cfg.radarMode,
             app.cfg.ddcManual ? "manual" : "automatic", app.cfg.nDdc,
             app.cfg.ddcT0_s * 1e6);

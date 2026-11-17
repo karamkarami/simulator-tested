@@ -138,6 +138,8 @@ end
 r{end+1} = {'ddcRecord', [double(sys.ddcRecord.manual), sys.ddcT0_s]};
 r{end+1} = {'codeIndex', [sys.wave.short.codeIndex, sys.wave.long.codeIndex]};
 r{end+1} = {'staggerSet', sys.staggerSet};
+r{end+1} = {'priSequence_s', reshape(sys.pri, 1, [])};   % the PRIs of the stagger (fixed PRF: one)
+r{end+1} = {'udpFormat', double(strcmp(sys.vbdr.format, 'vbdr'))};   % the DDC stream: 0 'rddc', 1 'vbdr'
 % Scan-to-scan PRF: the slow-time settings above are those of PRF 1; one set per PRF of the
 % scans (prefix s2s<j>_). The receiver selects set j with the stagger index of the PRI header
 % (= the number of the PRF of the scan) and restarts the CPIs when it changes.

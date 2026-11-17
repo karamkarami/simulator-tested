@@ -37,7 +37,8 @@ enum { PMBM_CV = 0, PMBM_CA = 1, PMBM_CT = 2 };               /* IMM models of t
 enum { WAVE_LFM = 0, WAVE_PHASE_CODE = 1 };
 enum { COMPRESSION_MATCHED = 0, COMPRESSION_MISMATCH = 1 };
 enum { SNR_NOISE_MEDIAN = 0, SNR_NOISE_CFAR = 1 };   /* noise floor of the SNR of the reports */
-enum { MTI_CANCELLER = 0, MTI_FIR = 1 };             /* clutter filter (cfg.mti.type; information) */
+enum { MTI_CANCELLER = 0, MTI_FIR = 1 };
+enum { UDP_FORMAT_RDDC = 0, UDP_FORMAT_VBDR = 1 };   /* packet format of the DDC stream (cfg.udp.format) */             /* clutter filter (cfg.mti.type; information) */
 const char *cfar_method_name(int method);   /* "2-D", "1-D range", "1-D Doppler" */
 const char *cfar_type_name(int type);       /* "CA", "GO", "SO", "OS", "CE" */
 
@@ -178,6 +179,11 @@ typedef struct {
     int     ddcManual;
     double  ddcT0_s;
     int     codeIndex[N_PULSES], staggerSet;
+    /* the DDC stream (optional in the file: UDP_FORMAT_RDDC) and the PRIs of the stagger (optional: none;
+     * the VBDR stream finds the stagger position of a PRI from its PRT with them) */
+    int     udpFormat;
+    int     nPriSequence;
+    double *priSequence_s;
     /* scan-to-scan PRF (optional in the file: off): one set of slow-time settings per PRF of the
      * scans. The fields above (cpiLength, rowLen, nfft, dopWindow, noiseGain, noiseGainBypass,
      * dopFreq_Hz, notchBins, minHits, meanPri_s, trackVrSpan, pulse[].vrSpan_mps) hold those of
@@ -265,7 +271,32 @@ typedef struct {
     int16_t *iq;             /* I,Q pairs, channel after channel:
                                 I = iq[2*(ch*nSamples + n)], Q = iq[2*(ch*nSamples + n) + 1] */
     size_t   capacity;       /* allocated int16 values in iq (managed by udp_input)   */
+    /* VBDR stream (format UDP_FORMAT_VBDR): pulseNumber = stream number, az_deg, nSamples, nCh = 4
+     * and the fields below come from the stream; vbdr_complete_pri() derives the others (time,
+     * scan, stagger index, DDC rate and layout) from the stream and the configuration */
+    int      format;         /* UDP_FORMAT_RDDC or UDP_FORMAT_VBDR                    */
+    uint16_t prfNumber;      /* PRF number of the system parameters                   */
+    double   prevPrt_s;      /* previous PRT (the PRI before this one)                */
+    double   curPrt_s;       /* current PRT (this PRI)                                */
+    uint32_t loss;           /* "Loss=" of the label: packets the board lost so far   */
 } PriData;
+
+/* State of vbdr_complete_pri() (zero-initialised before the first PRI). */
+typedef struct {
+    int      have;           /* a PRI was completed before                            */
+    uint32_t lastStream;
+    double   lastTime_s, lastCurPrt_s;
+    float    lastAz_deg;
+    int      lastStagger;    /* 1-based stagger position of the last PRI              */
+    uint32_t scan;
+    uint64_t missing;        /* streams that never arrived (gaps of the stream numbers) */
+} VbdrTiming;
+/* Completes a PRI of the VBDR stream: PRI start time from the sum of the PRTs (the first PRI at
+ * 0; streams that never arrived, found from the stream numbers, are estimated with the stagger
+ * sequence or the last PRT), scan number from the azimuth wrap (first scan 1), stagger index from
+ * the current PRT (staggered PRF: the position in cfg->priSequence_s; scan-to-scan PRF: the PRF of
+ * the scan), DDC rate, time of the first sample and the receive intervals of the configuration. */
+void vbdr_complete_pri(VbdrTiming *st, const RadarConfig *cfg, PriData *pri);
 
 typedef struct UdpInput UdpInput;
 
@@ -274,6 +305,7 @@ typedef struct {
     uint64_t foreign;        /* datagrams with a wrong magic number or size           */
     uint64_t prisComplete;   /* PRIs delivered                                        */
     uint64_t prisIncomplete; /* PRIs dropped because packets were missing             */
+    uint32_t boardLoss;      /* VBDR: "Loss=" of the newest label (packets the board lost) */
 } UdpStats;
 
 /* Opens the UDP input on 'port' (all interfaces). recordPath (may be NULL)
@@ -281,6 +313,10 @@ typedef struct {
  * datagrams from such a file instead of the network. Returns NULL on error
  * (message in err). */
 UdpInput *udp_input_open(int port, const char *recordPath, const char *replayPath, char *err, size_t errLen);
+/* The packet format: UDP_FORMAT_RDDC (default) or UDP_FORMAT_VBDR (VBDR board: a stream of N packets
+ * with a 28-byte label per PRI, CH1 & CH2 in the first half, CH3 & CH4 in the second; the PRIs have
+ * 4 channels, complete them with vbdr_complete_pri()). Call before the first udp_input_next(). */
+void udp_input_set_format(UdpInput *in, int format);
 /* Waits for the next complete PRI. Returns 1 when 'pri' was filled, 0 on
  * timeout, -1 at the end of a replay file or on an error. 'pri' must be
  * zero-initialised before the first call; its buffer is reused. */
