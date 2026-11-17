@@ -181,6 +181,8 @@ int ddc_load(const char *path, DdcPri *p, char *err, size_t errLen)
     GET("longDdcIdx", 2)    p->longIdx[0]   = (uint32_t)to_int(v[0], 0, 4294967295.0);
                             p->longIdx[1]   = (uint32_t)to_int(v[1], 0, 4294967295.0);
 #undef GET
+    p->prevPri_s = p->pri_s;                          /* optional (VBDR: the previous PRT) */
+    if (scalar(hdr, "prevPri_s", v, 1, why, sizeof why) == 0) p->prevPri_s = v[0];
 
     {
         const size_t n = I->numel;                    /* complex samples */
@@ -273,4 +275,66 @@ int ddc_make_datagrams(const DdcPri *p, int payloadBytes, unsigned char *out, ui
         out += len[i];
     }
     return n;
+}
+
+/* ------------------------------------------------------------------------ */
+/* VBDR stream                                                               */
+/* ------------------------------------------------------------------------ */
+
+int ddc_vbdr_count(int nSamples, int payloadBytes, size_t *totalBytes)
+{
+    const size_t half = 64 + 8 * (size_t)nSamples;
+    const int nHalf = (int)((half + (size_t)payloadBytes - 1) / (size_t)payloadBytes);
+    if (totalBytes) *totalBytes = 2 * half + (size_t)(2 * nHalf) * 28;
+    return 2 * nHalf;
+}
+
+int ddc_make_vbdr(const DdcPri *p, int payloadBytes, uint32_t loss, unsigned char *out, uint32_t *len)
+{
+    const int nS = p->nSamples;
+    const size_t halfBytes = 64 + 8 * (size_t)nS;
+    const int count = ddc_vbdr_count(nS, payloadBytes, NULL), nHalf = count / 2;
+    unsigned char *half = malloc(halfBytes);
+    if (!half) return 0;
+    char lossTxt[17];
+    memset(lossTxt, 0, sizeof lossTxt);
+    snprintf(lossTxt, sizeof lossTxt, "Loss=%u", (unsigned)loss);
+    double az = fmod((double)p->az_deg, 360.0);
+    if (az < 0) az += 360.0;
+    const long azW = lround(az / 360.0 * 65536.0) % 65536;
+    const long prev = lround(p->prevPri_s * 1e6), cur = lround(p->pri_s * 1e6);
+    int k = 0;
+    for (int h = 0; h < 2; h++) {
+        uint16_t par[32];
+        memset(par, 0, sizeof par);
+        par[0] = (uint16_t)(p->pulseNumber & 0xFFFF);
+        par[1] = (uint16_t)azW;
+        par[3] = 0x5555;
+        par[4] = (uint16_t)(prev < 0 ? 0 : prev > 65535 ? 65535 : prev);
+        par[5] = (uint16_t)(cur < 0 ? 0 : cur > 65535 ? 65535 : cur);
+        unsigned char *q = half;
+        for (int i = 0; i < 32; i++) q = put_u16(q, par[i]);
+        for (int n = 0; n < nS; n++)                      /* CHa I, Q, CHb I, Q (missing channels: 0) */
+            for (int c = 0; c < 2; c++) {
+                const int ch = 2 * h + c;
+                const int16_t I = ch < p->nCh ? p->iq[2 * ((size_t)ch * nS + n)] : 0;
+                const int16_t Q = ch < p->nCh ? p->iq[2 * ((size_t)ch * nS + n) + 1] : 0;
+                q = put_u16(q, (uint16_t)I);
+                q = put_u16(q, (uint16_t)Q);
+            }
+        for (int j = 0; j < nHalf; j++, k++) {
+            const size_t first = (size_t)j * payloadBytes;
+            const size_t n = first + (size_t)payloadBytes <= halfBytes ? (size_t)payloadBytes : halfBytes - first;
+            unsigned char *o = out;
+            o = put_u32(o, p->pulseNumber);
+            o = put_u32(o, (uint32_t)k + 1);
+            o = put_u32(o, (uint32_t)count);
+            memcpy(o, lossTxt, 16);
+            memcpy(o + 16, half + first, n);
+            len[k] = (uint32_t)(28 + n);
+            out += len[k];
+        }
+    }
+    free(half);
+    return count;
 }

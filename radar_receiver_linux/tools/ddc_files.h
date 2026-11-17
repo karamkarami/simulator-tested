@@ -19,6 +19,7 @@ typedef struct {
     uint16_t staggerIndex;
     double   time_s;            /* PRI start time                               */
     double   pri_s;             /* PRI (time to the next PRI)                   */
+    double   prevPri_s;         /* the PRI before (hdr.prevPri_s; missing: pri_s) */
     float    ddcFs_Hz, ddcT0_s;
     uint32_t shortIdx[2], longIdx[2];
     int      nSamples, nCh;
@@ -41,5 +42,12 @@ int  ddc_datagram_count(const DdcPri *p, int payloadBytes, size_t *totalBytes);
 /* Writes the datagrams back to back into out (totalBytes from
  * ddc_datagram_count) and their lengths into len[]. Returns their number. */
 int  ddc_make_datagrams(const DdcPri *p, int payloadBytes, unsigned char *out, uint32_t *len);
+
+/* The stream of the VBDR board (udp_make_vbdr.m): the number of packets and their total bytes for
+ * nSamples DDC samples with payloadBytes per packet; ddc_make_vbdr writes them back to back
+ * (the first 4 channels, missing ones zero; loss: the "Loss=" of the label) and returns their
+ * number (0: out of memory). */
+int  ddc_vbdr_count(int nSamples, int payloadBytes, size_t *totalBytes);
+int  ddc_make_vbdr(const DdcPri *p, int payloadBytes, uint32_t loss, unsigned char *out, uint32_t *len);
 
 #endif
