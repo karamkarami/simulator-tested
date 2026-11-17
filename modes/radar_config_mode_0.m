@@ -169,8 +169,15 @@ cfg.rx.stc.curve  = [    0 40;  1000 40;  2000 32;  4000 25;  6000 22;  8000 16;
 cfg.rx.stc.curveLong = [0 60;  3000 60;  6000 45;  9000 30;  12000 18;  15000 10;  18000 5;  22500 0];
 
 %% Pulse compression and Doppler processing (CPI buffer)
-cfg.proc.taylorNbar   = 4;     % Taylor window (LFM only): number of nearly constant sidelobes
-cfg.proc.taylorSll_dB = -35;   % Taylor window peak sidelobe level [dB]
+% Windows (window_function.m): 'rect', 'hamming', 'hann', 'blackman', 'blackmanharris', 'taylor',
+% 'chebyshev' or 'kaiser'. Their parameters: <window>Sll_dB the sidelobe level of the Taylor and
+% Chebyshev windows [dB], <window>Nbar the nearly constant sidelobes of the Taylor window, <window>Beta
+% the shape of the Kaiser window (larger: lower sidelobes, wider mainlobe).
+cfg.proc.rangeWindow        = 'taylor'; % range window: weighting of the LFM matched filter (phase codes:
+                                        % their matched or mismatch filter as it is)
+cfg.proc.rangeWindowSll_dB  = -35;      % Taylor / Chebyshev: peak sidelobe level [dB]
+cfg.proc.rangeWindowNbar    = 4;        % Taylor: nearly constant sidelobes next to the mainlobe
+cfg.proc.rangeWindowBeta    = 6;        % Kaiser: beta
 cfg.proc.cpiMode      = 'auto'; % pulses per CPI buffer: 'auto' from the radar parameters (the pulses
                                % arriving while a target is in the 3 dB azimuth beam:
                                % round(beamwidth / (rotation rate * PRI)) = 114), or 'manual':
@@ -179,8 +186,34 @@ cfg.proc.cpiLength    = 114;   % pulses per CPI buffer with cpiMode = 'manual' (
                                % staggered PRF rounded down to whole stagger periods)
 cfg.proc.nfft         = [];    % Doppler FFT length ([] = next power of 2: of the pulses in the buffer
                                % with a fixed PRF (114 -> 128), of the samples per row when staggered (28 -> 32))
-cfg.proc.dopplerWindow = 'hamming'; % window of the Doppler FFT: 'hamming', 'hann', 'blackman' or 'rect'
-                               % (mainlobe +-2, +-2, +-3, +-1 bins x nfft/samples: sets the MTI notch width)
+cfg.proc.dopplerWindow = 'hamming'; % window of the Doppler FFT: 'rect', 'hamming', 'hann', 'blackman',
+                               % 'blackmanharris', 'taylor', 'chebyshev' or 'kaiser' (its mainlobe, e.g. +-2 bins x
+                               % nfft/samples for Hamming and Hann, +-3 Blackman, +-1 rect, sets the MTI notch width)
+cfg.proc.dopplerWindowSll_dB = -40; % Taylor / Chebyshev Doppler window: peak sidelobe level [dB]
+cfg.proc.dopplerWindowNbar  = 4;   % Taylor Doppler window: nbar
+cfg.proc.dopplerWindowBeta  = 6;   % Kaiser Doppler window: beta
+% Doppler processing of the staggered PRF ('fixed' and 'scan2scan': one FFT of the CPI):
+%   'deinterleave' the CPI is split into one row per stagger position (uniform samples, the period of
+%                  the stagger), FFT of every row (cfg.proc.nfft) and non-coherent sum of the rows
+%   'nufft'        the whole CPI (all MTI outputs) is one non-uniformly sampled sequence: its
+%                  non-uniform DFT (NUFFT) on a velocity grid of cfg.proc.nufft.nPoints bins from
+%                  vMax_mps down to vMin_mps (spacing (vMax - vMin) / nPoints), |.|^2 to the CFAR. The
+%                  window (cfg.proc.nufft.window, the names above) is evaluated at the non-uniform
+%                  sample times (the times scaled to [0 1]: not the window of uniform samples) and, with
+%                  densityComp, weighted by the spacing of the samples. One matrix per stagger position
+%                  of the oldest pulse, scaled to a flat noise floor (setup_radar.m: nufft_setup). The
+%                  CFAR treats the grid as circular (vMax next to vMin); the MTI notch is around zero
+%                  velocity when it is on the grid. Costs nPoints x MTI outputs complex multiply-adds per
+%                  cell (more than the FFTs of the rows: see the timing panel, cfg.proc.updateEvery).
+cfg.proc.staggerDoppler = 'deinterleave'; % staggered PRF: 'deinterleave' or 'nufft'
+cfg.proc.nufft.nPoints  = [];      % NUFFT velocity bins ([] = next power of 2 of the MTI outputs)
+cfg.proc.nufft.vMin_mps = [];      % lowest velocity of the grid [m/s] ([] = -vMax_mps)
+cfg.proc.nufft.vMax_mps = [];      % highest velocity [m/s] ([] = lambda / (4 mean PRI): the span of the mean PRF)
+cfg.proc.nufft.window   = 'hamming'; % window of the non-uniform samples (names as above)
+cfg.proc.nufft.windowSll_dB = -40; % Taylor / Chebyshev: peak sidelobe level [dB]
+cfg.proc.nufft.windowNbar   = 4;   % Taylor: nbar
+cfg.proc.nufft.windowBeta   = 6;   % Kaiser: beta
+cfg.proc.nufft.densityComp  = true; % weight every sample by its mean spacing to the neighbours
 cfg.proc.updateEvery  = 1;     % run MTI/Doppler/CFAR every N new pulses (1 = every pulse)
 
 %% Clutter filter along slow time (MTI), in front of the Doppler FFT
@@ -214,6 +247,11 @@ cfg.mti.maxRange_m = Inf;      % the clutter filter is applied to the range cell
 %         'os'      order statistic: the k-th smallest training cell,
 %                   k = round(osRank * training cells) (robust against other
 %                   targets in the window; more work)
+%         'ce'      censored (CE, censored mean level): the mean of the training
+%                   cells without the round(ceCensor * training cells) largest
+%                   (other targets and clutter edges in the window do not raise
+%                   the threshold; less loss than OS in homogeneous noise; more
+%                   work than CA)
 %         Halves (GO, SO): with the 2-D and the range window the cells at a
 %         smaller and at a larger range than the cell under test, with the
 %         Doppler window the bins below and above it.
@@ -231,7 +269,7 @@ cfg.mti.maxRange_m = Inf;      % the clutter filter is applied to the range cell
 % last range cells of a sub-pulse the range window is shifted inwards (same
 % number of training cells, the cell under test is no longer in the middle),
 % so every range cell can be tested.
-cfg.cfar.type   = 'ca';   % 'ca', 'go', 'so' or 'os'
+cfg.cfar.type   = 'ca';   % 'ca', 'go', 'so', 'os' or 'ce'
 cfg.cfar.method = '2d';   % '2d', 'range' or 'doppler'
 cfg.cfar.maxPfa = 1e-4;   % largest Pfa allowed (per cell and CPI): the lowest threshold that can be set
                           % (pfa / threshold_dB of the window and the PPI threshold field, MATLAB and C)
@@ -241,6 +279,7 @@ cfg.cfar.osRank = 0.9;    % OS: rank of the statistic as a fraction of the train
                           % 15 km of the long window as a ripple of similar peaks, whose 75th percentile is
                           % below its mean: with 0.75 the OS detects tens of its peaks per scan
                           % (test_multi_scan: 62 false plots in 3 scans, 0.9: 1, as CA; 0.95: 0)
+cfg.cfar.ceCensor = 0.1;  % CE: fraction of the training cells left out of the mean: the largest ones [0, 1)
 
 cfg.cfar.twoD.guardRange   = 3;     % guard cells on each side in range
 cfg.cfar.twoD.trainRange   = 8;     % training cells on each side in range

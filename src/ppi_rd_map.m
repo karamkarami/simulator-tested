@@ -24,6 +24,8 @@ c = rd.P(~isnan(rd.P));
 if isempty(c), rd.noise = NaN; else, rd.noise = median(c); end
 rd.dets = dets;
 rd.notchBins = sys.dop.notchBins;
+rd.zeroBin = floor(sys.dop.nfft/2) + 1;                       % bin of zero Doppler (NUFFT: 0 = none)
+if isfield(sys.dop, 'zeroBin'), rd.zeroBin = sys.dop.zeroBin; end
 rd.beam = beam;
 rd.t_s = t_s;
 rd.az_deg = az_deg;

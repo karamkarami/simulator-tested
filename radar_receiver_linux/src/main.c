@@ -31,6 +31,10 @@
  *     --idle-timeout S       stop when no data came for S seconds after the first PRI (default 0 = never)
  *     --queue N              PRIs buffered between the input thread and the processing (default 64)
  *     --no-skip              never skip Doppler/CFAR updates when the processing falls behind
+ *     --log-dir DIR          log the processing chain from the start to DIR/<name> (also: tab
+ *                            "Controls" of the PPI): one MAT-file per PRI and block (logger.c)
+ *     --log-name NAME        name of the log folder (default log_<date>_<time>)
+ *     --log-blocks LIST      blocks of the log, e.g. ddc,dbf,mf,doppler,detection (default ddc,detection)
  *     --cfar-threshold DB    CFAR threshold factor in dB (default from the configuration,
  *                            i.e. from cfg.cfar.pfa); can also be changed in the PPI
  *     --quiet                do not print every plot and confirmed track
@@ -63,6 +67,8 @@ typedef struct {
     const char *cpus, *inputCpus;
     double idleTimeout_s;
     double cfarThreshold_dB;      /* NAN: from the configuration */
+    const char *logDir, *logName, *logBlocks;   /* logging from the start (--log-dir) */
+    int logMask;
 } Options;
 
 typedef struct {
@@ -75,6 +81,8 @@ typedef struct {
     size_t nConfirmedIds, capConfirmedIds;
     double detArc_deg;            /* azimuth step between CPI updates (PPI detection arcs) */
     double console_ms, display_ms;   /* time in the console output and in the PPI calls */
+    double log_ms;                /* time of the logging in the processing thread (copies) */
+    Logger *log;                  /* the running log (NULL: none) */
     int exitCode;
 } App;
 
@@ -98,6 +106,7 @@ static void usage(void)
          "                      [--plots-csv FILE] [--detections-csv FILE] [--tracks-csv FILE]\n"
          "                      [--idle-timeout S] [--quiet | --print-plots]\n"
          "                      [--queue N] [--no-skip] [--cfar-threshold DB]\n"
+         "                      [--log-dir DIR] [--log-name NAME] [--log-blocks ddc,dbf,mf,doppler,detection]\n"
          "                      [--rt-priority N] [--cpus LIST] [--input-cpus LIST] [--mlock]");
 }
 
@@ -147,6 +156,9 @@ static int parse_options(int argc, char **argv, Options *o)
         else if (!strcmp(a, "--queue"))          TAKE(o->queue = atoi(v));
         else if (!strcmp(a, "--no-skip"))        o->noSkip = 1;
         else if (!strcmp(a, "--cfar-threshold")) TAKE(o->cfarThreshold_dB = atof(v));
+        else if (!strcmp(a, "--log-dir"))        TAKE(o->logDir = v);
+        else if (!strcmp(a, "--log-name"))       TAKE(o->logName = v);
+        else if (!strcmp(a, "--log-blocks"))     TAKE(o->logBlocks = v);
         else if (!strcmp(a, "--rt-priority"))    TAKE(o->rtPriority = atoi(v));
         else if (!strcmp(a, "--cpus"))           TAKE(o->cpus = v);
         else if (!strcmp(a, "--input-cpus"))     TAKE(o->inputCpus = v);
@@ -188,6 +200,28 @@ static int parse_options(int argc, char **argv, Options *o)
         fprintf(stderr, "--serial-content must be 'detections' or 'plots'\n");
         return -1;
     }
+    o->logMask = LOG_DDC | LOG_DETECTION;
+    if (o->logBlocks) {                                  /* ddc,dbf,mf,doppler,detection */
+        static const struct { const char *name; int bit; } blocks[5] = {
+            { "ddc", LOG_DDC }, { "dbf", LOG_DBF }, { "mf", LOG_MF }, { "doppler", LOG_DOPPLER }, { "detection", LOG_DETECTION } };
+        o->logMask = 0;
+        const char *s = o->logBlocks;
+        while (*s) {
+            size_t n = strcspn(s, ",");
+            int found = 0;
+            for (int i = 0; i < 5; i++)
+                if (n == strlen(blocks[i].name) && !strncmp(s, blocks[i].name, n)) { o->logMask |= blocks[i].bit; found = 1; }
+            if (!found && n > 0) {
+                fprintf(stderr, "--log-blocks: unknown block '%.*s' (ddc, dbf, mf, doppler, detection)\n", (int)n, s);
+                return -1;
+            }
+            s += n + (s[n] == ',');
+        }
+        if (!o->logMask) {
+            fprintf(stderr, "--log-blocks needs at least one block\n");
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -203,6 +237,11 @@ static void on_detections(void *user, int pulse, const Detection *dets, int n)
 {
     App *app = user;
     app->nDetections += (uint64_t)n;
+    if (app->log && n > 0) {
+        const double t0 = now_seconds();
+        logger_detections(app->log, dets, n);
+        app->log_ms += ms_since(t0);
+    }
     /* called on every CPI update, also without detections: no frame is sent
      * then, but the bytes still queued are written to the port */
     if (app->serial) {
@@ -231,6 +270,11 @@ static void on_plot(void *user, const Detection *p)
 {
     App *app = user;
     app->nPlots++;
+    if (app->log) {
+        const double t0 = now_seconds();
+        logger_plot(app->log, p);
+        app->log_ms += ms_since(t0);
+    }
     if (!app->opt.quiet) {
         const double t0 = now_seconds();
         printf("plot  t %8.3f s  az %7.2f deg  R %8.3f km  el %6.2f deg  vr %7.2f m/s  SNR %5.1f dB  %-5s  hits %d\n",
@@ -325,6 +369,15 @@ static void on_rdmap(void *user, const RdMap *map)
 #endif
 }
 
+/* Block outputs of the processor (DBF, MF, Doppler) for the log. */
+static void on_block(void *user, const BlockOutput *out)
+{
+    App *app = user;
+    const double t0 = now_seconds();
+    logger_block(app->log, out);
+    app->log_ms += ms_since(t0);
+}
+
 static void on_antenna(void *user, double az_deg, double time_s, uint32_t scan)
 {
     App *app = user;
@@ -349,6 +402,44 @@ static void app_timing(const App *app, const Processor *proc, ProcessorTiming *t
     processor_timing(proc, t);
     t->console_ms = app->console_ms;
     t->display_ms = app->display_ms;
+    t->log_ms = app->log_ms;
+}
+
+/* Starts a log (folder/name, mask of LOG_*); reports it on the console and in the PPI. */
+static void start_log(App *app, Processor *proc, const char *folder, const char *name, int mask)
+{
+    char err[512] = "";
+    if (app->log) return;
+    app->log = logger_start(folder, name, mask, &app->cfg, err, sizeof err);
+    processor_set_log(proc, app->log ? mask : 0);
+    if (app->log) fprintf(stderr, "Logging to %s\n", logger_dir(app->log));
+    else fprintf(stderr, "logging: %s\n", err);
+#ifdef RADAR_WITH_QT
+    if (app->opt.ppi) {
+        LoggerStats st;
+        logger_stats(app->log, &st);
+        ppi_post_log_status(app->log != NULL, app->log ? logger_dir(app->log) : "", &st, app->log ? NULL : err);
+    }
+#endif
+}
+
+/* Ends the log: the queued files are written first. */
+static void stop_log(App *app, Processor *proc)
+{
+    if (!app->log) return;
+    LoggerStats st;
+    char dir[1024];
+    snprintf(dir, sizeof dir, "%s", logger_dir(app->log));
+    processor_set_log(proc, 0);
+    Logger *L = app->log;
+    app->log = NULL;
+    logger_stop(L, &st);                           /* writes the queued files; st: the final state */
+    fprintf(stderr, "Log %s ended\n", dir);
+#ifdef RADAR_WITH_QT
+    if (app->opt.ppi) ppi_post_log_status(0, dir, &st, NULL);
+#else
+    (void)st;
+#endif
 }
 
 static void print_timing(const App *app, const Processor *proc, const UdpInput *in, uint64_t queueDrops, double wall_s)
@@ -365,7 +456,8 @@ static void print_timing(const App *app, const Processor *proc, const UdpInput *
             "CFAR+pruning %.3f, peak interpolation %.3f, extraction %.3f, tracking %.3f)\n", t.total_ms / n,
             t.dbf_ms / n, t.mf_ms / n, t.mti_ms / n, t.doppler_ms / n, t.cfar_ms / n, t.interp_ms / n,
             t.extract_ms / n, t.track_ms / n);
-    fprintf(stderr, "Output per PRI: console %.3f ms, display (PPI calls) %.3f ms\n", t.console_ms / n, t.display_ms / n);
+    fprintf(stderr, "Output per PRI: console %.3f ms, display (PPI calls) %.3f ms, logging (copies) %.3f ms\n", t.console_ms / n,
+            t.display_ms / n, t.log_ms / n);
     if (t.skipped || queueDrops)
         fprintf(stderr, "Overload: %llu CPI updates skipped, %llu PRIs dropped because the queue was full\n",
                 (unsigned long long)t.skipped, (unsigned long long)queueDrops);
@@ -441,7 +533,8 @@ static int worker(void *arg)
         app->exitCode = 1;
         return 1;
     }
-    ProcessorCallbacks cb = { on_detections, on_plot, on_antenna, app, on_track, on_profile, on_rdmap };
+    ProcessorCallbacks cb = { on_detections, on_plot, on_antenna, app, on_track, on_profile, on_rdmap, on_block };
+    if (app->opt.logDir) start_log(app, proc, app->opt.logDir, app->opt.logName, app->opt.logMask);
 #ifdef RADAR_WITH_QT
     char detName[48], trackName[64];
     snprintf(detName, sizeof detName, "CFAR %s %s", cfar_type_name(app->cfg.cfarType), cfar_method_name(app->cfg.cfarMethod));
@@ -512,7 +605,24 @@ static int worker(void *arg)
     const int skipAbove = app->opt.queue / 4 > 2 ? app->opt.queue / 4 : 2;
     const double t0 = now_seconds();
     double lastData = 0;                                        /* 0: no PRI yet */
+    double lastLogStatus = 0;
     while (!g_stop) {
+#ifdef RADAR_WITH_QT
+        if (app->opt.ppi) {                                     /* Start / Stop logging in the tab Controls */
+            int start = 0, mask = 0;
+            char folder[1024], name[256];
+            if (ppi_take_log_request(&start, folder, sizeof folder, name, sizeof name, &mask)) {
+                if (start) start_log(app, proc, folder, name, mask);
+                else stop_log(app, proc);
+            }
+            if (app->log && now_seconds() - lastLogStatus > 0.5) {    /* the state of the log */
+                LoggerStats st;
+                logger_stats(app->log, &st);
+                ppi_post_log_status(1, logger_dir(app->log), &st, NULL);
+                lastLogStatus = now_seconds();
+            }
+        }
+#endif
         PriData *pri = NULL;
         int r = input_thread_next(input, &pri, 200);
         if (r < 0) break;                                      /* end of the replay file */
@@ -532,13 +642,13 @@ static int worker(void *arg)
         }
 #endif
 #ifdef RADAR_WITH_QT
-        if (app->opt.ppi && ppi_video_wanted() && pri->nCh == app->cfg.nCh && pri->nSamples >= app->cfg.nDdc) {
+        if (app->opt.ppi && ppi_video_wanted() && pri->nCh >= app->cfg.nChUsed && pri->nSamples >= app->cfg.nDdc) {
             const double tVideo = now_seconds();             /* the video of the PPI (display time) */
             if (!videoRow && video_layout_init(&video, &app->cfg, app->cfg.maxRange_m) == 0)
                 videoRow = malloc(sizeof(float) * (size_t)video.nBins);
             if (videoRow) {
                 video_row(&video, pri, videoRow);
-                ppi_post_video(videoRow, video.nBins, app->cfg.nCh, video.dR_m, pri->az_deg, pri->time_s);
+                ppi_post_video(videoRow, video.nBins, app->cfg.nChUsed, video.dR_m, pri->az_deg, pri->time_s);
             }
             app->display_ms += ms_since(tVideo);
         }
@@ -554,7 +664,13 @@ static int worker(void *arg)
 #endif
         if (live && !app->opt.noSkip)
             processor_set_slow_time(proc, input_thread_backlog(input) <= skipAbove);
+        if (app->log) {                                        /* the DDC output of the PRI as received */
+            const double tLog = now_seconds();
+            logger_begin_pri(app->log, pri);
+            app->log_ms += ms_since(tLog);
+        }
         processor_process(proc, pri, &cb);
+        if (app->log) logger_end_pri(app->log);
 #ifdef RADAR_WITH_QT
         if (app->opt.ppi && lastData - lastTiming > 0.25) {   /* block times in the PPI panel */
             const double tPost = now_seconds();
@@ -569,6 +685,7 @@ static int worker(void *arg)
     const uint64_t queueDrops = input_thread_dropped(input);
     input_thread_stop(input);
     processor_flush(proc, &cb);
+    stop_log(app, proc);
     print_timing(app, proc, in, queueDrops, now_seconds() - t0);
 #ifdef RADAR_WITH_QT
     if (app->opt.ppi) {
@@ -635,10 +752,11 @@ int main(int argc, char **argv)
         }
     }
     app.detArc_deg = app.cfg.rate_dps * app.cfg.meanPri_s * app.cfg.updateEvery;
-    fprintf(stderr, "Configuration: %d element(s), %d beam(s), DDC %d samples, short %d / long %d range cells, "
-            "CPI %d pulses, FFT %d x %d row(s), update every %d pulse(s), plots need %d update(s)\n", app.cfg.nCh,
-            app.cfg.nBeams, app.cfg.nDdc, app.cfg.pulse[0].nRange, app.cfg.pulse[1].nRange, app.cfg.cpiLength,
-            app.cfg.nfft, app.cfg.nRows, app.cfg.updateEvery, app.cfg.minHits);
+    fprintf(stderr, "Configuration: %d element(s) (%d processed), %d beam(s), DDC %d samples, short %d / long %d range cells, "
+            "CPI %d pulses, %s %d x %d row(s), update every %d pulse(s), plots need %d update(s)\n", app.cfg.nCh,
+            app.cfg.nChUsed, app.cfg.nBeams, app.cfg.nDdc, app.cfg.pulse[0].nRange, app.cfg.pulse[1].nRange,
+            app.cfg.cpiLength, app.cfg.dopplerMethod == DOPPLER_NUFFT ? "NUFFT" : "FFT", app.cfg.nfft, app.cfg.nRows,
+            app.cfg.updateEvery, app.cfg.minHits);
     fprintf(stderr, "Radar mode %d; DDC record %s: %d samples, the first at %.3f us", app.cfg.radarMode,
             app.cfg.ddcManual ? "manual" : "automatic", app.cfg.nDdc,
             app.cfg.ddcT0_s * 1e6);
@@ -719,6 +837,16 @@ int main(int argc, char **argv)
             ppi_set_beam(app.opt.ppiBeam <= nB ? app.opt.ppiBeam - 1 : 0);
             ppi_set_tab(!strcmp(app.opt.ppiTab, "rd"));
             ppi_set_rd_plot(!strcmp(app.opt.ppiRdPlot, "range"));
+            /* the empty range-Doppler tab before the first map: the Doppler axis of the configuration */
+            const int vp = app.cfg.pulse[PULSE_LONG].enable ? PULSE_LONG : PULSE_SHORT;
+            double v0 = INFINITY, v1 = -INFINITY;
+            for (int d = 0; d < app.cfg.nfft; d++) {
+                const double v = -app.cfg.dopFreq_Hz[d] * app.cfg.pulse[vp].lambda_m / 2;
+                v0 = v < v0 ? v : v0;
+                v1 = v > v1 ? v : v1;
+            }
+            ppi_set_rd_axes(v0, v1);
+            ppi_set_log_defaults(app.opt.logDir ? app.opt.logDir : "", app.opt.logName ? app.opt.logName : "", app.opt.logMask);
         }
         app.exitCode = ppi_run(argc, argv, app.cfg.maxRange_m, worker, &app, &g_stop, app.opt.snapshotPath);
 #else

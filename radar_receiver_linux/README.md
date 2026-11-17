@@ -364,9 +364,12 @@ Not supported: `cfg.adc.quantize = false` (analog ADC values, MATLAB only).
 | `--ppi-show MODE` | what the PPI shows at the start: `plots` (default, after the plot extractor), `detections` (CFAR detections before it), `both`, `video` (the raw video: DDC output averaged over the elements), `dbf` (DBF output of the selected beam) or `mf` (pulse compression output of the selected beam) |
 | `--ppi-beam N` | the beam after the DBF of `dbf`, `mf` and the range-Doppler tab at the start (default 1; also in the panel) |
 | `--ppi-tab TAB` | tab at the start: `ppi` (default) or `rd` (range-Doppler map of the selected beam next to a small PPI) |
-| `--ppi-rd-plot P` | plot below the range-Doppler map at the start: `spectrum` (default, Doppler spectrum of a range bin) or `range` (range profile of a Doppler bin); also in the panel |
+| `--ppi-rd-plot P` | plot below the range-Doppler map at the start: `spectrum` (default, Doppler spectrum of a range bin) or `range` (range profile of a Doppler bin); also in the selector on top of that plot |
 | `--ppi-rd-rate HZ` | range-Doppler maps per second handed to that tab (default `cfg.display.rdRate_Hz` in the configuration, 10) |
 | `--cfar-threshold DB` | CFAR threshold factor 10 log10(alpha) in dB of the configured detector and window (default: the configuration, i.e. the method's Pfa); can also be changed in the PPI |
+| `--log-dir DIR` | log the processing chain from the start into `DIR/<name>` (see Logging below; also the PPI tab *Controls*, whose folder field it fills) |
+| `--log-name NAME` | name of the log folder (default `log_<date>_<time>`) |
+| `--log-blocks LIST` | blocks of the log, comma separated: `ddc`, `dbf`, `mf`, `doppler`, `detection` (default `ddc,detection`) |
 | `--serial DEVICE` | send the CFAR output to a serial port (`/dev/ttyUSB0`, `COM3`, ...) |
 | `--baud N` | serial baud rate (default 921600) |
 | `--serial-content X` | `detections` (default: the pruned CFAR detections of every CPI update) or `plots` |
@@ -463,7 +466,7 @@ line. Short-pulse plots are cyan and long-pulse plots yellow. They are drawn
 at ground range and, by default, removed when the antenna passes them again
 in the next scan.
 
-The window opens maximized and has two tabs. **PPI**: the PPI as above.
+The window opens maximized and has three tabs. **PPI**: the PPI as above.
 **Range-Doppler (selected beam)**: the range-Doppler map of the beam chosen
 under *Beam* in the panel (`processor_set_rdmap()`: the power maps of both
 sub-pulses after the noise-gain equalisation, the map the CFAR tests,
@@ -472,7 +475,7 @@ above its noise floor (the median of the cells), from -3 dB (black) to the
 strongest cell (at least 20 dB), with a colour scale; the CFAR detections of
 the beam (white circles) and the MTI notch (dashed). A pixel column shows
 the largest of its range bins, so a peak of one range cell stays visible.
-Below the map (panel: *Range-Doppler tab: plot below the map*, also in the
+Below the map (the selector on top of that plot, at its left; also in the
 map's right-click menu; start: `--ppi-rd-plot spectrum|range`): the Doppler
 spectrum (dB above noise) of one range bin or the range profile of one
 Doppler bin, through the cell under the cursor, else the selected cell (a
@@ -487,10 +490,25 @@ tab, small next to the map, so both are seen live. The worker copies a map
 to the display at most `cfg.display.rdRate_Hz` times a second (default 10,
 `--ppi-rd-rate`; the display redraws at most 25 times a second), whichever tab is shown: the map
 and the plot below it are always up to date when the tab is opened; a map is made when both sub-pulses had a
-CPI update. The panel serves both tabs; *Save screenshot* (and key `S`,
+CPI update. Before the first map (the receiver waits for data) the tab
+already shows the empty map and plot below it with their frames, grids,
+ticks and axis labels (range from 0 to the instrumented range, the Doppler
+axis of the configuration, the colour scale), with a line that the data
+come with the first CPI update. The panel serves both tabs; *Save screenshot* (and key `S`,
 the right-click menu and `--ppi-snapshot`) saves the whole window: the tab
 bar, the shown tab (the PPI, or the map, the plot below it and the small
 PPI) and the panel with the settings and the block times.
+**Controls**: settings of the receiver, without the panel of the other two
+tabs. For now it has the **Logging** box: *Folder* (with *Browse ...*; default
+`./logs`, or `--log-dir`) and *Log name* (empty: `log_<date>_<time>`), next to
+them the blocks to log (*DDC output*, *DBF output*, *Pulse compression
+output (MF)*, *Doppler output (range-velocity maps)*, *Detection output*),
+and next to them *Start logging* / *Stop logging* with the state of the log
+(its folder, PRIs, files and MB written, the queue, PRIs dropped, file
+errors). While the log runs the blocks and the folder cannot be changed, the
+PPI shows a blinking red **REC hh:mm:ss** in its top right corner (also the
+small PPI of the range-Doppler tab), and the timing panel the time of the
+logging (see Logging below).
 
 The window, the taskbar and (Windows) the file `radar_receiver.exe` show the
 program icon (`src/radar_icon.png` in the Qt resources `src/ppi.qrc`;
@@ -574,29 +592,74 @@ The panel on the right of the window has:
   interp.*), plot extractor, tracking (e.g. *Track 3D PMBM*), the console output (printing the plots, track
   confirmations and messages; 0 with `--quiet`) and the display calls
   (handing the antenna, plots, detections, tracks and times to the PPI),
-  and their total: the time the processing thread spends per PRI, display
+  the logging (*Logging (copy)*: the copies of the block outputs handed to the
+  log writer; 0 without a log) and their total: the time the processing thread spends per PRI, display
   calls included. Every label has at most 15 characters (longer names are
   shortened, `1-D` -> `1D`), so the values stay inside the panel. Then
   *PPI draw (GUI)*: the time the GUI thread spends
-  taking the data and drawing the PPI, per PRI; it runs on another thread
-  (core) at the same time as the processing, so it does not lengthen the
-  PRI processing and is not in the total. The worker posts its
+  taking the data and drawing the PPI, per PRI, and *Log writer*: the time
+  the writer thread of the log spends in the files, per PRI; both run on
+  other threads (cores) at the same time as the processing, so they do not
+  lengthen the PRI processing and are not in the total. The worker posts its
   accumulated times 4 times a second; the console and display times are
   also printed at the end (`Output per PRI`).
+
+**Logging** (`logger.c`; the tab *Controls* or `--log-dir`, `--log-name`,
+`--log-blocks`): the outputs of the selected blocks of every PRI as MAT-files
+(-v6), each block in its folder of `<folder>/<name>/` (with `log_info.txt`):
+
+| Folder, file | Variables |
+|---|---|
+| `ddc/ddc_<n>.mat` | `I`, `Q` (int16 [samples x channels], all channels of the PRI as received) and `hdr` (pulse and scan number, time, azimuth, PRI, stagger index, DDC rate, time of the first sample, receive intervals): the format of the simulator's DDC files, so a log is processed again with `radar_stream_send <folder>/<name>/ddc` (or `replay_ddc_udp.m`); `hdr.pri_s` is the time to the next PRI of the log |
+| `dbf/dbf_<n>.mat` | `short`, `long`: the beamformer output (complex single [beams x samples], the pulse compression input: zero outside the receive window), `shortFirstSample`, `longFirstSample` (1-based DDC sample of the first column), `hdr` |
+| `mf/mf_<n>.mat` | `short`, `long`: the pulse compression output (complex single [beams x range cells]), `shortRange_m`, `longRange_m`, `hdr` (as `cfg.io.saveMf` of the simulator) |
+| `doppler/doppler_<n>.mat` | only PRIs with a CPI update: `short`, `long`: the range-Doppler power after the noise-gain equalisation (single [beams x range cells x Doppler bins], the map the CFAR tests), `f_Hz`, `shortV_mps`, `longV_mps`, `shortRange_m`, `longRange_m`, `hdr` (as `cfg.io.saveDoppler`) |
+| `detection/detection_<n>.mat` | `dets`: the CFAR detections after the pruning (and the peak interpolation) of the PRI's CPI updates, `plots`: the plots closed in the PRI, one row each with the columns of `columns` (pulse 1 short / 2 long, pulse number, time, azimuth, range, elevation, radial velocity, SNR, power, beam, range cell, Doppler bin (1-based), hits), `hdr` |
+
+`<n>` is the pulse number (7 digits). The processing thread only copies the
+data of the PRI (time *Logging (copy)* in the timing panel); a writer thread of
+normal priority writes the files (*Log writer*). The files of a PRI are
+written when the next PRI arrives (then its `pri_s` is known). One file per
+PRI and block keeps every block a folder of its own; the writer queue holds
+up to 1 GB: when the disk cannot keep up (e.g. the Doppler maps of every
+update: 48 MB per update with 21 beams, 2245 range cells and 64 bins), whole
+PRIs are dropped from the log and counted (shown in the tab and printed when
+the log ends). *Stop logging* writes the queued PRIs first. At the end of the
+run the log is closed the same way.
 
 **CFAR detectors** (`cfar.c`, `cfg.cfar.type` and `cfg.cfar.method` in the
 configuration): the same CA (mean of the training cells), GO / SO (larger /
 smaller mean of the two half windows: before and after the cell in range
 with the 2-D and range windows, below and above it in Doppler with the
-Doppler window) and OS (k-th smallest training cell) detectors as
+Doppler window), OS (k-th smallest training cell) and CE (censored mean:
+the mean of the training cells without the largest `nTrain - cfarCeKeep`,
+in proportion at the range edges) detectors as
 `cfar_detect.m`, each with the 2-D, range or Doppler window. CA keeps its
 running box sums; GO and SO use running Doppler sums and range prefix sums
 in double; OS counts, for the local peaks only (the other cells cannot
 survive the pruning), the training cells below P/alpha, and selects the
-k-th one only for a detection (its noise estimate). The false alarm
+k-th one only for a detection (its noise estimate); CE gathers the training
+cells of the local peaks, selects the kept ones and averages them. The false alarm
 probability of a threshold (`cfar_pfa()`, the PPI threshold field) is the
 closed form for CA and a numerical integral (the same as `cfar_pfa.m`) for
-GO, SO and OS.
+GO, SO, OS and CE (CE: with the table of its statistic, record
+`cfarCeTable`, from `cfar_ce_table.m` or `radar_export_config`).
+
+**Doppler processing**: the FFT (fixed PRF; staggered PRF: the de-interleaved
+rows) or, with `cfg.proc.staggerDoppler = 'nufft'` (record `dopplerMethod`
+= 1), the NUFFT of the whole CPI: for every block of 32 cells the rowLen MTI
+outputs times the matrix `nufftA` of the stagger position of the oldest
+output (`nfft` velocity bins, rows already scaled for a flat noise floor;
+the cells beyond `cfg.mti.maxRange_m` divided by `nufftBypassGain`), P =
+|.|^2. The MTI notch is around the bin `zeroBin` (none when zero velocity is
+not on the grid). It costs nfft x rowLen complex multiply-adds per cell and
+CPI update (see the timing panel).
+
+**Channels**: the receiver processes the first `nChUsed` channels of every
+PRI (`cfg.rx.nChannelsUsed`; older files: all), with the DBF matrix of those
+channels; a PRI needs at least `nChUsed` channels (more are accepted, e.g. a
+4-channel DDC stream of which only the first is used). The DDC log keeps
+every channel.
 
 **Tracking** (`cfg.track.enable` in the configuration, `tracker.c`, which
 selects `cfg.track.method`): `tracker_ekf.c`, the same EKF as `track_ekf.m`

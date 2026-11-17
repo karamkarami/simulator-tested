@@ -23,7 +23,7 @@ addpath(root, fullfile(root, 'src'));
 ok = closed_forms();
 ok = range_limited_notch() && ok;
 rng(11);
-for type = {'ca', 'go', 'so', 'os'}
+for type = {'ca', 'go', 'so', 'os', 'ce'}
     for method = {'2d', 'range', 'doppler'}
         cfg = lfm_mode_config();
         cfg.console.enable = false;
@@ -37,7 +37,7 @@ for type = {'ca', 'go', 'so', 'os'}
         oR = sys.cfar.guardRange + sys.cfar.trainRange;
         nR = 240;  nD = 64;  nB = 4;
         nTrials = 12;
-        if strcmp(type{1}, 'os') && strcmp(method{1}, '2d'), nTrials = 4; end   % 296 cells per test
+        if any(strcmp(type{1}, {'os', 'ce'})) && strcmp(method{1}, '2d'), nTrials = 4; end   % 296 cells per test
         wv.testIdx = [1 nR];
         wv.range_m = (0:nR-1) * 100;
         fa = 0;  faEdge = 0;  nEdge = 0;  nInner = 0;
@@ -73,7 +73,7 @@ for type = {'ca', 'go', 'so', 'os'}
             got = double(noise(:, iv(1):iv(2), :));
             nD = size(P, 3);  z = floor(nD/2) + 1;        % the MTI notch bins are not tested (noise 0)
             tested = repmat(reshape(abs((1:nD) - z) > sys.dop.notchBins, 1, 1, nD), size(got, 1), size(got, 2), 1);
-            if strcmp(type{1}, 'os')                       % OS: the estimate only at the detections
+            if any(strcmp(type{1}, {'os', 'ce'}))          % OS, CE: the estimate only at the detections
                 m = isD(:, iv(1):iv(2), :) & tested;
             else
                 m = tested;
@@ -82,9 +82,9 @@ for type = {'ca', 'go', 'so', 'os'}
             err = abs(got - ref) ./ ref;
             noiseOk = noiseOk && (isempty(err) || max(err(:)) < 1e-4);
         end
-        % OS: testing only the local maxima detects the same local maxima
+        % OS, CE: testing only the local maxima detects the same local maxima
         peaksOk = true;
-        if strcmp(type{1}, 'os')
+        if any(strcmp(type{1}, {'os', 'ce'}))
             P = single(-log(rand(nB, nR, nD)));
             P(3, 100, 30) = 40;  P(3, 101, 30) = 35;  P(1, 7, 3) = 60;
             all = cfar_detect(P, sys, wv);
@@ -102,12 +102,12 @@ for type = {'ca', 'go', 'so', 'os'}
                  'edge targets %s; interval %s; noise = direct %s%s: %s\n'], sys.cfar.label, sys.cfar.nTrain, ...
                 10*log10(sys.cfar.alpha), pfaIn, edgeText, ternary(edgeOk, 'detected', 'MISSED'), ...
                 ternary(limitOk, 'ok', 'FAIL'), ternary(noiseOk, 'ok', 'FAIL'), ...
-                ternary(strcmp(type{1}, 'os'), ternary(peaksOk, '; local maxima only: same', '; local maxima only: DIFFERENT'), ''), ...
+                ternary(any(strcmp(type{1}, {'os', 'ce'})), ternary(peaksOk, '; local maxima only: same', '; local maxima only: DIFFERENT'), ''), ...
                 ternary(good, 'ok', 'FAIL'));
         ok = ok && good;
     end
 end
-fprintf('CFAR detectors (CA, GO, SO, OS), windows, edges and range interval: %s\n', ternary(ok, 'PASS', 'FAIL'));
+fprintf('CFAR detectors (CA, GO, SO, OS, CE), windows, edges and range interval: %s\n', ternary(ok, 'PASS', 'FAIL'));
 end
 
 function ok = range_limited_notch()
@@ -148,6 +148,22 @@ err = abs(got ./ ref - 1);
 ok = all(err < 1e-6);
 fprintf('  cfar_pfa against the closed forms (one look, alpha = 10): CA %.3e, GO %.3e, SO %.3e, OS %.3e, largest relative error %.1e: %s\n', ...
         got, max(err), ternary(ok, 'ok', 'FAIL'));
+% CE (censored mean of the m smallest of N, one look): the exponential order statistics give
+% Pfa = prod_j 1 / (1 + alpha (m - j + 1) / (m (N - j + 1))), j = 1 ... m (the table of
+% cfar_ce_table.m: within 0.2 %), also at the low Pfa of the design
+for m = [28 31 20]
+    c = struct('type', 'ce', 'nTrain', N, 'ceKeep', m);
+    j = 1:m;
+    for a = [10 40]
+        refCe = prod(1 ./ (1 + a * (m - j + 1) ./ (m * (N - j + 1))));
+        gotCe = cfar_pfa(a, c, 1);
+        e = abs(gotCe / refCe - 1);
+        okCe = e < 2e-3;
+        fprintf('  cfar_pfa CE (one look, %d of %d cells, alpha %g): %.4e, closed form %.4e (error %.1e): %s\n', m, N, a, ...
+                gotCe, refCe, e, ternary(okCe, 'ok', 'FAIL'));
+        ok = ok && okCe;
+    end
+end
 end
 
 function s = noise_scale(c, L)
@@ -192,6 +208,10 @@ for i = 1:numel(r)
                     t = sort(v(train));
                     kr = max(1, min(numel(t), round(c.osK * numel(t) / c.nTrain)));
                     z = t(kr);
+                case 'ce'                                  % mean of the smallest (largest censored)
+                    t = sort(v(train));
+                    keep = max(1, numel(t) - round((c.nTrain - c.ceKeep) * numel(t) / c.nTrain));
+                    z = mean(t(1:keep));
             end
             ref(b, i, d) = z / c.noiseScale;
         end

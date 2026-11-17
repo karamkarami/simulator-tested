@@ -34,6 +34,7 @@ sys = setup_radar(cfg);
 
 r = {};                                              % {name, value} pairs
 r{end+1} = {'nCh', sys.nCh};
+r{end+1} = {'nChUsed', sys.nChUsed};                  % channels processed: the first nChUsed (cfg.rx.nChannelsUsed)
 r{end+1} = {'nBeams', sys.nBeams};
 r{end+1} = {'dbfEnabled', double(sys.dbf.enabled)};
 if sys.dbf.enabled
@@ -89,6 +90,13 @@ r{end+1} = {'mtiMaxRange_m', sys.mti.maxRange_m};    % clutter filter only up to
 r{end+1} = {'noiseGainBypass', reshape(sys.dop.noiseGainBypass, 1, [])};   % noise gain of the unfiltered cells
 r{end+1} = {'dopFreq_Hz', sys.dop.f_Hz};
 r{end+1} = {'notchBins', sys.dop.notchBins};
+if strcmp(sys.dop.method, 'nufft')                    % staggered PRF, cfg.proc.staggerDoppler = 'nufft'
+    [K, nOut, nS] = size(sys.dop.nufft.A);
+    r{end+1} = {'dopplerMethod', 1};                  % 0 FFT (fixed PRF, de-interleaved rows), 1 NUFFT
+    r{end+1} = {'zeroBin', sys.dop.zeroBin - 1};      % bin of zero velocity, 0-based (-1: not on the grid)
+    r{end+1} = {'nufftA', complex(reshape(permute(sys.dop.nufft.A, [1 3 2]), K*nS, nOut))};   % row (p-1)*K + j
+    r{end+1} = {'nufftBypassGain', sys.dop.nufft.bypassGain};        % [K x nStagger]
+end
 r{end+1} = {'notchMaxRange_m', sys.cfar.notchMaxRange_m};
 r{end+1} = {'medianToMean', sys.dop.medianToMean};
 r{end+1} = {'cfarMethod', find(strcmp(sys.cfar.method, {'2d', 'range', 'doppler'})) - 1};   % 0 2-D, 1 range, 2 Doppler
@@ -99,9 +107,13 @@ r{end+1} = {'trainDoppler', sys.cfar.trainDoppler};
 r{end+1} = {'nTrain', sys.cfar.nTrain};
 r{end+1} = {'alpha', sys.cfar.alpha};               % threshold factor of the selected detector
 r{end+1} = {'alphaMin', sys.cfar.alphaMin};         % lowest factor (cfg.cfar.maxPfa)
-r{end+1} = {'cfarType', find(strcmp(sys.cfar.type, {'ca', 'go', 'so', 'os'})) - 1};   % 0 CA, 1 GO, 2 SO, 3 OS
+r{end+1} = {'cfarType', find(strcmp(sys.cfar.type, {'ca', 'go', 'so', 'os', 'ce'})) - 1};   % 0 CA, 1 GO, 2 SO, 3 OS, 4 CE
 r{end+1} = {'cfarNHalf', sys.cfar.nHalf};            % GO, SO: training cells per half window
 r{end+1} = {'cfarOsK', sys.cfar.osK};                % OS: rank of the statistic
+r{end+1} = {'cfarCeKeep', sys.cfar.ceKeep};          % CE: training cells averaged (the others are censored)
+if strcmp(sys.cfar.type, 'ce')                       % CE: distribution of the statistic [log z; log G] (Pfa)
+    r{end+1} = {'cfarCeTable', cfar_ce_table(sys.cfar.nTrain, sys.cfar.ceKeep, sys.dop.nLooks)};
+end
 r{end+1} = {'cfarNoiseScale', sys.cfar.noiseScale};  % noise estimate = statistic / this
 r{end+1} = {'nLooks', sys.dop.nLooks};               % Pfa of the threshold
 r{end+1} = {'sidelobeMargin_dB', cfg.prune.sidelobeMargin_dB};

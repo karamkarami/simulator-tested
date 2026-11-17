@@ -3,7 +3,9 @@
  * save -v6, or -v7 with every variable in a compressed element).
  *
  * Enough for the files of the simulator: int16 matrices (DDC output I, Q, raw
- * ADC data) and a 1x1 struct of real double fields (the PRI header hdr).
+ * ADC data), a 1x1 struct of real double fields (the PRI header hdr), and for
+ * the logs of the receiver single (real or complex, N-D) and double matrices
+ * and strings.
  * Compressed files (-v7) use zlib when the program is built with it
  * (RADAR_HAVE_ZLIB), else a valid zlib stream of stored (uncompressed)
  * blocks, which MATLAB, Octave and mat_file.c read as well.
@@ -23,6 +25,12 @@ void mat_write_int16(MatWriter *w, const char *name, const int16_t *data, size_t
 /* A 1x1 struct of real double fields: field k has n[k] values (a row vector). */
 void mat_write_struct(MatWriter *w, const char *name, int nFields, const char *const *fieldNames,
                       const double *const *values, const int *n);
+/* single matrix of nd dimensions (column-major data), complex when im is not NULL. */
+void mat_write_single(MatWriter *w, const char *name, const float *re, const float *im, const size_t *dims, int nd);
+/* double matrix [rows x cols], column-major data. */
+void mat_write_double(MatWriter *w, const char *name, const double *data, size_t rows, size_t cols);
+/* char row vector (a string). */
+void mat_write_char(MatWriter *w, const char *name, const char *text);
 /* Writes the file and frees the writer; returns 0 on success. */
 int  mat_write_close(MatWriter *w);
 /* 1 if built with zlib. */

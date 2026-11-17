@@ -20,6 +20,7 @@ int video_layout_init(VideoLayout *v, const RadarConfig *cfg, double maxRange_m)
 {
     memset(v, 0, sizeof *v);
     if (!cfg || !(cfg->fsOut_Hz > 0) || !(maxRange_m > 0)) return -1;
+    v->nCh = cfg->nChUsed > 0 ? cfg->nChUsed : cfg->nCh;     /* the channels processed */
     v->dR_m = 299792458.0 / (2.0 * cfg->fsOut_Hz);
     v->nBins = (int)ceil(maxRange_m / v->dR_m);
     if (v->nBins < 1) v->nBins = 1;
@@ -50,7 +51,7 @@ int video_layout_init(VideoLayout *v, const RadarConfig *cfg, double maxRange_m)
         }
     }
     for (int b = 0; b < v->nBins; b++)                    /* 1 / (samples x channels) of every bin */
-        v->binInv[b] = v->binInv[b] > 0 ? 1.0f / (v->binInv[b] * (float)cfg->nCh) : 0.0f;
+        v->binInv[b] = v->binInv[b] > 0 ? 1.0f / (v->binInv[b] * (float)v->nCh) : 0.0f;
     return 0;
 }
 
@@ -67,7 +68,7 @@ void video_row(const VideoLayout *v, const PriData *pri, float *row)
         while (i0 + n < v->nSamples && v->sample[i0 + n] == v->sample[i0] + n) n++;
         const int first = v->sample[i0];
         if (first + n <= pri->nSamples) {
-            for (int ch = 0; ch < pri->nCh; ch++) {
+            for (int ch = 0; ch < v->nCh && ch < pri->nCh; ch++) {
                 const int16_t *restrict x = pri->iq + 2 * ((size_t)ch * (size_t)pri->nSamples + (size_t)first);
                 float *restrict a = acc + i0;
                 for (int k = 0; k < n; k++) {

@@ -11,7 +11,9 @@
  *   - header fields and I/Q values of a plain and of a compressed file,
  *   - the datagrams of a PRI, replayed through udp_input.c, give back the
  *     same PRI (the receiver accepts them),
- *   - errors: not a MAT-file, -v7.3, big-endian, truncated, missing variables.
+ *   - errors: not a MAT-file, -v7.3, big-endian, truncated, missing variables,
+ *   - (--log CONFIG) the logging of the receiver (logger.c): a log of every block over a
+ *     CPI, the files counted and read back (the DDC files as the replay reads them).
  *
  * Prints PASS or FAIL and returns 0 on success.
  */
@@ -29,6 +31,7 @@
 #  define make_dir(p) mkdir(p, 0755)
 #endif
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -428,8 +431,129 @@ static int check_generated(const char *folder, int nCh)
     return n;
 }
 
+/* ------------------------------------------------------------------------ */
+/* Logging of the receiver (logger.c): the files of every block, read back   */
+/* ------------------------------------------------------------------------ */
+
+typedef struct { Logger *log; int nDet, nPlot; } LogSink;
+static void log_block(void *u, const BlockOutput *o) { logger_block(((LogSink *)u)->log, o); }
+static void log_dets(void *u, int pulse, const Detection *d, int n) { (void)pulse; logger_detections(((LogSink *)u)->log, d, n); ((LogSink *)u)->nDet += n; }
+static void log_plot(void *u, const Detection *p) { logger_plot(((LogSink *)u)->log, p); ((LogSink *)u)->nPlot++; }
+
+static int count_files(const char *folder, const char *prefix)
+{
+    char **paths;
+    char err[256];
+    (void)prefix;
+    const int n = ddc_list_files(folder, &paths, err, sizeof err);   /* (lists ddc_*.mat only) */
+    if (n > 0) ddc_free_list(paths, n);
+    return n;
+}
+
+static void test_log(const char *configPath)
+{
+    RadarConfig cfg;
+    char err[512];
+    if (radar_config_load(configPath, &cfg, err, sizeof err) != 0) { printf("configuration: %s\n", err); g_failures++; return; }
+    Processor *proc = processor_create(&cfg, 1);
+    CHECK(proc != NULL);
+    if (!proc) return;
+    make_dir("test_log_dir");
+    const int mask = LOG_DDC | LOG_DBF | LOG_MF | LOG_DOPPLER | LOG_DETECTION;
+    LogSink sink = { NULL, 0, 0 };
+    sink.log = logger_start("test_log_dir", "run", mask, &cfg, err, sizeof err);
+    CHECK(sink.log != NULL);
+    if (!sink.log) { printf("logger_start: %s\n", err); processor_destroy(proc); radar_config_free(&cfg); return; }
+    processor_set_log(proc, mask);
+    ProcessorCallbacks cb = { log_dets, log_plot, NULL, &sink, NULL, NULL, NULL, log_block };
+    PriData pri;
+    memset(&pri, 0, sizeof pri);
+    pri.nCh = cfg.nCh;
+    pri.nSamples = cfg.nDdc;
+    pri.ddcFs_Hz = (float)cfg.fsOut_Hz;
+    for (int i = 0; i < N_PULSES; i++) {
+        uint32_t *idx = i == PULSE_SHORT ? pri.shortIdx : pri.longIdx;
+        if (cfg.pulse[i].enable) { idx[0] = (uint32_t)cfg.pulse[i].rxFirst + 1; idx[1] = (uint32_t)(cfg.pulse[i].rxFirst + cfg.pulse[i].rxCount); }
+    }
+    pri.iq = malloc(sizeof(int16_t) * 2 * (size_t)cfg.nCh * cfg.nDdc);
+    const int nPri = cfg.cpiLength + 2;
+    unsigned seed = 7;
+    for (int k = 0; k < nPri; k++) {
+        pri.pulseNumber = 500 + k;
+        pri.scanNumber = 1;
+        pri.az_deg = (float)(0.01 * k);
+        pri.time_s = 2.0 + k * 1e-3;
+        pri.staggerIndex = (uint16_t)(cfg.staggered ? k % cfg.nStagger + 1 : 1);
+        for (size_t i = 0; i < 2 * (size_t)cfg.nCh * cfg.nDdc; i++) {
+            seed = seed * 1103515245u + 12345u;
+            pri.iq[i] = (int16_t)((int)(seed >> 16 & 0xFF) - 128);
+        }
+        logger_begin_pri(sink.log, &pri);
+        processor_process(proc, &pri, &cb);
+        logger_end_pri(sink.log);
+    }
+    processor_flush(proc, &cb);
+    LoggerStats st;
+    logger_stop(sink.log, &st);
+    const int updates = nPri - cfg.cpiLength + 1;
+    const uint64_t expFiles = 4u * (uint64_t)nPri + (uint64_t)updates;   /* ddc, dbf, mf, detection + doppler */
+    printf("log: %llu PRIs, %llu files, %.2f MB, %llu dropped, %llu errors (expected %llu files)\n",
+           (unsigned long long)st.pris, (unsigned long long)st.files, st.bytes / 1e6, (unsigned long long)st.dropped,
+           (unsigned long long)st.errors, (unsigned long long)expFiles);
+    CHECK(st.pris == (uint64_t)nPri && st.files == expFiles && st.dropped == 0 && st.errors == 0);
+    /* the DDC files: as received, readable by the replay (ddc_files.c) */
+    CHECK(count_files("test_log_dir/run/ddc", "ddc") == nPri);
+    DdcPri p;
+    memset(&p, 0, sizeof p);
+    char path[256];
+    snprintf(path, sizeof path, "test_log_dir/run/ddc/ddc_%07u.mat", (unsigned)(500 + nPri - 1));
+    CHECK(ddc_load(path, &p, err, sizeof err) == 0);
+    CHECK(p.nCh == cfg.nCh && p.nSamples == cfg.nDdc && p.pulseNumber == (uint32_t)(500 + nPri - 1));
+    CHECK(p.nSamples > 0 && memcmp(p.iq, pri.iq, sizeof(int16_t) * 2 * (size_t)cfg.nCh * cfg.nDdc) == 0);
+    CHECK(fabs(p.pri_s - 1e-3) < 1e-9 && fabs(p.time_s - (2.0 + (nPri - 1) * 1e-3)) < 1e-9);
+    ddc_free(&p);
+    /* the other blocks: sizes of the variables */
+    const int tp = cfg.pulse[PULSE_LONG].enable ? PULSE_LONG : PULSE_SHORT;
+    const char *pn = tp == PULSE_LONG ? "long" : "short";
+    const PulseConfig *pc = &cfg.pulse[tp];
+    MatFile m;
+    snprintf(path, sizeof path, "test_log_dir/run/dbf/dbf_%07u.mat", 500u);
+    CHECK(mat_load(path, &m, err, sizeof err) == 0);
+    const MatVar *v = mat_get(&m, pn);
+    CHECK(v && v->im && (int)v->rows == cfg.nBeams && (int)v->cols == pc->ddcCount && mat_get(&m, "hdr"));
+    mat_free(&m);
+    snprintf(path, sizeof path, "test_log_dir/run/mf/mf_%07u.mat", 500u);
+    CHECK(mat_load(path, &m, err, sizeof err) == 0);
+    v = mat_get(&m, pn);
+    CHECK(v && v->im && (int)v->rows == cfg.nBeams && (int)v->cols == pc->nRange);
+    v = mat_get(&m, tp == PULSE_LONG ? "longRange_m" : "shortRange_m");
+    CHECK(v && (int)v->numel == pc->nRange && fabs(v->re[0] - pc->range_m[0]) < 1e-9);
+    mat_free(&m);
+    snprintf(path, sizeof path, "test_log_dir/run/doppler/doppler_%07u.mat", (unsigned)(500 + nPri - 1));
+    CHECK(mat_load(path, &m, err, sizeof err) == 0);
+    v = mat_get(&m, pn);
+    CHECK(v && !v->im && (int)v->rows == cfg.nBeams && (int)v->cols == pc->nRange * cfg.nfft);
+    v = mat_get(&m, "f_Hz");
+    CHECK(v && (int)v->numel == cfg.nfft);
+    mat_free(&m);
+    snprintf(path, sizeof path, "test_log_dir/run/detection/detection_%07u.mat", (unsigned)(500 + nPri - 1));
+    CHECK(mat_load(path, &m, err, sizeof err) == 0);
+    v = mat_get(&m, "dets");
+    CHECK(v && v->cols == 13 && mat_get(&m, "plots") && mat_get(&m, "columns"));
+    mat_free(&m);
+    printf("log files read back: DDC (replayable), DBF, MF, Doppler, detections (%d in the CPI updates)\n", sink.nDet);
+    free(pri.iq);
+    processor_destroy(proc);
+    radar_config_free(&cfg);
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 2 && !strcmp(argv[1], "--log")) {         /* test_ddc_files --log CONFIG */
+        test_log(argv[2]);
+        printf("%s\n", g_failures ? "FAIL" : "PASS");
+        return g_failures ? 1 : 0;
+    }
     if (argc > 2) {                                      /* test_ddc_files FOLDER NCH */
         check_generated(argv[1], atoi(argv[2]));
         printf("%s\n", g_failures ? "FAIL" : "PASS");

@@ -8,6 +8,9 @@ function G = cfar_statistic(z, c, L)
 %     SO  min of them: 1 - (1 - F_n(z))^2,  F_n(z) = gammainc(n*L*z, n*L)
 %     OS  k-th smallest of N cells: betainc(F_1(z), k, N - k + 1)
 %         (at least k of the N cells below z)
+%     CE  mean of the m = c.ceKeep smallest of N cells (censored: the N - m largest left out):
+%         the table of cfar_ce_table.m, interpolated linearly in log G over log z (below the
+%         table: its first slope, above it: 1)
 z = max(z, 0);
 switch c.type
     case 'ca'
@@ -23,6 +26,16 @@ switch c.type
     case 'os'
         N = c.nTrain;  k = c.osK;
         G = betainc(gammainc(L*z, L), k, N - k + 1);
+    case 'ce'
+        T = cfar_ce_table(c.nTrain, c.ceKeep, L);
+        lz = log(max(z, realmin));
+        lG = interp1(T(1, :), T(2, :), lz, 'linear');
+        s = (T(2, 2) - T(2, 1)) / (T(1, 2) - T(1, 1));
+        lo = lz < T(1, 1);
+        lG(lo) = T(2, 1) + s * (lz(lo) - T(1, 1));
+        lG(lz > T(1, end)) = 0;
+        G = exp(min(lG, 0));
+        G(z <= 0) = 0;
     otherwise
         error('Unknown CFAR type %s.', c.type);
 end

@@ -64,8 +64,11 @@ add_library(radar_core STATIC
     src/platform.c
     src/input_thread.c
     src/video.c
+    src/logger.c
+    tools/mat_write.c
 )
 target_include_directories(radar_core PUBLIC src)
+target_include_directories(radar_core PRIVATE tools)       # mat_write.h (the log files)
 
 if(RADAR_OPENMP)
     find_package(OpenMP COMPONENTS C)
@@ -183,6 +186,7 @@ endif()
 # clutter, leakage, STC, noise, ADC, fixed-point DDC; PRIs in parallel with OpenMP)
 # and writes ddc_<n>.mat (and pulse_<n>.mat) as MATLAB does; see --help.
 add_executable(radar_generate_ddc tools/generate_ddc.c tools/mfile.c tools/mat_write.c)
+target_include_directories(radar_generate_ddc PRIVATE tools)
 target_link_libraries(radar_generate_ddc PRIVATE radar_ddc_files)
 target_compile_definitions(radar_generate_ddc PRIVATE RADAR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 if(ZLIB_FOUND)
@@ -278,6 +282,8 @@ if(RADAR_BUILD_TESTS)
         target_link_libraries(test_ddc_files PRIVATE ZLIB::ZLIB)
     endif()
     add_test(NAME ddc_files COMMAND test_ddc_files)
+    # the logging of the receiver (tab Controls, --log-dir): every block, read back
+    add_test(NAME log_files COMMAND test_ddc_files --log ${CMAKE_CURRENT_SOURCE_DIR}/config/radar_config_1ch.bin)
 
     # radar_export_config: the MATLAB subset of its interpreter, and the export of
     # ../radar_config.m, processed by the core test
@@ -297,7 +303,8 @@ if(RADAR_BUILD_TESTS)
     # the scan-to-scan PRF, radar mode 1, radar mode 7 with only the long pulse, radar mode 2 (short pulse sent at
     # 11 us, receive windows set in the PRI), the Blackman Doppler window and "agility": stagger pair 3,
     # phase codes 2 / 4 and a manual DDC record (1800 samples from 0 us)
-    foreach(variant IN ITEMS short_off long_off carriers tomht scan2scan lfm_mode mode7 mode2 blackman agility)
+    foreach(variant IN ITEMS short_off long_off carriers tomht scan2scan lfm_mode mode7 mode2 blackman agility
+                             ce nufft channels windows)
         if(variant STREQUAL "short_off")
             set(stmt "cfg.wave.short.enable = false;")
         elseif(variant STREQUAL "long_off")
@@ -317,6 +324,18 @@ if(RADAR_BUILD_TESTS)
             set(stmt "cfg.modes.active = 2; cfg = apply_radar_mode(cfg);")
         elseif(variant STREQUAL "blackman")
             set(stmt "cfg.proc.dopplerWindow = 'blackman';")
+        elseif(variant STREQUAL "ce")
+            # the censored CFAR (CE): its detector and the Pfa from the table of its statistic
+            set(stmt "cfg.cfar.type = 'ce';")
+        elseif(variant STREQUAL "nufft")
+            # staggered PRF with the NUFFT Doppler processing (Chebyshev window of the non-uniform samples)
+            set(stmt "cfg.prf.mode = 'staggered'; cfg.proc.staggerDoppler = 'nufft'; cfg.proc.nufft.window = 'chebyshev';")
+        elseif(variant STREQUAL "channels")
+            # the first 4 of the 48 channels processed (DBF of the sub-array)
+            set(stmt "cfg.rx.nChannelsUsed = 4;")
+        elseif(variant STREQUAL "windows")
+            # LFM mode with a Kaiser range window and a Taylor Doppler window
+            set(stmt "cfg.modes.active = 1; cfg = apply_radar_mode(cfg); cfg.proc.rangeWindow = 'kaiser'; cfg.proc.dopplerWindow = 'taylor';")
         elseif(variant STREQUAL "agility")
             set(stmt "cfg.prf.mode = 'staggered'; cfg.prf.staggerSet = 3; cfg.wave.short.codeIndex = 2; cfg.wave.long.codeIndex = 4; cfg.rx.manualDdc = true; cfg.rx.nDdc = 1800; cfg.rx.ddcT0_s = 0;")
         else()

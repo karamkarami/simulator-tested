@@ -70,6 +70,9 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QGridLayout>
+#include <QGroupBox>
+#include <QLineEdit>
 #include <QGuiApplication>
 #include <QStandardPaths>
 #include <QHBoxLayout>
@@ -247,14 +250,27 @@ std::vector<double> &beam_elevations()   /* the beams of the beam selector (ppi_
 struct RdFrame {
     bool                valid = false;
     int                 beam = 0, nBins = 0, nfft = 0, notchBins = 0;
+    int                 zeroBin = 0;  /* bin of zero Doppler (-1: none, NUFFT grid) */
     double              dR_m = 0.0, noise = 0.0, time_s = 0.0, az_deg = 0.0;
     std::vector<float>  power;        /* [nfft][nBins] */
     std::vector<double> vel;          /* [nfft]        */
     std::vector<Detection> dets;
 };
 
+/* Logging (tab "Controls"): the request of the GUI and the state the worker reports. */
+struct LogShared {
+    bool        requested = false, requestStart = false;
+    std::string folder, name;
+    int         mask = 0;
+    bool        active = false;
+    std::string dir, error;
+    LoggerStats stats = {};
+    uint64_t    serial = 0;
+};
+
 struct Shared {
     std::mutex            mutex;
+    LogShared             log;
     AntennaState          antenna;
     std::vector<PlotMark> newPlots;   /* plots not yet taken by the GUI thread */
     std::vector<PlotMark> newDets;    /* CFAR detections not yet taken         */
@@ -297,7 +313,16 @@ void reset_shared()
     s.trackUpdates.clear();
     s.timing = ProcessorTiming();
     s.timingSerial = 0;
+    const LogShared keep = s.log;                 /* the defaults of the controls stay */
+    s.log = LogShared();
+    s.log.folder = keep.folder;
+    s.log.name = keep.name;
+    s.log.mask = keep.mask;
 }
+
+/* Axes of the range-Doppler tab before the first map (ppi_set_rd_axes): the Doppler axis of
+ * the configuration [m/s] (vMin < vMax; 0 0: unknown). */
+double g_rdVmin = -100.0, g_rdVmax = 100.0;
 
 /* Ground position and antenna sweep of a plot or detection (call with the mutex held). */
 PlotMark make_mark(const Detection &d, const AntennaState &a, uint64_t id)
@@ -462,6 +487,15 @@ public:
         workerCode_ = workerCode;
         update();
     }
+    /* the recording mark in the top right corner while the log runs (tab Controls) */
+    void setLogging(bool on, double seconds)
+    {
+        if (on == logOn_ && !on) return;
+        logOn_ = on;
+        logSeconds_ = seconds;
+        update();                                     /* (the mark blinks: repainted every refresh) */
+    }
+    bool logging() const { return logOn_; }
 
     /* view and options, also used by the tests */
     void   zoomAt(double factor, QPointF screen);
@@ -564,6 +598,9 @@ private:
     void   drawPins(QPainter &p) const;
     void   drawStatus(QPainter &p) const;
     void   drawLegend(QPainter &p) const;
+    void   drawLogMark(QPainter &p) const;
+    bool   logOn_ = false;
+    double logSeconds_ = 0.0;
     bool   expired(const PlotMark &m) const;
     bool   shown(const PlotMark &m) const;
     void   updateCursor(QPointF screen);
@@ -1587,6 +1624,32 @@ void PpiWidget::paintEvent(QPaintEvent *event)
     drawPins(p);
     drawStatus(p);
     drawLegend(p);
+    if (logOn_) drawLogMark(p);
+}
+
+/* "REC hh:mm:ss" with a blinking red dot in the top right corner while the log runs. */
+void PpiWidget::drawLogMark(QPainter &p) const
+{
+    const long s = (long)std::max(0.0, logSeconds_);
+    const QString t = QStringLiteral("REC  %1:%2:%3").arg(s / 3600, 2, 10, QChar('0'))
+                          .arg(s / 60 % 60, 2, 10, QChar('0')).arg(s % 60, 2, 10, QChar('0'));
+    const QFont f = pixel_font(font(), 13, true);
+    const QFontMetrics fm(f);
+    const double w = fm.horizontalAdvance(t) + 36.0, h = 24.0;
+    const QRectF box(width() - w - 10.0, 8.0, w, h);
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(QPen(QColor(220, 40, 40), 1.0));
+    p.setBrush(QColor(50, 0, 0, 210));
+    p.drawRoundedRect(box, 5.0, 5.0);
+    const bool bright = ((long)(gui_seconds() * 2.0)) % 2 == 0;
+    p.setPen(Qt::NoPen);
+    p.setBrush(bright ? QColor(255, 40, 40) : QColor(110, 0, 0));
+    p.drawEllipse(QPointF(box.left() + 15.0, box.center().y()), 6.0, 6.0);
+    p.setFont(f);
+    p.setPen(Qt::white);
+    p.drawText(QPointF(box.left() + 27.0, box.center().y() + fm.ascent() / 2.0 - 1.0), t);
+    p.restore();
 }
 
 
@@ -1625,7 +1688,20 @@ public:
         setMinimumSize(300, 250);
         setAttribute(Qt::WA_OpaquePaintEvent);
         setFocusPolicy(Qt::ClickFocus);
+        /* the plot below the map: its selector sits on top of that plot */
+        lowerBox_ = new QComboBox(this);
+        lowerBox_->addItem(QStringLiteral("Doppler spectrum (range bin)"));
+        lowerBox_->addItem(QStringLiteral("Range profile (Doppler bin)"));
+        lowerBox_->setToolTip(QStringLiteral("Plot below the range-Doppler map"));
+        lowerBox_->setStyleSheet(QStringLiteral(
+            "QComboBox { background: #2a2a2a; color: #e0e0e0; border: 1px solid #555; padding: 2px 6px; }"
+            "QComboBox QAbstractItemView { background: #2a2a2a; color: #e0e0e0; selection-background-color: #505050; }"));
+        QObject::connect(lowerBox_, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+                         [this](int i) { setLower(i == 1 ? RdLower::RangeProfile : RdLower::Spectrum); });
     }
+    QComboBox *lowerBox() { return lowerBox_; }
+    /* the axes shown before the first map: range 0 ... maxRange_m */
+    void setEmptyRange(double maxRange_m) { emptyMaxRange_m_ = maxRange_m > 0 ? maxRange_m : 100e3; update(); }
     void setFrame(const RdFrame &f)
     {
         const bool sameLayout = frame_.valid && f.valid && f.nBins == frame_.nBins && f.nfft == frame_.nfft &&
@@ -1675,7 +1751,15 @@ public:
     int    spectrumBin() const { return curB_ >= 0 ? curB_ : selB_ >= 0 ? selB_ : autoB_; }
     int    profileBin() const { return curD_ >= 0 ? curD_ : selD_ >= 0 ? selD_ : autoD_; }
     RdLower lower() const { return lower_; }
-    void   setLower(RdLower m) { if (m != lower_) { lower_ = m; lowAuto_ = true; fitViews(); update(); } }
+    void   setLower(RdLower m)
+    {
+        if (m != lower_) { lower_ = m; lowAuto_ = true; fitViews(); update(); }
+        if (lowerBox_->currentIndex() != (int)m) {          /* (also when changed in the context menu) */
+            const bool b = lowerBox_->blockSignals(true);
+            lowerBox_->setCurrentIndex((int)m);
+            lowerBox_->blockSignals(b);
+        }
+    }
     void   setPaused(bool on) { if (on != paused_) { paused_ = on; update(); } }
     QRectF mapRect() const { return mapRect_; }
     QRectF lowerRect() const { return lowRect_; }
@@ -1707,8 +1791,14 @@ protected:
     {
         curB_ = curD_ = -1; readout_.clear(); tip_.clear(); tipKey_ = -2; QToolTip::hideText(); update();
     }
-    void resizeEvent(QResizeEvent *) override { image_ = QImage(); update(); }
+    void resizeEvent(QResizeEvent *) override
+    {
+        image_ = QImage();
+        layoutRects();
+        update();
+    }
     void paintEvent(QPaintEvent *) override;
+    void drawEmpty(QPainter &p, const QFontMetrics &fm);
 
 private:
     struct Pin { int b, d; };                          /* a pinned cell (range bin, Doppler bin) */
@@ -1774,9 +1864,13 @@ private:
     void layoutRects()
     {
         const double w = width(), h = height(), left = 64.0, right = 78.0, top = 50.0;
-        const double gap = 58.0, bottom = 40.0, lowH = std::max(80.0, 0.28 * h);
+        const double gap = 84.0, bottom = 40.0, lowH = std::max(80.0, 0.28 * h);
         mapRect_ = QRectF(left, top, std::max(50.0, w - left - right), std::max(50.0, h - top - gap - lowH - bottom));
         lowRect_ = QRectF(left, mapRect_.bottom() + gap, mapRect_.width(), lowH);
+        /* the selector of the lower plot on top of it, its title to the right */
+        const int bw = std::min(240, std::max(120, (int)(0.45 * lowRect_.width())));
+        const QRect g((int)lowRect_.left(), (int)lowRect_.top() - 30, bw, 24);
+        if (lowerBox_ && lowerBox_->geometry() != g) lowerBox_->setGeometry(g);
     }
     QPointF mapScreen(double x, double y) const
     {
@@ -1886,6 +1980,8 @@ private:
     double             lx0_ = 0, lx1_ = 1, ly0_ = 0, ly1_ = 1;     /* lower plot view: x, dB */
     bool               mapAuto_ = true, lowAuto_ = true, paused_ = false;
     RdLower            lower_ = RdLower::Spectrum;
+    QComboBox         *lowerBox_ = nullptr;   /* selector of the plot below the map (on top of it) */
+    double             emptyMaxRange_m_ = 100e3;
     std::vector<Pin>   pins_;
     QImage             image_;
     QRectF             mapRect_, lowRect_;
@@ -2149,7 +2245,8 @@ void RdWidget::drawLower(QPainter &p, const QFontMetrics &fm)
               .arg((sb + 0.5) * frame_.dR_m / 1e3, 0, 'f', 2).arg(sb).arg(where)
         : QStringLiteral("Range profile at %1 m/s (Doppler bin %2, %3); circles: detections")
               .arg(pd >= 0 && pd < frame_.nfft ? frame_.vel[pd] : 0.0, 0, 'f', 1).arg(pd).arg(where);
-    p.drawText(QPointF(lowRect_.left(), lowRect_.top() - 7), fm.elidedText(title, Qt::ElideRight, (int)lowRect_.width() + 40));
+    const double tx = lowRect_.left() + lowerBox_->width() + 12.0;          /* right of the selector */
+    p.drawText(QPointF(tx, lowRect_.top() - 12), fm.elidedText(title, Qt::ElideRight, (int)(lowRect_.right() + 40 - tx)));
     /* grid, ticks and labels of both axes */
     const double xs = nice_step(lx1_ - lx0_, 8), ys = nice_step(ly1_ - ly0_, 5);
     for (double x = std::ceil(lx0_ / xs) * xs; x <= lx1_ + 1e-9; x += xs) {
@@ -2202,6 +2299,78 @@ void RdWidget::drawLower(QPainter &p, const QFontMetrics &fm)
     p.restore();
 }
 
+/* Before the first map: the empty map and lower plot with their frames, grids, ticks and labels
+ * (range 0 ... the instrumented range, the Doppler axis of the configuration, ppi_set_rd_axes). */
+void RdWidget::drawEmpty(QPainter &p, const QFontMetrics &fm)
+{
+    const double r1 = emptyMaxRange_m_ / 1e3, vLo = g_rdVmin, vHi = g_rdVmax > g_rdVmin ? g_rdVmax : g_rdVmin + 1.0;
+    const double lo = -3.0, hi = 20.0;
+    p.setPen(kColorLabel);
+    p.drawText(QPointF(16.0, 40.0), fm.elidedText(QStringLiteral("no data yet: the map, the colour scale and the plot below "
+                                                                 "appear with the first CPI update of the receiver"),
+                                                  Qt::ElideRight, std::max(50, width() - 24)));
+    auto grid = [&](const QRectF &r, double x0, double x1, double y0, double y1, bool yDown) {
+        p.fillRect(r, QColor(6, 6, 6));
+        const double xs = nice_step(x1 - x0, 8), ys = nice_step(y1 - y0, 6);
+        for (double x = std::ceil(x0 / xs) * xs; x <= x1 + 1e-9; x += xs) {
+            const double sx = r.left() + (x - x0) / (x1 - x0) * r.width();
+            p.setPen(QPen(kColorGrid, 1.0, Qt::DotLine));
+            p.drawLine(QPointF(sx, r.top()), QPointF(sx, r.bottom()));
+            p.setPen(kColorLabel);
+            p.drawLine(QPointF(sx, r.bottom()), QPointF(sx, r.bottom() + 4));
+            const QString t = QString::number(std::fabs(x) < 1e-9 ? 0.0 : x, 'g', 5);
+            p.drawText(QPointF(sx - fm.horizontalAdvance(t) / 2.0, r.bottom() + 16), t);
+        }
+        for (double y = std::ceil(y0 / ys) * ys; y <= y1 + 1e-9; y += ys) {
+            const double f = (y - y0) / (y1 - y0), sy = yDown ? r.top() + (1.0 - f) * r.height() : r.bottom() - f * r.height();
+            p.setPen(QPen(kColorGrid, 1.0, Qt::DotLine));
+            p.drawLine(QPointF(r.left(), sy), QPointF(r.right(), sy));
+            p.setPen(kColorLabel);
+            p.drawLine(QPointF(r.left() - 4, sy), QPointF(r.left(), sy));
+            const QString t = QString::number(std::fabs(y) < 1e-9 ? 0.0 : y, 'g', 4);
+            p.drawText(QPointF(r.left() - 8 - fm.horizontalAdvance(t), sy + 4), t);
+        }
+        p.setPen(QPen(kColorRim, 1.0));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(r);
+    };
+    auto yLabel = [&](const QRectF &r, const QString &text) {
+        p.save();
+        p.setPen(kColorLabel);
+        p.translate(14, r.center().y() + fm.horizontalAdvance(text) / 2.0);
+        p.rotate(-90);
+        p.drawText(QPointF(0, 0), text);
+        p.restore();
+    };
+    /* the map: range [km] across, radial velocity down from vHi (as the maps) */
+    grid(mapRect_, 0.0, r1, vLo, vHi, true);
+    p.setPen(kColorLabel);
+    const QString rl = QStringLiteral("Range [km]");
+    p.drawText(QPointF(mapRect_.center().x() - fm.horizontalAdvance(rl) / 2.0, mapRect_.bottom() + 31), rl);
+    yLabel(mapRect_, QStringLiteral("Radial velocity [m/s]"));
+    const QRectF bar(mapRect_.right() + 14, mapRect_.top(), 14, mapRect_.height());
+    for (int i = 0; i < (int)bar.height(); i++) {
+        const double x = hi - (hi - lo) * i / bar.height();
+        p.setPen(QColor(colour_db(x, lo, hi)));
+        p.drawLine(QPointF(bar.left(), bar.top() + i), QPointF(bar.right(), bar.top() + i));
+    }
+    p.setPen(kColorLabel);
+    for (double x = 0; x <= hi + 1e-9; x += 5.0)
+        p.drawText(QPointF(bar.right() + 4, bar.top() + (hi - x) / (hi - lo) * bar.height() + 4), QString::number(x, 'f', 0));
+    p.drawText(QPointF(bar.right() + 4, bar.bottom() + 14), QStringLiteral("dB"));
+    /* the plot below */
+    const bool spec = lower_ == RdLower::Spectrum;
+    grid(lowRect_, spec ? vLo : 0.0, spec ? vHi : r1, -10.0, 20.0, false);
+    p.setPen(kColorLabel);
+    const QString title = spec ? QStringLiteral("Doppler spectrum of a range bin (no data yet)")
+                               : QStringLiteral("Range profile of a Doppler bin (no data yet)");
+    const double tx = lowRect_.left() + lowerBox_->width() + 12.0;
+    p.drawText(QPointF(tx, lowRect_.top() - 12), fm.elidedText(title, Qt::ElideRight, (int)(lowRect_.right() + 40 - tx)));
+    const QString xl = spec ? QStringLiteral("Radial velocity [m/s]") : QStringLiteral("Range [km]");
+    p.drawText(QPointF(lowRect_.center().x() - fm.horizontalAdvance(xl) / 2.0, lowRect_.bottom() + 31), xl);
+    yLabel(lowRect_, QStringLiteral("Power [dB above noise]"));
+}
+
 void RdWidget::paintEvent(QPaintEvent *)
 {
     QPainter p(this);
@@ -2213,9 +2382,11 @@ void RdWidget::paintEvent(QPaintEvent *)
     p.setPen(Qt::white);
     const QString pause = paused_ ? QStringLiteral("   [PAUSED]") : QString();
     if (!hasFrame()) {
-        p.drawText(QPointF(16.0, 26.0), (frame_.valid ? QStringLiteral("Range-Doppler map: no range cell yet")
+        p.drawText(QPointF(16.0, 22.0), (frame_.valid ? QStringLiteral("Range-Doppler map: no range cell yet")
                                                       : QStringLiteral("Range-Doppler map: waiting for a CPI update of %1 ...")
                                                             .arg(beam_text(g_beam.load()))) + pause);
+        p.setFont(small);
+        drawEmpty(p, fm);                                   /* the axes, grid and labels without data */
         return;
     }
     const int textW = std::max(50, width() - 24);              /* long lines are cut with "..." */
@@ -2258,10 +2429,12 @@ void RdWidget::paintEvent(QPaintEvent *)
     p.save();
     p.setClipRect(mapRect_);
     p.setRenderHint(QPainter::Antialiasing, true);
-    /* MTI notch: the Doppler bins around zero that the CFAR does not test */
-    const int z = nfft / 2;
+    /* MTI notch: the Doppler bins around zero that the CFAR does not test (none when zero
+     * velocity is not on the NUFFT grid) */
+    const int z = frame_.zeroBin;
     p.setPen(QPen(QColor(200, 200, 200), 1.0, Qt::DashLine));
     for (int e : { z - frame_.notchBins, z + frame_.notchBins + 1 }) {
+        if (z < 0) break;
         const double y = mapScreen(vx0_, e).y();
         p.drawLine(QPointF(mapRect_.left(), y), QPointF(mapRect_.right(), y));
     }
@@ -2383,15 +2556,6 @@ public:
         tracks_->setChecked(ppi_->showTracks());
         v->addWidget(tracks_);
         QObject::connect(tracks_, &QCheckBox::toggled, [this](bool on) { ppi_->setShowTracks(on); ppi_->setFocus(); });
-        QLabel *lowerLabel = new QLabel(QStringLiteral("Range-Doppler tab: plot below the map"), panel);
-        lowerLabel->setWordWrap(true);
-        v->addWidget(lowerLabel);
-        lower_ = new QComboBox(panel);
-        lower_->addItem(QStringLiteral("Doppler spectrum (range bin)"));
-        lower_->addItem(QStringLiteral("Range profile (Doppler bin)"));
-        v->addWidget(lower_);
-        QObject::connect(lower_, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
-                         [this](int i) { rd_->setLower(i == 1 ? RdLower::RangeProfile : RdLower::Spectrum); });
         pause_ = new QPushButton(QStringLiteral("Pause display (Space)"), panel);
         pause_->setCheckable(true);
         v->addWidget(pause_);
@@ -2439,7 +2603,7 @@ public:
         mono.setPixelSize(11);
         timing_->setFont(mono);
         timing_->setStyleSheet(QStringLiteral("background: #101010; padding: 4px;"));
-        timing_->setMinimumHeight(QFontMetrics(mono).lineSpacing() * 15 + 12);  /* 15 rows, stable layout */
+        timing_->setMinimumHeight(QFontMetrics(mono).lineSpacing() * 17 + 12);  /* 17 rows, stable layout */
         timing_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
         v->addWidget(timing_);
         QLabel *help = new QLabel(QStringLiteral("Wheel: zoom   Drag: pan\nDouble click: reset\nHover: data tip   "
@@ -2455,7 +2619,7 @@ public:
         tabs_->setStyleSheet(QStringLiteral("QTabWidget::pane { border: 0; } QTabBar::tab { background: #202020; "
                                             "color: #d0d0d0; padding: 5px 16px; } QTabBar::tab:selected { "
                                             "background: #383838; color: white; }"));
-        QWidget *page1 = new QWidget(), *page2 = new QWidget();
+        QWidget *page1 = new QWidget(), *page2 = new QWidget(), *page3 = buildControls();
         /* the pages only (by name): an unscoped "background: black" would also reach the
          * data tips (QToolTip of the PPI), drawn black on black */
         page1->setObjectName(QStringLiteral("ppiPage"));
@@ -2468,10 +2632,12 @@ public:
         pageLayout2_->setContentsMargins(0, 0, 0, 0);
         pageLayout2_->setSpacing(4);
         rd_ = new RdWidget();
+        rd_->setEmptyRange(maxRange_m);
         pageLayout2_->addWidget(rd_, 3);
         pageLayout1_->addWidget(ppi_, 1);
         tabs_->addTab(page1, QStringLiteral("PPI"));
         tabs_->addTab(page2, QStringLiteral("Range-Doppler (selected beam)"));
+        tabs_->addTab(page3, QStringLiteral("Controls"));
         QObject::connect(tabs_, &QTabWidget::currentChanged, [this](int i) { showTab(i); });
 
         QHBoxLayout *top = new QHBoxLayout(this);
@@ -2479,12 +2645,20 @@ public:
         top->setSpacing(0);
         top->addWidget(tabs_, 1);
         top->addWidget(panel);
+        panel_ = panel;
         ppi_->setFocus();
     }
 
     PpiWidget &ppi() { return *ppi_; }
     RdWidget &rd() { return *rd_; }
-    QComboBox *lowerBox() { return lower_; }
+    QComboBox *lowerBox() { return rd_->lowerBox(); }   /* on top of the plot below the map */
+    /* tab "Controls": logging */
+    QLineEdit *logFolderEdit() { return logFolder_; }
+    QLineEdit *logNameEdit() { return logName_; }
+    QCheckBox *logBlockBox(int i) { return logBlock_[i]; }
+    QPushButton *logButton() { return logButton_; }
+    QString logStatus() const { return logStatus_->text(); }
+    QWidget *panel() { return panel_; }
 protected:
     void keyPressEvent(QKeyEvent *e) override       /* Space in the range-Doppler tab (the PPI has its own) */
     {
@@ -2510,6 +2684,14 @@ public:
     /* the PPI in the first tab (whole page), or small next to the range-Doppler map */
     void showTab(int i)
     {
+        if (i == 2) {                                   /* Controls: without the panel of the other tabs */
+            if (panel_) panel_->hide();
+            if (tabs_->currentIndex() != i) tabs_->setCurrentIndex(i);
+            if (layout()) layout()->activate();         /* the tabs take the width of the panel at once */
+            return;
+        }
+        if (panel_) panel_->show();
+        if (layout()) layout()->activate();
         if (i == 1) pageLayout2_->addWidget(ppi_, 2);
         else pageLayout1_->addWidget(ppi_, 1);
         ppi_->setMinimumSize(i == 1 ? 200 : 300, i == 1 ? 200 : 300);
@@ -2539,11 +2721,7 @@ public:
         ppi_->refresh();
         ppi_->addGuiMs((gui_seconds() - t0) * 1e3);
         if (pause_->isChecked() != ppi_->paused()) setPaused(ppi_->paused());   /* Space or the context menu */
-        if (lower_->currentIndex() != (int)rd_->lower()) {         /* changed in the map's context menu */
-            const bool b = lower_->blockSignals(true);
-            lower_->setCurrentIndex((int)rd_->lower());
-            lower_->blockSignals(b);
-        }
+        showLog();
         if (tracks_->isChecked() != ppi_->showTracks()) {          /* changed with T or the context menu */
             const bool b = tracks_->blockSignals(true);
             tracks_->setChecked(ppi_->showTracks());
@@ -2627,6 +2805,7 @@ public:
             { detName_, t.cfar_ms - o.cfar_ms }, { QStringLiteral("Peak interp."), t.interp_ms - o.interp_ms },
             { QStringLiteral("Plot extractor"), t.extract_ms - o.extract_ms },
             { QString::fromStdString(trk), t.track_ms - o.track_ms },
+            { QStringLiteral("Logging (copy)"), t.log_ms - o.log_ms },
             { QStringLiteral("Console output"), t.console_ms - o.console_ms },
             { QStringLiteral("Display (post)"), t.display_ms - o.display_ms } };
         QStringList lines;
@@ -2637,8 +2816,17 @@ public:
         }
         lines << timing_row(QStringLiteral("Total"), sum);
         lines << timing_row(QStringLiteral("PPI draw (GUI)"), (ppi_->guiMs() - guiPrev_) * k);
-        lines << QStringLiteral(" (GUI thread, in parallel:");
-        lines << QStringLiteral("  not part of Total)");
+        double writer = 0.0;                                   /* the log writer thread [s] */
+        {
+            Shared &s = shared();
+            std::lock_guard<std::mutex> lock(s.mutex);
+            writer = s.log.stats.writeSeconds;
+        }
+        if (writer < logWriterPrev_) logWriterPrev_ = 0.0;     /* a new log */
+        lines << timing_row(QStringLiteral("Log writer"), (writer - logWriterPrev_) * 1e3 * k);
+        logWriterPrev_ = writer;
+        lines << QStringLiteral(" (GUI and log writer threads,");
+        lines << QStringLiteral("  in parallel: not in Total)");
         lines << QStringLiteral("last %1 of %2 PRIs").arg((qulonglong)nPri).arg((qulonglong)t.pris);
         timingPrev_ = t;
         guiPrev_ = ppi_->guiMs();
@@ -2653,6 +2841,157 @@ protected:
     }
 
 private:
+    /* Tab "Controls": logging of the processing chain. The log folder and its name, the blocks
+     * (one MAT-file per PRI in a folder per block), Start / Stop and the state of the log. */
+    QWidget *buildControls()
+    {
+        QWidget *page = new QWidget();
+        page->setObjectName(QStringLiteral("controlsPage"));
+        page->setStyleSheet(QStringLiteral(
+            "QWidget#controlsPage { background: #141414; }"
+            "QWidget { color: #e0e0e0; }"
+            "QGroupBox { border: 1px solid #444; border-radius: 4px; margin-top: 14px; padding: 10px; font-weight: bold; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
+            "QLineEdit, QPushButton { background: #2a2a2a; border: 1px solid #555; padding: 4px; }"
+            "QPushButton:hover { background: #383838; }"
+            "QLabel#info { color: #a0e0a0; font-weight: normal; }"
+            "QLabel#note { color: #909090; font-weight: normal; }"));
+        QVBoxLayout *v = new QVBoxLayout(page);
+        v->setContentsMargins(16, 12, 16, 12);
+        QGroupBox *box = new QGroupBox(QStringLiteral("Logging"), page);
+        QHBoxLayout *row = new QHBoxLayout(box);
+        row->setSpacing(18);
+        /* folder and name */
+        QGridLayout *g = new QGridLayout();
+        g->addWidget(new QLabel(QStringLiteral("Folder"), box), 0, 0);
+        QString folder0 = QString::fromStdString(shared().log.folder);
+        if (folder0.isEmpty()) folder0 = QDir::currentPath() + QStringLiteral("/logs");   /* default: ./logs */
+        logFolder_ = new QLineEdit(folder0, box);
+        logFolder_->setPlaceholderText(QStringLiteral("folder of the logs"));
+        logFolder_->setMinimumWidth(320);
+        g->addWidget(logFolder_, 0, 1);
+        QPushButton *browse = new QPushButton(QStringLiteral("Browse ..."), box);
+        g->addWidget(browse, 0, 2);
+        g->addWidget(new QLabel(QStringLiteral("Log name"), box), 1, 0);
+        logName_ = new QLineEdit(QString::fromStdString(shared().log.name), box);
+        logName_->setPlaceholderText(QStringLiteral("empty: log_<date>_<time>"));
+        g->addWidget(logName_, 1, 1, 1, 2);
+        QLabel *where = new QLabel(QStringLiteral("The log is the folder <folder>/<name>, with a folder per block."), box);
+        where->setObjectName(QStringLiteral("note"));
+        where->setWordWrap(true);
+        g->addWidget(where, 2, 0, 1, 3);
+        row->addLayout(g, 3);
+        QObject::connect(browse, &QPushButton::clicked, [this]() {
+            const QString d = QFileDialog::getExistingDirectory(this, QStringLiteral("Folder of the logs"), logFolder_->text());
+            if (!d.isEmpty()) logFolder_->setText(d);
+        });
+        /* the blocks */
+        QVBoxLayout *c = new QVBoxLayout();
+        static const char *const names[5] = { "DDC output (replayable DDC files)", "DBF output (beams)",
+                                               "Pulse compression output (MF)", "Doppler output (range-velocity maps)",
+                                               "Detection output (CFAR detections, plots)" };
+        const int mask = shared().log.mask ? shared().log.mask : LOG_DDC | LOG_DETECTION;
+        for (int i = 0; i < 5; i++) {
+            logBlock_[i] = new QCheckBox(QString::fromLatin1(names[i]), box);
+            logBlock_[i]->setChecked(mask & (1 << i));
+            c->addWidget(logBlock_[i]);
+        }
+        row->addLayout(c, 2);
+        /* start / stop and the state */
+        QVBoxLayout *s = new QVBoxLayout();
+        logButton_ = new QPushButton(QStringLiteral("Start logging"), box);
+        logButton_->setMinimumHeight(40);
+        logButton_->setMinimumWidth(170);
+        s->addWidget(logButton_);
+        logStatus_ = new QLabel(QStringLiteral("not logging"), box);
+        logStatus_->setObjectName(QStringLiteral("info"));
+        logStatus_->setWordWrap(true);
+        logStatus_->setMinimumWidth(260);
+        logStatus_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        s->addWidget(logStatus_);
+        s->addStretch(1);
+        row->addLayout(s, 2);
+        QObject::connect(logButton_, &QPushButton::clicked, [this]() { toggleLog(); });
+        v->addWidget(box);
+        QLabel *note = new QLabel(QStringLiteral(
+            "One MAT-file per PRI and block: ddc/ddc_<n>.mat (I, Q, hdr: the DDC files of the simulator, the receiver can "
+            "process them again with radar_stream_send), dbf/dbf_<n>.mat (beams), mf/mf_<n>.mat (pulse compression), "
+            "doppler/doppler_<n>.mat (range-velocity maps of the CPI updates), detection/detection_<n>.mat (detections "
+            "and plots); <n> is the pulse number. A thread of its own writes the files; while the log runs the PPI shows "
+            "REC in its corner and the timing panel the time of the logging. When the disk cannot keep up, PRIs are "
+            "dropped from the log (counted below)."), page);
+        note->setObjectName(QStringLiteral("note"));
+        note->setWordWrap(true);
+        v->addWidget(note);
+        v->addStretch(1);
+        return page;
+    }
+    void toggleLog()
+    {
+        Shared &sh = shared();
+        std::lock_guard<std::mutex> lock(sh.mutex);
+        if (sh.log.active || logPending_ == 1) {               /* stop */
+            sh.log.requested = true;
+            sh.log.requestStart = false;
+            logPending_ = 2;
+            logStatus_->setText(QStringLiteral("stopping ..."));
+            return;
+        }
+        int mask = 0;
+        for (int i = 0; i < 5; i++) if (logBlock_[i]->isChecked()) mask |= 1 << i;
+        const QString folder = logFolder_->text().trimmed();
+        if (folder.isEmpty()) { logStatus_->setText(QStringLiteral("choose the folder of the logs first")); return; }
+        if (!mask) { logStatus_->setText(QStringLiteral("choose at least one block to log")); return; }
+        sh.log.requested = true;
+        sh.log.requestStart = true;
+        sh.log.folder = folder.toStdString();
+        sh.log.name = logName_->text().trimmed().toStdString();
+        sh.log.mask = mask;
+        logPending_ = 1;
+        logStatus_->setText(QStringLiteral("starting ... (the log starts with the next PRI)"));
+        logButton_->setText(QStringLiteral("Stop logging"));
+    }
+    /* the state reported by the worker: button, status, the mark on the PPI */
+    void showLog()
+    {
+        bool active;
+        LoggerStats st;
+        std::string dir, err;
+        uint64_t serial;
+        {
+            Shared &s = shared();
+            std::lock_guard<std::mutex> lock(s.mutex);
+            active = s.log.active;
+            st = s.log.stats;
+            dir = s.log.dir;
+            err = s.log.error;
+            serial = s.log.serial;
+        }
+        ppi_->setLogging(active, st.seconds);
+        if (serial == logSerial_) return;
+        logSerial_ = serial;
+        if (active) logPending_ = 0;
+        else if (logPending_ == 2 || !err.empty()) logPending_ = 0;
+        const bool on = active || logPending_ == 1;
+        logButton_->setText(on ? QStringLiteral("Stop logging") : QStringLiteral("Start logging"));
+        logButton_->setStyleSheet(on ? QStringLiteral("background: #6a1010; color: white;") : QString());
+        for (int i = 0; i < 5; i++) logBlock_[i]->setEnabled(!on);
+        logFolder_->setEnabled(!on);
+        logName_->setEnabled(!on);
+        QString text;
+        if (!err.empty()) text = QStringLiteral("error: %1\n").arg(QString::fromStdString(err));
+        if (active || st.pris > 0 || st.files > 0)
+            text += QStringLiteral("%1 %2\n%3 PRIs, %4 files, %5 MB written in %6 s\nqueue %7 MB, dropped %8 PRIs%9")
+                        .arg(active ? QStringLiteral("logging to") : QStringLiteral("log ended:"))
+                        .arg(QString::fromStdString(dir)).arg((qulonglong)st.pris).arg((qulonglong)st.files)
+                        .arg(st.bytes / 1e6, 0, 'f', 1).arg(st.seconds, 0, 'f', 1).arg(st.queuedBytes / 1e6, 0, 'f', 1)
+                        .arg((qulonglong)st.dropped)
+                        .arg(st.errors ? QStringLiteral(", %1 file errors: %2").arg((qulonglong)st.errors)
+                                             .arg(QString::fromLatin1(st.lastError)) : QString());
+        else if (text.isEmpty()) text = QStringLiteral("not logging");
+        logStatus_->setText(text);
+    }
+
     void requestCfar(double dB)
     {
         if (!std::isfinite(dB)) return;
@@ -2669,7 +3008,15 @@ private:
 
     PpiWidget             *ppi_;
     volatile sig_atomic_t *stopFlag_;
-    QComboBox             *mode_, *beam_, *lower_;
+    QComboBox             *mode_, *beam_;
+    QWidget               *panel_ = nullptr;
+    QLineEdit             *logFolder_, *logName_;
+    QCheckBox             *logBlock_[5];
+    QPushButton           *logButton_;
+    QLabel                *logStatus_;
+    uint64_t               logSerial_ = 0;
+    int                    logPending_ = 0;     /* 1: start requested, 2: stop requested */
+    double                 logWriterPrev_ = 0.0;
     QCheckBox             *tracks_;
     QPushButton           *pause_;
     QTabWidget            *tabs_;
@@ -2873,6 +3220,7 @@ extern "C" void ppi_post_rdmap(const RdMap *map)
     f.nBins = map->nBins;
     f.nfft = map->nfft;
     f.notchBins = map->notchBins;
+    f.zeroBin = map->zeroBin;
     f.dR_m = map->dR_m;
     f.noise = map->noise;
     f.time_s = map->time_s;
@@ -2884,6 +3232,47 @@ extern "C" void ppi_post_rdmap(const RdMap *map)
     std::lock_guard<std::mutex> lock(s.mutex);
     s.rd = std::move(f);
     s.rdSerial++;
+}
+
+extern "C" void ppi_set_rd_axes(double vMin_mps, double vMax_mps)
+{
+    if (std::isfinite(vMin_mps) && std::isfinite(vMax_mps) && vMax_mps > vMin_mps) {
+        g_rdVmin = vMin_mps;
+        g_rdVmax = vMax_mps;
+    }
+}
+
+extern "C" void ppi_set_log_defaults(const char *folder, const char *name, int mask)
+{
+    Shared &s = shared();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.log.folder = folder ? folder : "";
+    s.log.name = name ? name : "";
+    s.log.mask = mask;
+}
+
+extern "C" int ppi_take_log_request(int *start, char *folder, size_t folderLen, char *name, size_t nameLen, int *mask)
+{
+    Shared &s = shared();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.log.requested) return 0;
+    s.log.requested = false;
+    if (start) *start = s.log.requestStart;
+    if (folder && folderLen) std::snprintf(folder, folderLen, "%s", s.log.folder.c_str());
+    if (name && nameLen) std::snprintf(name, nameLen, "%s", s.log.name.c_str());
+    if (mask) *mask = s.log.mask;
+    return 1;
+}
+
+extern "C" void ppi_post_log_status(int active, const char *dir, const LoggerStats *stats, const char *error)
+{
+    Shared &s = shared();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.log.active = active != 0;
+    if (dir) s.log.dir = dir;
+    if (stats) s.log.stats = *stats;
+    s.log.error = error ? error : "";
+    s.log.serial++;
 }
 
 extern "C" void ppi_set_display_mode(int mode)

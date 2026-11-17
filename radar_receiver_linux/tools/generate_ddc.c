@@ -173,6 +173,8 @@ static int same_text(const char *a, const char *b)
     return *a == *b;
 }
 
+#include "window_impl.h"
+
 /* A numeric matrix of cfg (values column-major), n = rows * cols. */
 static const MValue *matrix(const char *path, int *rows, int *cols)
 {
@@ -513,26 +515,6 @@ static void envelope(const Wave *w, double t, double *re, double *im)
     }
 }
 
-/* taylor_window.m */
-static void taylor_window(int N, int nbar, double sll_dB, double *w)
-{
-    const double A = acosh(pow(10.0, -sll_dB / 20.0)) / PI;
-    const double sp2 = nbar * nbar / (A * A + (nbar - 0.5) * (nbar - 0.5));
-    for (int k = 0; k < N; k++) w[k] = 1.0;
-    for (int m = 1; m <= nbar - 1; m++) {
-        double nu = 1.0, de = 1.0;
-        for (int n = 1; n <= nbar - 1; n++) {
-            nu *= 1.0 - (m * (double)m / sp2) / (A * A + (n - 0.5) * (n - 0.5));
-            if (n != m) de *= 1.0 - (double)m * m / ((double)n * n);
-        }
-        const double Fm = ((m + 1) % 2 ? -1.0 : 1.0) * nu / (2.0 * de);
-        for (int k = 0; k < N; k++) {
-            const double xi = (k - 0.5 * N + 0.5) / N;
-            w[k] += 2.0 * Fm * cos(2.0 * PI * m * xi);
-        }
-    }
-}
-
 /* Valid FIR decimation (fir_decimate_valid.m), real filter, complex input. */
 static int fir_dec(const double *xr, const double *xi, int N, const double *h, int L, int D, double *yr, double *yi)
 {
@@ -551,7 +533,7 @@ static int fir_dec(const double *xr, const double *xi, int N, const double *h, i
 }
 
 /* CNR of uniform clutter of sigma0 = 1 at range R, elevation el (clutter_cnr.m). */
-static double clutter_cnr(const Radar *s, double R, double el, int taylorNbar, double taylorSll)
+static double clutter_cnr(const Radar *s, double R, double el, const WinSpec *rangeWin)
 {
     const Wave *w = s->w[0].enable ? &s->w[0] : &s->w[1];
     const double c = s->c, fs = s->fs;
@@ -576,7 +558,7 @@ static double clutter_cnr(const Radar *s, double R, double el, int taylorNbar, d
     const int Lp = (int)lround(w->width * s->fsOut);
     double *win = xcalloc((size_t)Lp, sizeof(double));
     if (w->phaseCode) for (int k = 0; k < Lp; k++) win[k] = 1.0;
-    else taylor_window(Lp, taylorNbar, taylorSll, win);
+    else window_eval(rangeWin, Lp, NULL, 0, win);          /* cfg.proc.rangeWindow (window_function.m) */
     int L = Lp;
     double *hr, *hi;
     if (w->compMismatch) {
@@ -1257,7 +1239,7 @@ static TerrainType terrain_type(const char *name)
     return t;
 }
 
-static void clutter_build(Clutter *C, Radar *s, Rng *rng, int taylorNbar, double taylorSll)
+static void clutter_build(Clutter *C, Radar *s, Rng *rng, const WinSpec *rangeWin)
 {
     memset(C, 0, sizeof *C);
     const double c = s->c, fs = s->fs, hAnt = s->height, kae = 4.0 / 3.0 * 6371e3;
@@ -1265,7 +1247,7 @@ static void clutter_build(Clutter *C, Radar *s, Rng *rng, int taylorNbar, double
     /* sigma0 of land from the CNR */
     const double cnrRange = num_or("clutter.cnrRange_m", 5000);
     if (!(cnrRange > 0)) fail("cfg.clutter.cnrRange_m must be a positive range [m].");
-    const double cnrPer = clutter_cnr(s, cnrRange, elev0, taylorNbar, taylorSll);
+    const double cnrPer = clutter_cnr(s, cnrRange, elev0, rangeWin);
     C->sigma0_dB = has("clutter.cnr_dB") && !empty("clutter.cnr_dB") ? num("clutter.cnr_dB") - 10 * log10(cnrPer)
                                                                        : num("clutter.sigma0_dB");
     C->cnr_dB = C->sigma0_dB + 10 * log10(cnrPer);
@@ -1887,7 +1869,8 @@ static int run(const Options *opt)
         for (int k = 0; k < tg[i].nScan; k++) tg[i].rcsScan[k] = swerling == 1 ? tg[i].rcs * -log(rng_uniform(&rng)) : tg[i].rcs;
     }
     if (num("clutter.enable") != 0) {
-        clutter_build(&clut, &s, &rng, (int)num("proc.taylorNbar"), num("proc.taylorSll_dB"));
+        const WinSpec rangeWin = window_spec("proc.", "rangeWindow", "taylor");
+        clutter_build(&clut, &s, &rng, &rangeWin);
         C = &clut;
     }
     /* folders */

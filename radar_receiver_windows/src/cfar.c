@@ -14,6 +14,9 @@
  *       range edge an empty half is replaced by the other one)
  *   OS  the k-th smallest of them (k = cfg->cfarOsK for the full window,
  *       round(k * N / nTrain) for the N training cells at the range edges)
+ *   CE  the mean of them without the largest ones (censored mean level): of
+ *       the N training cells the N - round(c * N / nTrain) smallest, c =
+ *       nTrain - cfg->cfarCeKeep the cells censored of the full window
  * Window (cfg->cfarMethod): guardRange/trainRange and guardDoppler/
  * trainDoppler cells on each side (the 1-D windows have no window in the
  * other dimension). Doppler is circular. At the first and last range cells
@@ -21,7 +24,7 @@
  * window lies inside the data) and the guard cells are cut at the edge.
  * Every detection must also be a local peak (the maximum of its 3 x 3 x 3
  * neighbourhood in beam x range x Doppler, the first step of the pruning,
- * prune_peaks.m): the OS statistic is computed only for those cells (the
+ * prune_peaks.m): the OS and CE statistics are computed only for those cells (the
  * result after the pruning is the same as with every cell tested). The
  * noise estimate of a detection (the SNR of the reports with
  * cfg.report.snrNoise = 'cfar') is the statistic / cfg->cfarNoiseScale (the
@@ -465,6 +468,51 @@ static void os_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int
     }
 }
 
+/* CE (censored mean level): the local peaks of the tested cells are the candidates; the N
+ * training cells of a candidate are gathered, the keep = N - round(c N / nTrain) smallest
+ * selected (select_kth leaves them in w->win[0 ... keep-1]) and summed in double; detected when
+ * P > alpha * sum / keep. */
+static void ce_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int b, int cf, int cl, CfarScratch *w)
+{
+    const int nfft = cfg->nfft, nR = m->nR;
+    const int gR = cfg->guardRange, oR = gR + cfg->trainRange;
+    const int gD = cfg->guardDoppler, oD = gD + cfg->trainDoppler;
+    const int nCens = cfg->nTrain - cfg->cfarCeKeep;
+    const size_t nCells = (size_t)m->nCells;
+    const float *Pb = m->P + (size_t)b * nR;
+    for (int d = 0; d < nfft; d++) {
+        unsigned char *det = m->det + (size_t)d * nCells + (size_t)b * nR;
+        for (int r = cf; r <= cl; r++) det[r] = 1;
+        peaks_row(m, b, d, cf, cl, w->colMax, det);              /* the candidates */
+        const float *x = Pb + (size_t)d * nCells;
+        for (int r = cf; r <= cl; r++) {
+            if (!det[r]) continue;
+            const int rc = window_centre(r, oR, nR);
+            int n = 0;
+            for (int k = -oD; k <= oD; k++) {
+                const float *row = Pb + (size_t)(((d + k) % nfft + nfft) % nfft) * nCells;
+                if (abs(k) <= gD) {                              /* the row without its guard cells */
+                    const int g1 = r - gR, g2 = r + gR;
+                    for (int rr = rc - oR; rr <= rc + oR; rr++)
+                        if (rr < g1 || rr > g2) w->win[n++] = row[rr];
+                } else {
+                    for (int rr = rc - oR; rr <= rc + oR; rr++) w->win[n++] = row[rr];
+                }
+            }
+            long keep = n - lround((double)nCens * n / cfg->nTrain);
+            if (keep < 1) keep = 1;
+            if (keep > n) keep = n;
+            if (keep < n) select_kth(w->win, n, (int)keep - 1);   /* the keep smallest first */
+            double sum = 0.0;
+            for (long i = 0; i < keep; i++) sum += w->win[i];
+            const double mean = sum / (double)keep;
+            det[r] = (double)x[r] > alpha * mean;
+            if (det[r] && m->noise)
+                m->noise[(size_t)d * nCells + (size_t)b * nR + r] = (float)(mean / cfg->cfarNoiseScale);
+        }
+    }
+}
+
 void cfar_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int b, int cf, int cl,
                 int notchLastCell, CfarScratch *w)
 {
@@ -472,13 +520,16 @@ void cfar_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int b, i
     case CFAR_GO:
     case CFAR_SO: goso_chunk(cfg, m, alpha, b, cf, cl, w); break;
     case CFAR_OS: os_chunk(cfg, m, alpha, b, cf, cl, w); break;
+    case CFAR_CE: ce_chunk(cfg, m, alpha, b, cf, cl, w); break;
     default:      ca_chunk(cfg, m, b, cf, cl, w); break;
     }
-    /* Suppress only near-range cells in the MTI notch. Beyond notchLastCell
-     * the CFAR result above is retained for every Doppler bin. */
-    if (notchLastCell >= cf) {
-        const int d0 = cfg->nfft / 2 - cfg->notchBins > 0 ? cfg->nfft / 2 - cfg->notchBins : 0;
-        const int d1 = cfg->nfft / 2 + cfg->notchBins < cfg->nfft - 1 ? cfg->nfft / 2 + cfg->notchBins : cfg->nfft - 1;
+    /* Suppress only near-range cells in the MTI notch (around the bin of zero Doppler, cfg->zeroBin;
+     * none when zero velocity is not on a NUFFT grid). Beyond notchLastCell the CFAR result above is
+     * retained for every Doppler bin. */
+    if (notchLastCell >= cf && cfg->zeroBin >= 0) {
+        const int z = cfg->zeroBin;
+        const int d0 = z - cfg->notchBins > 0 ? z - cfg->notchBins : 0;
+        const int d1 = z + cfg->notchBins < cfg->nfft - 1 ? z + cfg->notchBins : cfg->nfft - 1;
         const int r1 = notchLastCell < cl ? notchLastCell : cl;
         const size_t nCells = (size_t)m->nCells;
         for (int d = d0; d <= d1; d++) {
@@ -574,6 +625,21 @@ static double statistic_cdf(const RadarConfig *cfg, double z, double L)
         const int N = cfg->nTrain, k = cfg->cfarOsK;
         return beta_inc(gamma_p(L, L * z), k, N - k + 1);
     }
+    case CFAR_CE: {                       /* the table of cfar_ce_table.m: log G linear in log z */
+        const int n = cfg->nCeTable;
+        const double *x = cfg->ceLogZ, *y = cfg->ceLogG;
+        if (!(z > 0.0)) return 0.0;
+        const double lz = log(z);
+        double lg;
+        if (lz <= x[0]) lg = y[0] + (y[1] - y[0]) / (x[1] - x[0]) * (lz - x[0]);
+        else if (lz >= x[n - 1]) lg = 0.0;
+        else {
+            int lo = 0, hi = n - 1;                        /* x[lo] <= lz < x[hi] */
+            while (hi - lo > 1) { const int mid = (lo + hi) / 2; if (x[mid] <= lz) lo = mid; else hi = mid; }
+            lg = y[lo] + (y[hi] - y[lo]) * (lz - x[lo]) / (x[hi] - x[lo]);
+        }
+        return exp(lg < 0.0 ? lg : 0.0);
+    }
     default: { const double n = cfg->nTrain * L; return gamma_p(n, n * z); }
     }
 }
@@ -582,6 +648,7 @@ double cfar_pfa(const RadarConfig *cfg, double alpha)
 {
     const double L = cfg->nLooks;
     if (!(L > 0.0) || cfg->nTrain < 1 || !(alpha >= 0.0)) return NAN;
+    if (cfg->cfarType == CFAR_CE && cfg->nCeTable < 2) return NAN;   /* (no table in the file) */
     if (cfg->cfarType == CFAR_CA) return beta_inc(1.0 / (1.0 + alpha / cfg->nTrain), cfg->nTrain * L, L);
     /* P(Z < S/alpha) over the density of S: 8-point Gauss-Legendre on 2000
      * panels of [0, sHi] (cfar_quadrature.m) */
@@ -604,5 +671,5 @@ double cfar_pfa(const RadarConfig *cfg, double alpha)
 
 const char *cfar_type_name(int type)
 {
-    return type == CFAR_GO ? "GO" : type == CFAR_SO ? "SO" : type == CFAR_OS ? "OS" : "CA";
+    return type == CFAR_GO ? "GO" : type == CFAR_SO ? "SO" : type == CFAR_OS ? "OS" : type == CFAR_CE ? "CE" : "CA";
 }

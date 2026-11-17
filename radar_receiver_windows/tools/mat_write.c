@@ -17,8 +17,10 @@
 #  include <zlib.h>
 #endif
 
-enum { miINT8 = 1, miINT16 = 3, miINT32 = 5, miUINT32 = 6, miDOUBLE = 9, miMATRIX = 14, miCOMPRESSED = 15 };
-enum { mxSTRUCT = 2, mxDOUBLE = 6, mxINT16 = 10 };
+enum { miINT8 = 1, miINT16 = 3, miUINT16 = 4, miINT32 = 5, miUINT32 = 6, miSINGLE = 7, miDOUBLE = 9, miMATRIX = 14,
+       miCOMPRESSED = 15 };
+enum { mxCHAR = 4, mxSTRUCT = 2, mxDOUBLE = 6, mxSINGLE = 7, mxINT16 = 10 };
+enum { mxCOMPLEX_FLAG = 0x0800 };
 
 typedef struct { unsigned char *p; size_t n, cap; } Buf;
 
@@ -83,7 +85,7 @@ MatWriter *mat_write_open(const char *path, int compressed)
     w->compressed = compressed;
     unsigned char head[128];
     memset(head, ' ', 116);
-    const char *text = "MATLAB 5.0 MAT-file, written by radar_generate_ddc";
+    const char *text = "MATLAB 5.0 MAT-file, written by the radar receiver tools (mat_write.c)";
     memcpy(head, text, strlen(text));
     memset(head + 116, 0, 8);
     head[124] = 0x00; head[125] = 0x01; head[126] = 'I'; head[127] = 'M';
@@ -170,6 +172,52 @@ void mat_write_struct(MatWriter *w, const char *name, int nFields, const char *c
         element(&f, miDOUBLE, values[k], (uint32_t)(sizeof(double) * n[k]));
         matrix_end(&m, &f);
     }
+    matrix_end(&v, &m);
+    emit(w, &v);
+}
+
+void mat_write_single(MatWriter *w, const char *name, const float *re, const float *im, const size_t *dims, int nd)
+{
+    Buf m = { 0 }, v = { 0 };
+    uint32_t flags[2] = { mxSINGLE | (im ? mxCOMPLEX_FLAG : 0), 0 };
+    int32_t d[8];
+    size_t n = 1;
+    const int ndIn = nd;
+    if (nd < 2) nd = 2;
+    if (nd > 8) nd = 8;
+    for (int k = 0; k < nd; k++) {
+        const size_t dk = k < ndIn ? dims[k] : 1;
+        d[k] = (int32_t)dk;
+        n *= dk;
+    }
+    element(&m, miUINT32, flags, 8);
+    element(&m, miINT32, d, (uint32_t)(4 * nd));
+    element(&m, miINT8, name, (uint32_t)strlen(name));
+    element(&m, miSINGLE, re, (uint32_t)(sizeof(float) * n));
+    if (im) element(&m, miSINGLE, im, (uint32_t)(sizeof(float) * n));
+    matrix_end(&v, &m);
+    emit(w, &v);
+}
+
+void mat_write_double(MatWriter *w, const char *name, const double *data, size_t rows, size_t cols)
+{
+    Buf m = { 0 }, v = { 0 };
+    matrix_head(&m, mxDOUBLE, (uint32_t)rows, (uint32_t)cols, name);
+    element(&m, miDOUBLE, data, (uint32_t)(sizeof(double) * rows * cols));
+    matrix_end(&v, &m);
+    emit(w, &v);
+}
+
+void mat_write_char(MatWriter *w, const char *name, const char *text)
+{
+    Buf m = { 0 }, v = { 0 };
+    const size_t n = strlen(text);
+    uint16_t *c = malloc(sizeof(uint16_t) * (n ? n : 1));
+    if (!c) abort();
+    for (size_t i = 0; i < n; i++) c[i] = (unsigned char)text[i];
+    matrix_head(&m, mxCHAR, 1, (uint32_t)n, name);
+    element(&m, miUINT16, c, (uint32_t)(sizeof(uint16_t) * n));
+    free(c);
     matrix_end(&v, &m);
     emit(w, &v);
 }

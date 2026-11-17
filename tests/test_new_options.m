@@ -19,7 +19,10 @@ function ok = test_new_options()
 %   6) cfg.io.saveMf / saveDoppler: one mf_<n>.mat per PRI and one doppler_<n>.mat per CPI
 %      update, with the sizes of the blocks ([] for a sub-pulse that is off)
 %   7) the C program radar_export_config (when built) writes the same records as
-%      export_receiver_config for every option above, the Doppler window 'blackman', a
+%      export_receiver_config for every option above, the CE-CFAR (2-D and range window, with
+%      its table of the statistic), the NUFFT of the staggered PRF (its matrices; another grid,
+%      Chebyshev window without density compensation), the channels used (4, 1), the Kaiser,
+%      Chebyshev, Taylor and Blackman-Harris windows of range and Doppler, the Doppler window 'blackman', a
 %      short pulse at 11 us with set receive-window starts and radar mode 2 (set windows), stagger
 %      pair 3 with codes 2 / 4 and a manual DDC record from 0 us, mode 2 with a manual record
 %   8) the noise floor of the PPI video (colour scale) stays within 0.5 dB while the antenna
@@ -197,7 +200,23 @@ if exist(exe, 'file')
                  {'prf.mode', 'staggered'; 'prf.staggerSet', 3; 'wave.short.codeIndex', 2; 'wave.long.codeIndex', 4; ...
                   'rx.manualDdc', true; 'rx.nDdc', 1800; 'rx.ddcT0_s', 0}
              'cfg.modes.active = 2; cfg = apply_radar_mode(cfg); cfg.rx.manualDdc = true; cfg.rx.nDdc = 3560; cfg.rx.ddcT0_s = 5e-6;', ...
-                 {'modes.active', 2; 'rx.manualDdc', true; 'rx.nDdc', 3560; 'rx.ddcT0_s', 5e-6}};
+                 {'modes.active', 2; 'rx.manualDdc', true; 'rx.nDdc', 3560; 'rx.ddcT0_s', 5e-6}
+             'cfg.cfar.type = ''ce'';', {'cfar.type', 'ce'}
+             'cfg.cfar.type = ''ce''; cfg.cfar.method = ''range''; cfg.cfar.ceCensor = 0.2;', ...
+                 {'cfar.type', 'ce'; 'cfar.method', 'range'; 'cfar.ceCensor', 0.2}
+             'cfg.prf.mode = ''staggered''; cfg.proc.staggerDoppler = ''nufft'';', {'prf.mode', 'staggered'; 'proc.staggerDoppler', 'nufft'}
+             'cfg.prf.mode = ''staggered''; cfg.proc.staggerDoppler = ''nufft''; cfg.proc.nufft.nPoints = 100; cfg.proc.nufft.vMin_mps = -300; cfg.proc.nufft.vMax_mps = 500; cfg.proc.nufft.window = ''chebyshev''; cfg.proc.nufft.densityComp = false; cfg.mti.maxRange_m = 50e3; cfg.cfar.type = ''ce'';', ...
+                 {'prf.mode', 'staggered'; 'proc.staggerDoppler', 'nufft'; 'proc.nufft.nPoints', 100; 'proc.nufft.vMin_mps', -300; ...
+                  'proc.nufft.vMax_mps', 500; 'proc.nufft.window', 'chebyshev'; 'proc.nufft.densityComp', false; ...
+                  'mti.maxRange_m', 50e3; 'cfar.type', 'ce'}
+             'cfg.rx.nChannelsUsed = 4; cfg.proc.dopplerWindow = ''kaiser''; cfg.proc.dopplerWindowBeta = 4;', ...
+                 {'rx.nChannelsUsed', 4; 'proc.dopplerWindow', 'kaiser'; 'proc.dopplerWindowBeta', 4}
+             'cfg.rx.nChannelsUsed = 1; cfg.proc.dopplerWindow = ''chebyshev''; cfg.proc.dopplerWindowSll_dB = -60;', ...
+                 {'rx.nChannelsUsed', 1; 'proc.dopplerWindow', 'chebyshev'; 'proc.dopplerWindowSll_dB', -60}
+             'cfg.modes.active = 1; cfg = apply_radar_mode(cfg); cfg.proc.rangeWindow = ''chebyshev''; cfg.proc.rangeWindowSll_dB = -45; cfg.proc.dopplerWindow = ''taylor'';', ...
+                 {'modes.active', 1; 'proc.rangeWindow', 'chebyshev'; 'proc.rangeWindowSll_dB', -45; 'proc.dopplerWindow', 'taylor'}
+             'cfg.modes.active = 1; cfg = apply_radar_mode(cfg); cfg.proc.rangeWindow = ''kaiser''; cfg.proc.dopplerWindow = ''blackmanharris'';', ...
+                 {'modes.active', 1; 'proc.rangeWindow', 'kaiser'; 'proc.dopplerWindow', 'blackmanharris'}};
     for k = 1:size(cases, 1)
         c = radar_config();
         for j = 1:size(cases{k, 2}, 1)
@@ -260,6 +279,9 @@ for i = 1:numel(f)
     x = A.(f{i});  y = B.(f{i});
     d = abs(x(:) - y(:)) ./ max(max(abs(x(:)), abs(y(:))), 1e-300);
     d(x(:) == y(:) | (isnan(x(:)) & isnan(y(:)))) = 0;
+    if strcmp(f{i}, 'cfarCeTable') && isequal(size(x), size(y))   % CE: [log z; log G], G by FFTs:
+        d = [abs(x(1, :) - y(1, :)), abs(exp(x(2, :)) - exp(y(2, :))) / 1e3];   % G to 1e-12 absolute
+    end
     if ~isequal(size(x), size(y)) || any(d > 1e-9)
         same = false;  why = sprintf(' (record %s differs)', f{i});  return
     end

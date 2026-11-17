@@ -52,7 +52,8 @@ Pr  = Pr * mean(gStc.^2);
 snrAdc = Pr / (sys.N0eff * sys.fs/2);
 snrDdc = Pr / (sys.N0ddc * sys.ddc.noiseBw_Hz);                     % incl. the DDC rounding
 if sys.dbf.enabled
-    arrayGain = abs(sys.dbf.W * v).^2 ./ sum(abs(sys.dbf.W).^2, 2);
+    vu = v(1:size(sys.dbf.W, 2));                                   % the channels used (cfg.rx.nChannelsUsed)
+    arrayGain = abs(sys.dbf.W * vu).^2 ./ sum(abs(sys.dbf.W).^2, 2);
     [gDbf, b.beam] = max(arrayGain);
 else
     gDbf = 1;                                                       % single element: no array gain
@@ -97,8 +98,9 @@ yN = mti_filter(impulses, sys.mtiCoeffs, st);
 gMti = mean(abs(mti_filter(sigConst, sys.mtiCoeffs, st)).^2) / mean(sum(abs(yN).^2, 2));
 pS = doppler_process(mti_filter(sigScan, sys.mtiCoeffs, st), sys);
 pN = sum(doppler_process(yN, sys), 2);
-zeroBin = floor(sys.dop.nfft/2) + 1;
-tested = abs((1:sys.dop.nfft).' - zeroBin) > sys.dop.notchBins;
+zeroBin = floor(sys.dop.nfft/2) + 1;                                % zero Doppler (NUFFT: its bin, 0 = none)
+if isfield(sys.dop, 'zeroBin'), zeroBin = sys.dop.zeroBin; end
+tested = abs((1:sys.dop.nfft).' - zeroBin) > sys.dop.notchBins | zeroBin == 0;
 [~, kAll] = max(pS);
 [~, k] = max(pS(:) .* tested);                                      % best bin the CFAR tests
 gSlow = pS(k) / pN(k);

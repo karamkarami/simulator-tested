@@ -478,8 +478,13 @@ rgb(repmat(isnan(D), [1 1 3])) = 0;
 set(h.rdImg, 'CData', rgb, 'XData', xc([1 end]), 'YData', vel([1 end]), 'Visible', 'on');
 set(h.rdAx, 'XLim', view(1:2), 'YLim', view(3:4));
 z = floor(nfft/2) + 1;                                     % zero Doppler
-yn = vel(z) + [1 -1] * (rd.notchBins + 0.5) * dv;
-set(h.rdNotch, 'XData', [view(1:2) NaN view(1:2)], 'YData', [yn(1) yn(1) NaN yn(2) yn(2)], 'Visible', 'on');
+if isfield(rd, 'zeroBin'), z = rd.zeroBin; end            % (NUFFT grid: 0 = zero velocity not on it)
+if z > 0
+    yn = vel(z) + [1 -1] * (rd.notchBins + 0.5) * dv;
+    set(h.rdNotch, 'XData', [view(1:2) NaN view(1:2)], 'YData', [yn(1) yn(1) NaN yn(2) yn(2)], 'Visible', 'on');
+else
+    set(h.rdNotch, 'Visible', 'off');
+end
 if ~isempty(rd.dets)
     set(h.rdDet, 'XData', rd.dets(:, 1).' / 1e3, 'YData', vel(rd.dets(:, 2)), 'Visible', 'on');
 else

@@ -328,7 +328,8 @@ int main(int argc, char **argv)
     const int iGui = timing2.indexOf("PPI draw (GUI)");
     check(iGui >= 0 && timing2.mid(iGui + 15, 9).trimmed().toDouble() > 0.0, "the drawing time of the GUI is counted");
     check(timing2.contains(row("CFAR 1D range", 2000.0)) && timing2.contains(row("Total", 2000.0)) &&
-          timing2.contains("last 200 of 1200 PRIs") && timing2.contains("not part of Total"),
+          timing2.contains("last 200 of 1200 PRIs") && timing2.contains("not in Total") &&
+          timing2.contains("Logging (copy)") && timing2.contains("Log writer"),
           "the times are the means over the PRIs since the last update (GUI drawing not in Total)");
     check(win.cfarInfo().contains("CFAR 1-D range: 17.50 dB"), "the CFAR line names the method");
 
@@ -525,13 +526,30 @@ int main(int argc, char **argv)
     /* the range-Doppler tab: the map of the selected beam next to a small PPI */
     {
         int bm = -1;
-        check(win.tabs()->count() == 2 && win.tabs()->currentIndex() == 0 && ppi_rdmap_wanted(&bm) == 1 &&
-              pw.parentWidget() == win.tabs()->widget(0), "two tabs; the map is computed also in the first");
+        check(win.tabs()->count() == 3 && win.tabs()->currentIndex() == 0 && ppi_rdmap_wanted(&bm) == 1 &&
+              pw.parentWidget() == win.tabs()->widget(0), "three tabs; the map is computed also in the first");
         win.resize(1400, 800);
         win.tabs()->setCurrentIndex(1);
         QCoreApplication::processEvents();
         check(ppi_rdmap_wanted(&bm) == 1 && bm == 1 && pw.parentWidget() == win.tabs()->widget(1) &&
               !win.rd().hasFrame(), "second tab: map of beam 2 wanted, the PPI moved next to it");
+        {   /* before the first map: the empty map and plot below it with grid and labels; the selector
+             * of the lower plot on top of that plot */
+            RdWidget &r0 = win.rd();
+            const QImage e = r0.grab().toImage();
+            int grid = 0;                                     /* grey grid / rim pixels inside the map */
+            const QRectF mr = r0.mapRect();
+            for (int x = (int)mr.left() + 2; x < (int)mr.right() - 1; x++)
+                for (int y = (int)mr.top() + 2; y < (int)mr.bottom() - 1; y++) {
+                    const QColor q = e.pixelColor(x, y);
+                    grid += q.red() > 20 && std::abs(q.red() - q.blue()) < 20;   /* (fill: 6, 6, 6) */
+                }
+            const QRect lb = win.lowerBox()->geometry();
+            check(grid > 20 && win.lowerBox()->parentWidget() == &r0 && win.lowerBox()->isVisible() &&
+                  lb.bottom() < r0.lowerRect().top() && lb.top() > r0.mapRect().bottom(),
+                  "empty range-Doppler tab: grid and axes drawn, the plot selector on top of the lower plot");
+            if (!folder.empty()) win.grab().save(QString::fromStdString(folder + "/ppi_rd_empty.png"));
+        }
         const int nB = 800, nfft = 64, pb = 400, pd = 20;
         const double dR = 74.948;
         std::vector<float> P((size_t)nB * nfft);
@@ -663,6 +681,54 @@ int main(int argc, char **argv)
         win.tabs()->setCurrentIndex(0);
         check(ppi_rdmap_wanted(nullptr) == 1 && pw.parentWidget() == win.tabs()->widget(0),
               "back to the PPI tab (the map is still computed)");
+    }
+
+    /* the tab Controls: logging (folder, name, blocks, start / stop), without the panel */
+    {
+        win.tabs()->setCurrentIndex(2);
+        QCoreApplication::processEvents();
+        check(!win.panel()->isVisible() && win.logButton()->text() == "Start logging",
+              "Controls tab: the panel of the other tabs is hidden");
+        win.logFolderEdit()->setText("/tmp/logs_test");
+        win.logNameEdit()->setText("run1");
+        for (int i = 0; i < 5; i++) win.logBlockBox(i)->setChecked(i != 3);
+        win.logButton()->click();
+        int start = -1, mask = 0;
+        char folder2[256], name[64];
+        const int got = ppi_take_log_request(&start, folder2, sizeof folder2, name, sizeof name, &mask);
+        check(got == 1 && start == 1 && std::string(folder2) == "/tmp/logs_test" && std::string(name) == "run1" &&
+              mask == (LOG_DDC | LOG_DBF | LOG_MF | LOG_DETECTION) && win.logButton()->text() == "Stop logging",
+              "Start logging: the request with the folder, name and blocks");
+        LoggerStats st;
+        std::memset(&st, 0, sizeof st);
+        st.pris = 12;  st.files = 48;  st.bytes = 3000000;  st.seconds = 65.0;
+        ppi_post_log_status(1, "/tmp/logs_test/run1", &st, nullptr);
+        win.refresh();
+        check(pw.logging() && win.logStatus().contains("logging to /tmp/logs_test/run1") && win.logStatus().contains("48 files") &&
+              !win.logBlockBox(0)->isEnabled(), "the state of the log; the blocks are locked while it runs");
+        win.tabs()->setCurrentIndex(0);
+        QCoreApplication::processEvents();
+        {
+            const QImage img = pw.grab().toImage();      /* the red REC mark in the top right corner */
+            int red = 0;
+            for (int x = pw.width() - 160; x < pw.width(); x++)
+                for (int y = 4; y < 36; y++) {
+                    const QColor q = img.pixelColor(x, y);
+                    red += q.red() > 100 && q.green() < 60 && q.blue() < 60;
+                }
+            check(win.panel()->isVisible() && red > 20, "PPI: the REC mark while logging, the panel back in the PPI tab");
+            if (!folder.empty()) win.grab().save(QString::fromStdString(folder + "/ppi_logging.png"));
+        }
+        win.tabs()->setCurrentIndex(2);
+        win.logButton()->click();                         /* stop */
+        check(ppi_take_log_request(&start, folder2, sizeof folder2, name, sizeof name, &mask) == 1 && start == 0,
+              "Stop logging: the request");
+        ppi_post_log_status(0, "/tmp/logs_test/run1", &st, nullptr);
+        win.refresh();
+        check(!pw.logging() && win.logButton()->text() == "Start logging" && win.logStatus().contains("log ended") &&
+              win.logBlockBox(0)->isEnabled(), "log ended: the button and the blocks back, no REC mark");
+        if (!folder.empty()) win.grab().save(QString::fromStdString(folder + "/ppi_controls.png"));
+        win.tabs()->setCurrentIndex(0);
     }
 
     if (!folder.empty()) {

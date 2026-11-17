@@ -40,6 +40,10 @@ cfg.files.dbf     = fullfile(root, 'inputs', 'dbf_matrix.mat');      % elevation
 %% Radar site and antenna
 cfg.fc            = 170e6; % center frequency [Hz] (VHF; wavelength 1.76 m)
 cfg.ant.nElements = 48;   % receive elements in elevation (1 = single antenna, beamforming disabled)
+cfg.rx.nChannelsUsed = [];  % channels of the DDC output the receiver processes: the first nChannelsUsed
+                            % of the cfg.ant.nElements in every PRI ([] = all; 1 = only the first element,
+                            % no DBF). The DDC output (simulator, files, UDP stream, logs) keeps all of
+                            % them; the DBF uses the first nChannelsUsed columns of its matrix
 cfg.ant.elementSpacing_lambda = 0.66;  % element spacing in elevation [wavelengths]
 % (azimuth: fixed 4.1 deg beam of every element; patterns come from the antenna file)
 cfg.ant.height_m  = 6;    % antenna height above the ground [m]

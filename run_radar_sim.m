@@ -216,13 +216,13 @@ for k = 1:sched.nPulses
     end
     if strcmp(want.raw, 'video')                        % video of the PPI (display time)
         tb = tic;
-        ppi.video = ppi_video_add(ppi.video, I, Q, az, t);
+        ppi.video = ppi_video_add(ppi.video, I(:, 1:sys.nChUsed), Q(:, 1:sys.nChUsed), az, t);   % the channels used
         blockUs(10) = blockUs(10) + 1e6*toc(tb);
     end
     prof = {[], []};                                    % DBF / MF output of the selected beam (PPI)
     mfOut = struct('short', [], 'long', []);            % recordings of this PRI (cfg.io.saveMf / saveDoppler)
     dopOut = struct('short', [], 'long', []);
-    bb = complex(single(I), single(Q));
+    bb = complex(single(I(:, 1:sys.nChUsed)), single(Q(:, 1:sys.nChUsed)));   % the channels used (cfg.rx.nChannelsUsed)
 
     % 4-9) Processing chain, separately for the short and the long sub-pulse
     priPlots = [];
@@ -255,7 +255,7 @@ for k = 1:sched.nPulses
             y  = mti_filter(cpi, sys.mtiCoeffs, info.staggerIdx, wv.mtiCells, sys.mtiBypass);
             blockUs(3) = blockUs(3) + 1e6*toc(tb);
             tb = tic;
-            rd = doppler_process(y, sys, wv.mtiCells);  % [nBeams x nRange x nfft]
+            rd = doppler_process(y, sys, wv.mtiCells, info.staggerIdx);  % [nBeams x nRange x nfft]
             blockUs(4) = blockUs(4) + 1e6*toc(tb);
             if saveDop, dopOut.(p) = single(rd); end
             tb = tic;

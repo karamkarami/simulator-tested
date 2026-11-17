@@ -8,6 +8,8 @@ function [isDet, noise] = cfar_detect(P, sys, wv)
 %                        halves of the window (leading / lagging)
 %     'so'  cfar_goso.m  smallest of: the smaller of them
 %     'os'  cfar_os.m    order statistic: the osK-th smallest training cell
+%     'ce'  cfar_ce.m    censored mean: the mean of the training cells without the
+%                        round(ceCensor * nTrain) largest
 %   and the window sys.cfar.method ('2d', 'range', 'doppler'; guard and
 %   training cells on each side, Doppler circular, the range window shifted
 %   inwards at the edges). A cell is detected when P > sys.cfar.alpha times
@@ -17,7 +19,11 @@ function [isDet, noise] = cfar_detect(P, sys, wv)
 %   through sys.cfar.notchMaxRange_m; every Doppler bin is tested beyond it.
 nD = size(P, 3);
 zeroBin = floor(nD/2) + 1;                         % zero Doppler after fftshift
+if isfield(sys.dop, 'method') && strcmp(sys.dop.method, 'nufft')   % NUFFT: its bin (0: not on the grid)
+    zeroBin = sys.dop.zeroBin;
+end
 notch = max(1, zeroBin-sys.dop.notchBins):min(nD, zeroBin+sys.dop.notchBins);
+if zeroBin == 0, notch = []; end
 switch sys.cfar.type
     case 'ca'
         [isDet, noise] = cfar_ca(P, sys, wv);
@@ -25,6 +31,8 @@ switch sys.cfar.type
         [isDet, noise] = cfar_goso(P, sys, wv);
     case 'os'
         [isDet, noise] = cfar_os(P, sys, wv);
+    case 'ce'
+        [isDet, noise] = cfar_ce(P, sys, wv);
     otherwise
         error('Unknown CFAR type %s.', sys.cfar.type);
 end

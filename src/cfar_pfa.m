@@ -12,6 +12,8 @@ function pfa = cfar_pfa(alpha, c, nLooks)
 %     GO  the greater of the means of the two halves (nHalf cells each)
 %     SO  the smaller of them
 %     OS  the osK-th smallest of the nTrain cells
+%     CE  the mean of the ceKeep smallest of the nTrain cells (censored mean,
+%         cfar_ce_table.m)
 %   For GO, SO and OS Pfa = P(Z < S/alpha) = int_0^inf G(s/alpha) f_S(s) ds
 %   with the distribution function G of Z (cfar_statistic.m) and the
 %   density f_S of S, integrated by Gauss-Legendre panels (the C receiver

@@ -331,8 +331,126 @@ static double median_f(double x, const void *ctx)
     return gammainc_p(m->L * x, m->L) - 0.5;
 }
 
-/* The CFAR detector (sys.cfar): type 0 CA, 1 GO, 2 SO, 3 OS. */
-typedef struct { int type, nTrain, nHalf, osK; double L; } Detector;
+static int nextpow2(double x);
+
+/* In-place radix-2 FFT of n (a power of 2) complex values; inverse: sign +1, without 1/n. */
+static void fft_c(double *re, double *im, int n, int inverse)
+{
+    for (int i = 1, j = 0; i < n; i++) {                  /* bit reversal */
+        int bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) { double t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+    }
+    for (int len = 2; len <= n; len <<= 1) {
+        const double a = (inverse ? 2.0 : -2.0) * PI / len;
+        for (int i = 0; i < n; i += len)
+            for (int k = 0; k < len / 2; k++) {
+                const double c = cos(a * k), s = sin(a * k);
+                const int u = i + k, v = i + k + len / 2;
+                const double xr = re[v] * c - im[v] * s, xi = re[v] * s + im[v] * c;
+                re[v] = re[u] - xr;  im[v] = im[u] - xi;
+                re[u] += xr;         im[u] += xi;
+            }
+    }
+}
+
+typedef struct { double a, b, p; } BetaInv;
+static double betainv_f(double x, const void *ctx)
+{
+    const BetaInv *g = ctx;
+    return betainc_i(x, g->a, g->b) - g->p;
+}
+
+/* MATLAB betaincinv(p, a, b): x with I_x(a, b) = p. */
+static double betaincinv(double p, double a, double b)
+{
+    if (p <= 0) return 0.0;
+    if (p >= 1) return 1.0;
+    BetaInv g = { a, b, p };
+    return fzero_brent(betainv_f, &g, 0.0, 1.0);
+}
+
+/* cfar_ce_table.m: [log z; log G(z)] of the censored mean of the m smallest of N Gamma(L) cells
+ * of mean 1 (CE-CFAR): conditioned on the m-th smallest cell t, the sum of the other m-1 kept
+ * cells by the FFT of the (m-1)-fold convolution of their lattice probabilities, integrated over
+ * the Beta distribution of F(t) by Gauss-Legendre panels in log(v). nz points. */
+#define CE_NZ 1500
+static void ce_table(int N, int m, double L, double *lz, double *lG)
+{
+    static const double x8[8] = { -0.9602898564975363, -0.7966664774136267, -0.5255324099163290, -0.1834346424956498,
+                                   0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363 };
+    static const double g8[8] = { 0.1012285362903763, 0.2223810344533745, 0.3137066458778873, 0.3626837833783620,
+                                  0.3626837833783620, 0.3137066458778873, 0.2223810344533745, 0.1012285362903763 };
+    const int nz = CE_NZ, nPan = 35, n = m - 1, Kmax = 16384;
+    double *z = xcalloc(nz, sizeof(double)), *G = xcalloc(nz, sizeof(double));
+    for (int i = 0; i < nz; i++) {
+        lz[i] = log(1e-4) + (log(30.0) - log(1e-4)) * i / (nz - 1);   /* linspace */
+        z[i] = exp(lz[i]);
+    }
+    double *re = xcalloc(Kmax, sizeof(double)), *im = xcalloc(Kmax, sizeof(double));
+    double *C = xcalloc(Kmax, sizeof(double)), *pos = xcalloc(Kmax, sizeof(double)), *c = xcalloc(520, sizeof(double));
+    for (int k = 0; k < nPan; k++) {
+        const double e0 = -70.0 + 70.0 * k / nPan, e1 = -70.0 + 70.0 * (k + 1) / nPan, h = e1 - e0;
+        for (int i = 0; i < 8; i++) {
+            const double v = exp((e0 + e1) / 2 + x8[i] * h / 2), wv = g8[i] * h / 2 * v;
+            const double u = betaincinv(v, m, N - m + 1);
+            const double t = gammaincinv(u, L) / L;
+            if (n == 0) {
+                for (int q = 0; q < nz; q++) G[q] += wv * (m * z[q] >= t);
+                continue;
+            }
+            int K1 = (Kmax - 1) / n;
+            K1 = K1 > 512 ? 512 : K1 < 4 ? 4 : K1;
+            const double hc = t / K1;
+            for (int q = 0; q <= K1; q++) c[q] = gammainc_p(L * hc * q, L);
+            const int Mv = n * (K1 - 1) + 1, M = 1 << nextpow2(Mv);
+            for (int q = 0; q < M; q++) { re[q] = q < K1 ? (c[q + 1] - c[q]) / c[K1] : 0.0; im[q] = 0.0; }
+            fft_c(re, im, M, 0);
+            for (int q = 0; q < M; q++) {                 /* F.^n (polar form: |F|^n, n arg F) */
+                const double r = hypot(re[q], im[q]), a = atan2(im[q], re[q]);
+                const double rn = pow(r, n);
+                re[q] = rn * cos(n * a);
+                im[q] = rn * sin(n * a);
+            }
+            fft_c(re, im, M, 1);
+            double acc = 0.0;
+            for (int q = 0; q < Mv; q++) {
+                acc += re[q] / M;
+                C[q] = acc;
+                pos[q] = (q + n / 2.0 + 0.5) * hc;
+            }
+            for (int q = 0; q < nz; q++) {               /* interp1(pos, C, m z - t) */
+                const double y = m * z[q] - t;
+                double gy;
+                if (y < pos[0]) gy = 0.0;
+                else if (y > pos[Mv - 1]) gy = 1.0;
+                else {
+                    int j = (int)floor(y / hc - n / 2.0 - 0.5);
+                    if (j < 0) j = 0;
+                    if (j > Mv - 2) j = Mv - 2;
+                    gy = C[j] + (C[j + 1] - C[j]) * (y - pos[j]) / (pos[j + 1] - pos[j]);
+                }
+                G[q] += wv * gy;
+            }
+        }
+    }
+    int i12 = -1, i9 = -1;
+    for (int q = 0; q < nz; q++) {
+        G[q] = G[q] < 0 ? 0 : G[q] > 1 ? 1 : G[q];
+        lG[q] = log(G[q] > 2.2250738585072014e-308 ? G[q] : 2.2250738585072014e-308);
+        if (i12 < 0 && G[q] >= 1e-12) i12 = q;
+        if (i9 < 0 && G[q] >= 1e-9) i9 = q;
+    }
+    if (i12 > 0 && i9 > i12) {                             /* the tail below 1e-12: the line through 1e-12, 1e-9 */
+        const double s = (lG[i9] - lG[i12]) / (lz[i9] - lz[i12]);
+        for (int q = 0; q < i12; q++) lG[q] = lG[i12] + s * (lz[q] - lz[i12]);
+    }
+    free(z); free(G); free(re); free(im); free(C); free(pos); free(c);
+}
+
+/* The CFAR detector (sys.cfar): type 0 CA, 1 GO, 2 SO, 3 OS, 4 CE (with the table of its statistic). */
+typedef struct { int type, nTrain, nHalf, osK; double L; int ceKeep; const double *ceLz, *ceLG; } Detector;
 
 /* cfar_statistic.m: P(Z <= z) of the noise statistic for Gamma(L) noise of mean 1. */
 static double cfar_statistic(double z, const Detector *c)
@@ -343,6 +461,19 @@ static double cfar_statistic(double z, const Detector *c)
     case 0: return gammainc_p(c->nTrain * L * z, c->nTrain * L);
     case 1: { const double F = gammainc_p(c->nHalf * L * z, c->nHalf * L); return F * F; }
     case 2: { const double F = gammainc_p(c->nHalf * L * z, c->nHalf * L); return F * (2 - F); }
+    case 4: {                                             /* CE: the table, log G linear in log z */
+        if (!(z > 0)) return 0.0;
+        const double *x = c->ceLz, *y = c->ceLG, l = log(z);
+        double lg;
+        if (l < x[0]) lg = y[0] + (y[1] - y[0]) / (x[1] - x[0]) * (l - x[0]);
+        else if (l > x[CE_NZ - 1]) lg = 0.0;
+        else {
+            int lo = 0, hi = CE_NZ - 1;
+            while (hi - lo > 1) { const int mid = (lo + hi) / 2; if (x[mid] <= l) lo = mid; else hi = mid; }
+            lg = y[lo] + (y[hi] - y[lo]) * (l - x[lo]) / (x[hi] - x[lo]);
+        }
+        return exp(lg < 0 ? lg : 0.0);
+    }
     default: return betainc_i(gammainc_p(L * z, L), c->osK, c->nTrain - c->osK + 1);
     }
 }
@@ -663,6 +794,8 @@ static void taylor_window(int N, int nbar, double sll_dB, double *w)
     }
 }
 
+#include "window_impl.h"
+
 typedef struct {
     double fs, fsOut;
     int    D1, D2, L1, L2;
@@ -715,14 +848,14 @@ static void conv_c(const double *ar, const double *ai, int na, const double *br,
         }
 }
 
-static void compression_filter(Wave *w, const Ddc *ddc, int taylorNbar, double taylorSll_dB)
+static void compression_filter(Wave *w, const Ddc *ddc, const WinSpec *rangeWin)
 {
     const double fsOut = ddc->fsOut;
     const int Lp = (int)lround(w->width_s * fsOut);
     double *win = xcalloc((size_t)Lp, sizeof(double));
     double *hmr = xcalloc((size_t)Lp, sizeof(double)), *hmi = xcalloc((size_t)Lp, sizeof(double));
     if (w->phaseCode) for (int k = 0; k < Lp; k++) win[k] = 1.0;
-    else taylor_window(Lp, taylorNbar, taylorSll_dB, win);
+    else window_eval(rangeWin, Lp, NULL, 0, win);           /* cfg.proc.rangeWindow (default Taylor) */
     for (int k = 0; k < Lp; k++) {                        /* conj(flipud(ref .* win)) */
         double re, im;
         envelope(w, (k + 0.5) / fsOut, &re, &im);
@@ -877,6 +1010,8 @@ typedef struct {
     double sumPri, pri0;      /* sum of the stagger PRIs, the (first) PRI [s]              */
     const Wave *wv;           /* the sub-pulses (range cells beyond cfg.mti.maxRange_m)     */
     double maxRange;          /* cfg.rx.maxRange_m                                         */
+    const double *pri;        /* [nStagger] the PRIs (NUFFT: the sample times)              */
+    double lambda;            /* c / cfg.fc (NUFFT velocity grid)                           */
 } SlowIn;
 
 typedef struct {
@@ -885,7 +1020,123 @@ typedef struct {
     double *win;              /* [rowLen] Doppler window (cfg.proc.dopplerWindow), unit energy */
     double *fHz;              /* [nfft] Doppler axis                                       */
     double *noiseGain;        /* [2 nfft]: filtered cells, then the cells beyond mtiMaxRange */
+    int method;               /* 0 FFT, 1 NUFFT (cfg.proc.staggerDoppler = 'nufft')          */
+    int zeroBin;              /* NUFFT: bin of zero velocity (0-based, -1: none)            */
+    int nStagger;
+    double *nufftRe, *nufftIm;    /* NUFFT: [nStagger][nfft][rowLen]                      */
+    double *nufftGain;        /* NUFFT: [nStagger][nfft] gain without the clutter filter     */
 } SlowTime;
+/* Staggered PRF with cfg.proc.staggerDoppler = 'nufft' (nufft_setup of setup_radar.m): the
+ * non-uniform DFT of the nOut MTI outputs of the CPI on nfft velocity bins, one matrix per stagger
+ * position of the oldest output (window at the sample times, density compensation, rows scaled
+ * for unit noise power after the MTI of that phase); the gain of the cells without clutter filter. */
+static SlowTime nufft_setup(const SlowIn *in, int cpiLength, int nOut)
+{
+    const int nS = in->nStagger, L = in->nTaps, n = cpiLength;
+    const double lam = in->lambda;
+    if (nOut < 2)
+        fail("The CPI of %d pulses is too short for the MTI and the Doppler processing (cfg.proc.cpiLength).", cpiLength);
+    int K = 1 << nextpow2(nOut);
+    if (has("proc.nufft.nPoints") && !empty("proc.nufft.nPoints")) {
+        const double v = num("proc.nufft.nPoints");
+        if (!(v >= 2 && v <= 65536 && v == floor(v)))
+            fail("cfg.proc.nufft.nPoints must be a whole number 2 ... 65536 (velocity bins of the NUFFT).");
+        K = (int)v;
+    }
+    double vMax = lam / (4.0 * in->meanPri), vMin = -vMax;
+    if (has("proc.nufft.vMax_mps") && !empty("proc.nufft.vMax_mps")) vMax = num("proc.nufft.vMax_mps");
+    if (has("proc.nufft.vMin_mps") && !empty("proc.nufft.vMin_mps")) vMin = num("proc.nufft.vMin_mps");
+    if (!isfinite(vMax) || !isfinite(vMin) || !(vMax > vMin))
+        fail("cfg.proc.nufft.vMin_mps must be smaller than vMax_mps (finite velocities [m/s]).");
+    const int dens = has("proc.nufft.densityComp") && !empty("proc.nufft.densityComp") ? num("proc.nufft.densityComp") != 0 : 1;
+    const WinSpec ws = window_spec("proc.nufft.", "window", "hamming");
+    const double dv = (vMax - vMin) / K, df = 2.0 * dv / lam;
+    double *f = xcalloc((size_t)K, sizeof(double));
+    for (int j = 0; j < K; j++) f[j] = -2.0 * vMax / lam + j * df;
+    double *Are = xcalloc((size_t)nS * K * nOut, sizeof(double)), *Aim = xcalloc((size_t)nS * K * nOut, sizeof(double));
+    double *gB = xcalloc((size_t)nS * K, sizeof(double));
+    double *t = xcalloc((size_t)n, sizeof(double)), *x = xcalloc((size_t)nOut, sizeof(double));
+    double *w = xcalloc((size_t)nOut, sizeof(double)), *g = xcalloc((size_t)K, sizeof(double));
+    double *br = xcalloc((size_t)n, sizeof(double)), *bi = xcalloc((size_t)n, sizeof(double));
+    int *pos = xcalloc((size_t)n, sizeof(int));
+    for (int p = 0; p < nS; p++) {
+        for (int k = 0; k < n; k++) pos[k] = (p + k) % nS;
+        t[0] = 0.0;
+        for (int k = 0; k + 1 < n; k++) t[k + 1] = t[k] + in->pri[pos[k]];
+        for (int m = 0; m < nOut; m++) x[m] = t[m] / t[nOut - 1];
+        window_eval(&ws, nOut, x, nOut, w);
+        if (dens) {
+            double mean = 0.0;
+            double *dd = xcalloc((size_t)nOut, sizeof(double));
+            for (int m = 0; m < nOut; m++) {
+                dd[m] = m == 0 ? t[1] - t[0] : m == nOut - 1 ? t[nOut - 1] - t[nOut - 2] : (t[m + 1] - t[m - 1]) / 2.0;
+                mean += dd[m];
+            }
+            mean /= nOut;
+            for (int m = 0; m < nOut; m++) w[m] *= dd[m] / mean;
+            free(dd);
+        }
+        double *ar = Are + (size_t)p * K * nOut, *ai = Aim + (size_t)p * K * nOut;
+        double gMax = 0.0;
+        for (int j = 0; j < K; j++) {
+            for (int m = 0; m < nOut; m++) {
+                const double ph = -2.0 * PI * f[j] * t[m];
+                ar[(size_t)j * nOut + m] = w[m] * cos(ph);
+                ai[(size_t)j * nOut + m] = w[m] * sin(ph);
+            }
+            for (int c = 0; c < n; c++) br[c] = bi[c] = 0.0;      /* b = a_j H: H(m, m + l) = w(pos(m), l) */
+            for (int m = 0; m < nOut; m++)
+                for (int l = 0; l < L; l++) {
+                    const double h = in->mti[pos[m] * L + l];
+                    br[m + l] += ar[(size_t)j * nOut + m] * h;
+                    bi[m + l] += ai[(size_t)j * nOut + m] * h;
+                }
+            double s = 0.0;
+            for (int c = 0; c < n; c++) s += br[c] * br[c] + bi[c] * bi[c];
+            g[j] = s;
+            gMax = s > gMax ? s : gMax;
+        }
+        for (int j = 0; j < K; j++) {
+            const double sc = 1.0 / sqrt(g[j] > 2.220446049250313e-16 * gMax ? g[j] : 2.220446049250313e-16 * gMax);
+            double sb = 0.0;
+            for (int m = 0; m < nOut; m++) {
+                ar[(size_t)j * nOut + m] *= sc;
+                ai[(size_t)j * nOut + m] *= sc;
+                sb += ar[(size_t)j * nOut + m] * ar[(size_t)j * nOut + m] + ai[(size_t)j * nOut + m] * ai[(size_t)j * nOut + m];
+            }
+            gB[(size_t)p * K + j] = sb;
+        }
+    }
+    double *win = xcalloc((size_t)nOut, sizeof(double)), wn = 0.0;
+    const double mainlobe = window_eval(&ws, nOut, NULL, 0, win);
+    for (int m = 0; m < nOut; m++) wn += win[m] * win[m];
+    wn = sqrt(wn);
+    for (int m = 0; m < nOut; m++) win[m] /= wn;
+    const double notchWidth = num("cfar.notchWidth");
+    const double notchMaxRange_m = num("cfar.notchMaxRange_m");
+    const int notchBins = (int)lround(notchWidth * mainlobe / (nOut * in->meanPri) / df);
+    int zeroBin = (int)lround(2.0 * vMax / lam / df);
+    if (!(zeroBin >= 0 && zeroBin < K && fabs(f[zeroBin]) <= df / 2 * (1 + 1e-9))) zeroBin = -1;
+    if (zeroBin >= 0 && !(notchMaxRange_m < in->maxRange) && 2 * notchBins + 1 >= K)
+        fail("The MTI notch (cfg.cfar.notchWidth = %g: +-%d bins) covers every Doppler bin (NUFFT %d points).",
+             notchWidth, notchBins, K);
+    double mtiMaxRange = INFINITY;
+    if (has("mti.maxRange_m") && !empty("mti.maxRange_m")) mtiMaxRange = num("mti.maxRange_m");
+    if (isnan(mtiMaxRange) || mtiMaxRange < 0)
+        fail("cfg.mti.maxRange_m must be a non-negative scalar range in metres (Inf is allowed).");
+    double *noiseGain = xcalloc((size_t)(2 * K), sizeof(double));
+    for (int j = 0; j < 2 * K; j++) noiseGain[j] = 1.0;
+    SlowTime st;
+    memset(&st, 0, sizeof st);
+    st.cpiLength = cpiLength;  st.nRows = 1;  st.rowLen = nOut;  st.nfft = K;  st.notchBins = notchBins;
+    st.rowPri = 1.0 / (K * df);  st.notchMaxRange_m = notchMaxRange_m;  st.nLooks = 1.0;  st.medianToMean = log(2.0);
+    st.mtiMaxRange = mtiMaxRange;  st.win = win;  st.fHz = f;  st.noiseGain = noiseGain;
+    st.method = 1;  st.zeroBin = zeroBin;  st.nStagger = nS;  st.nufftRe = Are;  st.nufftIm = Aim;  st.nufftGain = gB;
+    free(t); free(x); free(w); free(g); free(br); free(bi); free(pos);
+    return st;
+}
+
+
 
 /* CPI length, Doppler rows, FFT length, window, Doppler axis, noise gain and looks of every
  * Doppler bin, MTI notch and median/mean of the noise: everything that depends on the PRI
@@ -916,6 +1167,11 @@ static SlowTime slow_time(const SlowIn *in)
     }
     if (staggered) cpiLength = nStagger * (cpiLength / nStagger);
     const int nOut = cpiLength - (nTaps - 1);
+    if (staggered && has("proc.staggerDoppler") && !empty("proc.staggerDoppler")) {   /* cfg.proc.staggerDoppler */
+        const char *m = str("proc.staggerDoppler");
+        if (same_text(m, "nufft")) return nufft_setup(in, cpiLength, nOut);
+        if (!same_text(m, "deinterleave")) fail("cfg.proc.staggerDoppler must be 'deinterleave' or 'nufft'.");
+    }
     int nRows, rowLen;
     double rowPri;
     if (staggered) { nRows = nStagger; rowLen = nOut >= 0 ? nOut / nRows : -1; rowPri = sumPri; }
@@ -928,26 +1184,10 @@ static SlowTime slow_time(const SlowIn *in)
         fail("The CPI of %d pulses is too short for the MTI and the Doppler processing (cfg.proc.cpiLength).", cpiLength);
     /* window of the Doppler FFT (cfg.proc.dopplerWindow, default 'hamming') and its mainlobe
      * half-width in units of nfft/rowLen bins (doppler_window of setup_radar.m) */
-    const char *wname = has("proc.dopplerWindow") && !empty("proc.dopplerWindow") ? str("proc.dopplerWindow") : "hamming";
-    int wType, mainlobe;
-    if (same_text(wname, "hamming")) { wType = 0; mainlobe = 2; }
-    else if (same_text(wname, "hann")) { wType = 1; mainlobe = 2; }
-    else if (same_text(wname, "blackman")) { wType = 2; mainlobe = 3; }
-    else if (same_text(wname, "rect") || same_text(wname, "rectangular") || same_text(wname, "none")) { wType = 3; mainlobe = 1; }
-    else fail("cfg.proc.dopplerWindow must be 'hamming', 'hann', 'blackman' or 'rect'.");
+    const WinSpec dopWin = window_spec("proc.", "dopplerWindow", "hamming");
     double *win = xcalloc((size_t)rowLen, sizeof(double)), wn = 0;
-    int anyNonZero = 0;
-    for (int j = 0; j < rowLen; j++) {
-        const double x = 2 * PI * j / (rowLen > 1 ? rowLen - 1 : 1);
-        win[j] = wType == 0 ? 0.54 - 0.46 * cos(x) : wType == 1 ? 0.5 - 0.5 * cos(x)
-               : wType == 2 ? 0.42 - 0.5 * cos(x) + 0.08 * cos(2 * x) : 1.0;
-        if (rowLen == 1) win[j] = 1.0;
-        anyNonZero |= win[j] != 0;
-    }
-    for (int j = 0; j < rowLen; j++) {
-        if (!anyNonZero) win[j] = 1.0;
-        wn += win[j] * win[j];
-    }
+    const double mainlobe = window_eval(&dopWin, rowLen, NULL, 0, win);
+    for (int j = 0; j < rowLen; j++) wn += win[j] * win[j];
     wn = sqrt(wn);
     for (int j = 0; j < rowLen; j++) win[j] /= wn;
     double *fHz = xcalloc((size_t)nfft, sizeof(double));
@@ -1055,7 +1295,7 @@ static SlowTime slow_time(const SlowIn *in)
     const double medianToMean = fzero_brent(median_f, &mc, 0.1, 2.0);
 
     SlowTime st = { cpiLength, nRows, rowLen, nfft, notchBins, rowPri, notchMaxRange_m, nLooks, medianToMean,
-                    mtiMaxRange, win, fHz, noiseGain };
+                    mtiMaxRange, win, fHz, noiseGain , 0, 0, 0, NULL, NULL, NULL };
     free(Cre);
     free(Cim);
     return st;
@@ -1095,14 +1335,16 @@ static void export_config(void)
     }
     int cfarType = 0;
     if (has("cfar.type") && !empty("cfar.type")) {
-        static const char *const types[4] = { "ca", "go", "so", "os" };
+        static const char *const types[5] = { "ca", "go", "so", "os", "ce" };
         const char *t = str("cfar.type");
         cfarType = -1;
-        for (int i = 0; i < 4; i++) if (same_text(t, types[i])) cfarType = i;
-        if (cfarType < 0) fail("cfg.cfar.type must be 'ca', 'go', 'so' or 'os'.");
+        for (int i = 0; i < 5; i++) if (same_text(t, types[i])) cfarType = i;
+        if (cfarType < 0) fail("cfg.cfar.type must be 'ca', 'go', 'so', 'os' or 'ce'.");
     }
     const double osRank = has("cfar.osRank") && !empty("cfar.osRank") ? num("cfar.osRank") : 0.9;
     if (!(osRank > 0 && osRank <= 1)) fail("cfg.cfar.osRank must lie in (0, 1].");
+    const double ceCensor = has("cfar.ceCensor") && !empty("cfar.ceCensor") ? num("cfar.ceCensor") : 0.1;
+    if (!(ceCensor >= 0 && ceCensor < 1)) fail("cfg.cfar.ceCensor must lie in [0, 1).");
     snprintf(p, sizeof p, "%s.pfa", mkey); pfa = num(p);
     snprintf(p, sizeof p, "%s.threshold_dB", mkey);
     if (!empty(p)) thr_dB = num(p);
@@ -1155,6 +1397,14 @@ static void export_config(void)
     const double rpm = rpm_choice(&nAvRpm), rate = rpm * 360.0 / 60.0;
     const int nCh = (int)num("ant.nElements");
     const double tilt = num("ant.tilt_deg");
+    /* the channels processed: the first cfg.rx.nChannelsUsed ([] or missing: all) */
+    int nChUsed = nCh;
+    if (has("rx.nChannelsUsed") && !empty("rx.nChannelsUsed")) {
+        const double v = num("rx.nChannelsUsed");
+        if (!(v >= 1 && v <= nCh && v == floor(v)))
+            fail("cfg.rx.nChannelsUsed must be a whole number 1 ... cfg.ant.nElements = %d (or [] = all).", nCh);
+        nChUsed = (int)v;
+    }
 
     /* DDC filters and rates (ddc_decimation.m) */
     const double outRate = num("ddc.outputRate_Hz");
@@ -1429,9 +1679,8 @@ static void export_config(void)
             }
         }
     }
-    const int taylorNbar = (int)num("proc.taylorNbar");
-    const double taylorSll = num("proc.taylorSll_dB");
-    for (int i = 0; i < 2; i++) compression_filter(&wv[i], &ddc, taylorNbar, taylorSll);
+    const WinSpec rangeWin = window_spec("proc.", "rangeWindow", "taylor");
+    for (int i = 0; i < 2; i++) compression_filter(&wv[i], &ddc, &rangeWin);
     if (haveCodes) mat_free(&codes);
     Wave *ws = &wv[0], *wl = &wv[1];
     if (!ws->enable && !wl->enable) fail("Both sub-pulses are switched off (cfg.wave.short.enable, cfg.wave.long.enable).");
@@ -1573,8 +1822,9 @@ static void export_config(void)
         w->testLast = last;
     }
 
-    /* DBF */
-    const int dbf = nCh > 1;
+    /* DBF (the first nChUsed elements: the first nChUsed columns of the matrix, every beam scaled to
+     * unit noise gain again, unless the matrix has nChUsed columns) */
+    const int dbf = nChUsed > 1;
     int nBeams = 1;
     double *wRe = NULL, *wIm = NULL, *beamU = NULL, *beamElKeep = NULL;
     int wCplx = 0;
@@ -1592,7 +1842,7 @@ static void export_config(void)
             build_dbf(nCh, num("ant.elementSpacing_lambda"), tilt, lambda, wRe, wIm, beamEl);
         } else {
             const MatVar *W = mat_var(&df, "W", "dbf"), *el = mat_var(&df, "beamEl_deg", "dbf");
-            if ((int)W->cols != nCh)
+            if ((int)W->cols != nCh && (int)W->cols != nChUsed)
                 fail("The DBF matrix has %d columns but cfg.ant.nElements = %d.", (int)W->cols, nCh);
             nBeams = (int)el->numel;
             if ((int)W->rows != nBeams) fail("cfg.files.dbf: W has %d rows but beamEl_deg %d values", (int)W->rows, nBeams);
@@ -1603,6 +1853,17 @@ static void export_config(void)
             if (W->im) memcpy(wIm, W->im, sizeof(double) * W->numel);
             beamEl = xcalloc((size_t)nBeams, sizeof(double));
             memcpy(beamEl, el->re, sizeof(double) * (size_t)nBeams);
+        }
+        {                                                /* the sub-array of the first nChUsed elements */
+            const int cols = stale ? nCh : (int)mat_var(&df, "W", "dbf")->cols;
+            if (cols != nChUsed) {
+                for (int b = 0; b < nBeams; b++) {
+                    double nrm = 0;
+                    for (int k = 0; k < nChUsed; k++) nrm += wRe[b + k * nBeams] * wRe[b + k * nBeams] + wIm[b + k * nBeams] * wIm[b + k * nBeams];
+                    nrm = sqrt(nrm);
+                    for (int k = 0; k < nChUsed; k++) { wRe[b + k * nBeams] /= nrm; wIm[b + k * nBeams] /= nrm; }
+                }
+            }
         }
         beamU = xcalloc((size_t)nBeams, sizeof(double));
         for (int b = 0; b < nBeams; b++) beamU[b] = sind(beamEl[b] - tilt);
@@ -1622,7 +1883,7 @@ static void export_config(void)
     }
 
     /* CPI and Doppler processing (slow_time below; scan-to-scan PRF: once per PRF of the scans) */
-    SlowIn sin_ = { azBeamwidth / rate, meanPri, staggered, nStagger, nTaps, mti, sumPri, pri[0], wv, maxRange };
+    SlowIn sin_ = { azBeamwidth / rate, meanPri, staggered, nStagger, nTaps, mti, sumPri, pri[0], wv, maxRange, pri, lambda };
     SlowTime stv = slow_time(&sin_);
     const int cpiLength = stv.cpiLength, nRows = stv.nRows, rowLen = stv.rowLen, nfft = stv.nfft;
     const double rowPri = stv.rowPri;
@@ -1645,12 +1906,22 @@ static void export_config(void)
     const int nOuter = (2 * (guardR + trainR) + 1) * (2 * (guardD + trainD) + 1);
     const int nGuard = (2 * guardR + 1) * (2 * guardD + 1);
     const int nTrain = nOuter - nGuard;
-    Detector det = { cfarType, nTrain, 0, 0, nLooks };
+    Detector det = { cfarType, nTrain, 0, 0, nLooks, 0, NULL, NULL };
     det.nHalf = cfarMethod == 2 ? trainD
               : (guardR + trainR) * (2 * (guardD + trainD) + 1) - guardR * (2 * guardD + 1);
     {
         const double k = round(osRank * nTrain);
         det.osK = (int)(k < 1 ? 1 : k > nTrain ? nTrain : k);
+    }
+    det.ceKeep = nTrain - (int)lround(ceCensor * nTrain);           /* CE: the cells averaged */
+    double *ceLz = NULL, *ceLG = NULL;
+    if (cfarType == 4) {
+        if (det.ceKeep < 1) fail("cfg.cfar.ceCensor = %g leaves no training cell of the %d (CE-CFAR).", ceCensor, nTrain);
+        ceLz = xcalloc(CE_NZ, sizeof(double));
+        ceLG = xcalloc(CE_NZ, sizeof(double));
+        ce_table(nTrain, det.ceKeep, nLooks, ceLz, ceLG);
+        det.ceLz = ceLz;
+        det.ceLG = ceLG;
     }
     if ((cfarType == 1 || cfarType == 2) && det.nHalf < 1)
         fail("cfg.cfar.type = '%s' needs training cells on both sides of the cell (cfg.cfar.%s).",
@@ -1723,12 +1994,13 @@ static void export_config(void)
     /* records, in the order of export_receiver_config.m                */
     /* ---------------------------------------------------------------- */
     rec_scalar("nCh", nCh);
+    rec_scalar("nChUsed", nChUsed);
     rec_scalar("nBeams", nBeams);
     rec_scalar("dbfEnabled", dbf);
-    if (dbf) {
-        Rec *r = add_rec("W", nBeams, nCh, wCplx);
-        memcpy(r->re, wRe, sizeof(double) * (size_t)(nBeams * nCh));
-        if (wCplx) memcpy(r->im, wIm, sizeof(double) * (size_t)(nBeams * nCh));
+    if (dbf) {                                           /* the first nChUsed columns (column-major) */
+        Rec *r = add_rec("W", nBeams, nChUsed, wCplx);
+        memcpy(r->re, wRe, sizeof(double) * (size_t)(nBeams * nChUsed));
+        if (wCplx) memcpy(r->im, wIm, sizeof(double) * (size_t)(nBeams * nChUsed));
     }
     rec_vec("beamU", beamU, nBeams, 1);
     rec_scalar("tilt_deg", tilt);
@@ -1788,6 +2060,21 @@ static void export_config(void)
     rec_vec("noiseGainBypass", noiseGainB, nfft, 0);
     rec_vec("dopFreq_Hz", fHz, nfft, 0);
     rec_scalar("notchBins", notchBins);
+    if (stv.method == 1) {                               /* staggered PRF, cfg.proc.staggerDoppler = 'nufft' */
+        rec_scalar("dopplerMethod", 1);
+        rec_scalar("zeroBin", stv.zeroBin);
+        const int K = stv.nfft, N = stv.rowLen, S = stv.nStagger;
+        Rec *r = add_rec("nufftA", K * S, N, 1);          /* row p*K + j, column-major */
+        for (int p2 = 0; p2 < S; p2++)
+            for (int j = 0; j < K; j++)
+                for (int m = 0; m < N; m++) {
+                    r->re[(p2 * K + j) + (size_t)K * S * m] = stv.nufftRe[((size_t)p2 * K + j) * N + m];
+                    r->im[(p2 * K + j) + (size_t)K * S * m] = stv.nufftIm[((size_t)p2 * K + j) * N + m];
+                }
+        Rec *gr = add_rec("nufftBypassGain", K, S, 0);    /* [K x S] */
+        for (int p2 = 0; p2 < S; p2++)
+            for (int j = 0; j < K; j++) gr->re[j + (size_t)K * p2] = stv.nufftGain[(size_t)p2 * K + j];
+    }
     rec_scalar("notchMaxRange_m", notchMaxRange_m);
     rec_scalar("medianToMean", medianToMean);
     rec_scalar("cfarMethod", cfarMethod);
@@ -1801,6 +2088,11 @@ static void export_config(void)
     rec_scalar("cfarType", cfarType);
     rec_scalar("cfarNHalf", det.nHalf);
     rec_scalar("cfarOsK", det.osK);
+    rec_scalar("cfarCeKeep", det.ceKeep);
+    if (cfarType == 4) {                                 /* CE: [log z; log G] of the statistic */
+        Rec *r = add_rec("cfarCeTable", 2, CE_NZ, 0);
+        for (int i = 0; i < CE_NZ; i++) { r->re[2 * i] = ceLz[i]; r->re[2 * i + 1] = ceLG[i]; }
+    }
     rec_scalar("cfarNoiseScale", noiseScale);
     rec_scalar("nLooks", nLooks);
     rec_scalar("sidelobeMargin_dB", num("prune.sidelobeMargin_dB"));
@@ -1996,7 +2288,7 @@ static void export_config(void)
         printf("%d element(s), %d beam(s), DDC %d samples at %.0f MHz; short %d / long %d range cells; CPI %d "
                "pulses, FFT %d x %d row(s); clutter filter %s (%d taps); CFAR %s %s, alpha %.2f dB (Pfa %.1e, %.2f looks)\n",
                nCh, nBeams, nDdc, fsOut / 1e6, ws->nRange, wl->nRange, cpiLength, nfft, nRows,
-               mtiFir ? "FIR" : "canceller", nTaps, cfarType == 0 ? "CA" : cfarType == 1 ? "GO" : cfarType == 2 ? "SO" : "OS",
+               mtiFir ? "FIR" : "canceller", nTaps, cfarType == 0 ? "CA" : cfarType == 1 ? "GO" : cfarType == 2 ? "SO" : cfarType == 3 ? "OS" : "CE",
                method, 10 * log10(alpha), cfar_pfa(alpha, &det), nLooks);
         printf("Radar mode %d%s%s: short %s, long %s; %g rpm (of %d available)\n", radarMode, has("modes.name") ? " " : "",
                has("modes.name") ? str("modes.name") : "",
@@ -2015,9 +2307,9 @@ static void export_config(void)
         }
     }
     (void)trackEnable;
-    free(beamElKeep); free(g_qs); free(g_qw); g_qs = g_qw = NULL;
+    free(beamElKeep); free(g_qs); free(g_qw); g_qs = g_qw = NULL; free(ceLz); free(ceLG);
     free(pri); free(mti); free(tDdc); free(wRe); free(wIm); free(beamU); free(win); free(fHz);
-    free(noiseGain); free(ddc.h1); free(ddc.h2);
+    free(noiseGain); free(ddc.h1); free(ddc.h2); free(stv.nufftRe); free(stv.nufftIm); free(stv.nufftGain);
     for (int j = 0; j < nScanPrf; j++) { free(s2s[j].win); free(s2s[j].fHz); free(s2s[j].noiseGain); }
     free(s2s); free(scanPrf);
     for (int i = 0; i < 2; i++) {

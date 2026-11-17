@@ -2,10 +2,12 @@
  * processor.c - receiver processing chain of one PRI, for the short and the
  * long sub-pulse separately (same algorithms as the MATLAB simulator):
  *
- *   DDC output (int16 I/Q) -> DBF -> matched filter -> CPI buffer -> MTI
- *   -> Doppler (window, FFT, non-coherent integration of rows, noise-gain
- *   equalisation) -> 2-D CA-CFAR -> pruning -> detection reports -> peak
- *   interpolation (Doppler, elevation) -> plot extraction.
+ *   DDC output (int16 I/Q, the first nChUsed channels) -> DBF -> matched filter
+ *   -> CPI buffer -> MTI -> Doppler (window, FFT, non-coherent integration of
+ *   rows, noise-gain equalisation; or, staggered PRF with the NUFFT, the
+ *   non-uniform DFT of the whole CPI) -> 2-D CFAR (CA, GO, SO, OS, CE) ->
+ *   pruning -> detection reports -> peak interpolation (Doppler, elevation)
+ *   -> plot extraction.
  *
  * Speed: long matched filters run as fast convolution (FFT, the valid
  * convolution within float rounding; a single beam as a four-step FFT whose
@@ -71,6 +73,7 @@ typedef struct {
     int    mfLast;                          /* newest slot of cpiRe/cpiIm         */
     int    sinceUpdate;                     /* pulses since the last performed update */
     int    mtiLast, mtiCount;               /* MTI ring state                     */
+    uint16_t *mtiStag;          /* stagger position of every MTI output (of its oldest pulse) */
     uint16_t *staggerIdx;       /* stagger position of every buffered pulse        */
     double   *az, *time;
     uint32_t newestPulse;
@@ -112,6 +115,7 @@ struct Processor {
     int nThreads;
     Scratch *scratch;           /* [nThreads] */
     int slowTime;               /* 0: skip the Doppler/CFAR updates (overload)    */
+    int logMask;                /* block outputs for the block callback (LOG_DBF, LOG_MF, LOG_DOPPLER) */
     double alpha;               /* CFAR threshold factor in use                   */
     Tracker tracker;            /* EKF tracker (cfg->trackEnable)                 */
     Detection *newPlots;        /* plots of the latest extractor update           */
@@ -266,7 +270,10 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
     /* buffers for the largest slow-time settings (scan-to-scan PRF: of all PRFs) */
     const int maxCpi = cfg->maxCpiLength > cfg->cpiLength ? cfg->maxCpiLength : cfg->cpiLength;
     const int maxNfft = cfg->maxNfft > cfg->nfft ? cfg->maxNfft : cfg->nfft;
-    if (fft_plan_init(&p->fft, cfg->nfft) != 0) { free(p); return NULL; }
+    const int maxRow = cfg->maxRowLen > cfg->rowLen ? cfg->maxRowLen : cfg->rowLen;
+    const int nChUsed = cfg->nChUsed > 0 ? cfg->nChUsed : cfg->nCh;
+    /* (the NUFFT has no FFT: its length need not be a power of 2) */
+    if (cfg->dopplerMethod == DOPPLER_FFT && fft_plan_init(&p->fft, cfg->nfft) != 0) { free(p); return NULL; }
     int maxNR = 1;
     for (int i = 0; i < N_PULSES; i++) {
         const PulseConfig *pc = &cfg->pulse[i];
@@ -282,7 +289,7 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
         s->nCells = cfg->nBeams * s->nR;
         s->nSlots = cfg->cpiLength;
         s->nMtiOut = cfg->cpiLength - cfg->nMtiTaps + 1;
-        size_t seg = (size_t)cfg->nCh * pc->ddcCount, beams = (size_t)cfg->nBeams * pc->ddcCount;
+        size_t seg = (size_t)nChUsed * pc->ddcCount, beams = (size_t)cfg->nBeams * pc->ddcCount;
         size_t cpi = (size_t)cfg->nMtiTaps * s->nCells;
         size_t mti = (size_t)(s->nCells + CELL_BLOCK - 1) / CELL_BLOCK * (maxCpi - cfg->nMtiTaps + 1) * CELL_BLOCK;
         size_t map = (size_t)maxNfft * s->nCells;
@@ -291,6 +298,7 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
         s->cpiRe = xcalloc(cpi, sizeof(float));   s->cpiIm = xcalloc(cpi, sizeof(float));
         s->mtiRe = xcalloc(mti, sizeof(float));   s->mtiIm = xcalloc(mti, sizeof(float));
         s->staggerIdx = xcalloc(maxCpi, sizeof(uint16_t));
+        s->mtiStag = xcalloc(maxCpi, sizeof(uint16_t));
         s->az = xcalloc(maxCpi, sizeof(double));
         s->time = xcalloc(maxCpi, sizeof(double));
         s->P = xcalloc(map, sizeof(float));
@@ -321,8 +329,9 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
     p->scratch = xcalloc(nThr, sizeof(Scratch));
     for (int t = 0; t < nThr; t++) {
         Scratch *w = &p->scratch[t];
-        w->xr = xcalloc((size_t)maxNfft * CELL_BLOCK, sizeof(float));
-        w->xi = xcalloc((size_t)maxNfft * CELL_BLOCK, sizeof(float));
+        const int nx = maxNfft > maxRow ? maxNfft : maxRow;      /* (NUFFT: the rowLen inputs of a block) */
+        w->xr = xcalloc((size_t)nx * CELL_BLOCK, sizeof(float));
+        w->xi = xcalloc((size_t)nx * CELL_BLOCK, sizeof(float));
         cfar_scratch_init(&w->cfar, cfg, maxNR);
         w->work = xcalloc((size_t)maxNfft * maxNR + 8, sizeof(float));
     }
@@ -337,7 +346,7 @@ void processor_destroy(Processor *p)
         PulseState *s = &p->ps[i];
         free(s->segRe); free(s->segIm); free(s->beamRe); free(s->beamIm);
         free(s->cpiRe); free(s->cpiIm); free(s->mtiRe); free(s->mtiIm);
-        free(s->staggerIdx); free(s->az); free(s->time);
+        free(s->staggerIdx); free(s->mtiStag); free(s->az); free(s->time);
         free(s->P); free(s->det); free(s->cntInv); free(s->thrScale); free(s->noise); free(s->lastMedian);
         free(s->pkM); free(s->pkA); free(s->pkE); free(s->pkD); free(s->pkT);
         free(s->reports);
@@ -362,6 +371,11 @@ void processor_destroy(Processor *p)
 void processor_set_slow_time(Processor *p, int enabled)
 {
     p->slowTime = enabled;
+}
+
+void processor_set_log(Processor *p, int mask)
+{
+    p->logMask = mask & (LOG_DBF | LOG_MF | LOG_DOPPLER);
 }
 
 void processor_set_cfar_alpha(Processor *p, double alpha)
@@ -396,7 +410,8 @@ static void load_segment(const RadarConfig *cfg, const PulseConfig *pc, const Pr
     const int k0 = pc->rxFirst > pc->ddcFirst ? pc->rxFirst - pc->ddcFirst : 0;      /* first inside   */
     const int rxEnd = pc->rxFirst + pc->rxCount - pc->ddcFirst;
     const int k1 = rxEnd < n ? rxEnd : n;                                            /* first after it */
-    for (int ch = 0; ch < cfg->nCh; ch++) {
+    const int nChUsed = cfg->nChUsed > 0 ? cfg->nChUsed : cfg->nCh;                  /* the first channels */
+    for (int ch = 0; ch < nChUsed; ch++) {
         const int16_t *src = pri->iq + 2 * ((size_t)ch * pri->nSamples + pc->ddcFirst + k0);   /* sample k0 */
         float *re = s->segRe + (size_t)ch * n, *im = s->segIm + (size_t)ch * n;
         memset(re, 0, sizeof(float) * k0);
@@ -414,7 +429,7 @@ static void load_segment(const RadarConfig *cfg, const PulseConfig *pc, const Pr
  * Three beams are updated per pass over a channel (fewer loads). */
 static void beamform(const RadarConfig *cfg, const PulseConfig *pc, PulseState *s, int nThreads)
 {
-    const int n = pc->ddcCount, nB = cfg->nBeams, nCh = cfg->nCh;
+    const int n = pc->ddcCount, nB = cfg->nBeams, nCh = cfg->nChUsed > 0 ? cfg->nChUsed : cfg->nCh;
     (void)nThreads;                                         /* without OpenMP */
     if (!cfg->dbfEnabled) {
         memcpy(s->beamRe, s->segRe, sizeof(float) * n);
@@ -621,6 +636,7 @@ static void mti_newest(const RadarConfig *cfg, const PulseConfig *pc, PulseState
     const int firstMf = (s->mfLast + 1) % L;                     /* its matched filter output  */
     const int nBlocks = (s->nCells + CELL_BLOCK - 1) / CELL_BLOCK;
     s->mtiLast = (s->mtiLast + 1) % s->nMtiOut;
+    s->mtiStag[s->mtiLast] = s->staggerIdx[first];
     for (int blk = 0; blk < nBlocks; blk++) {
         const int c0 = blk * CELL_BLOCK, nc = s->nCells - c0 < CELL_BLOCK ? s->nCells - c0 : CELL_BLOCK;
         float *restrict yr = mti_row(s, s->mtiRe, blk, s->mtiLast);
@@ -648,6 +664,64 @@ static void mti_newest(const RadarConfig *cfg, const PulseConfig *pc, PulseState
     if (s->mtiCount < s->nMtiOut) s->mtiCount++;
 }
 
+/* NUFFT (staggered PRF, cfg->dopplerMethod == DOPPLER_NUFFT): P[j][cell] = |sum_q A[p][j][q] x_q|^2
+ * over the newest rowLen MTI outputs x_q (oldest first), with the matrix of the stagger position p
+ * of the oldest one (its window, density compensation and noise scaling are in A); the cells
+ * beyond cfg.mti.maxRange_m (no clutter filter) are divided by their gain. The cells of a block
+ * are the fast index (32 lanes: the products vectorise). */
+static void doppler_nufft(const Processor *p, const PulseConfig *pc, PulseState *s)
+{
+    const RadarConfig *cfg = p->cfg;
+    const int K = cfg->nfft, N = cfg->rowLen;
+    const int nBlocks = (s->nCells + CELL_BLOCK - 1) / CELL_BLOCK;
+    const int oldest = (s->mtiLast - (N - 1) + 2 * s->nMtiOut) % s->nMtiOut;
+    int ph = s->mtiStag[oldest] - 1;
+    if (ph < 0 || ph >= cfg->nStagger) ph = 0;
+    const float *Ar = cfg->nufftARe + (size_t)ph * K * N, *Ai = cfg->nufftAIm + (size_t)ph * K * N;
+    const float *gB = cfg->nufftBypassGain + (size_t)ph * K;
+
+    #pragma omp parallel num_threads(team_size(p->nThreads, nBlocks)) if(nBlocks > 1)
+    {
+        float *xr = p->scratch[thread_num()].xr;
+        float *xi = p->scratch[thread_num()].xi;
+        #pragma omp for schedule(static)
+        for (int blk = 0; blk < nBlocks; blk++) {
+            const int c0 = blk * CELL_BLOCK;
+            const int nc = (s->nCells - c0 < CELL_BLOCK) ? s->nCells - c0 : CELL_BLOCK;
+            for (int q = 0; q < N; q++) {                          /* the inputs, oldest first */
+                const int slot = (oldest + q) % s->nMtiOut;
+                memcpy(xr + (size_t)q * CELL_BLOCK, mti_row(s, s->mtiRe, blk, slot), sizeof(float) * nc);
+                memcpy(xi + (size_t)q * CELL_BLOCK, mti_row(s, s->mtiIm, blk, slot), sizeof(float) * nc);
+                if (nc < CELL_BLOCK) {
+                    memset(xr + (size_t)q * CELL_BLOCK + nc, 0, sizeof(float) * (CELL_BLOCK - nc));
+                    memset(xi + (size_t)q * CELL_BLOCK + nc, 0, sizeof(float) * (CELL_BLOCK - nc));
+                }
+            }
+            for (int j = 0; j < K; j++) {
+                float yr[CELL_BLOCK], yi[CELL_BLOCK];
+                for (int c = 0; c < CELL_BLOCK; c++) yr[c] = yi[c] = 0.0f;
+                const float *ar = Ar + (size_t)j * N, *ai = Ai + (size_t)j * N;
+                for (int q = 0; q < N; q++) {
+                    const float a = ar[q], b = ai[q];
+                    const float *restrict ur = xr + (size_t)q * CELL_BLOCK, *restrict ui = xi + (size_t)q * CELL_BLOCK;
+                    IVDEP
+                    for (int c = 0; c < CELL_BLOCK; c++) {
+                        yr[c] += a * ur[c] - b * ui[c];
+                        yi[c] += a * ui[c] + b * ur[c];
+                    }
+                }
+                float *restrict pd = s->P + (size_t)j * s->nCells + c0;
+                for (int c = 0; c < nc; c++) pd[c] = yr[c] * yr[c] + yi[c] * yi[c];
+                if (pc->mtiCells < s->nR) {                       /* unfiltered cells: their own gain */
+                    const float g = 1.0f / gB[j];
+                    for (int c = 0; c < nc; c++)
+                        if ((c0 + c) % s->nR >= pc->mtiCells) pd[c] *= g;
+                }
+            }
+        }
+    }
+}
+
 /* Range-Doppler power map P[bin][cell] from the newest nRows*rowLen MTI outputs:
  * rows (fixed PRF: one row of consecutive outputs; staggered: de-interleaved by
  * stagger position), Hamming window, FFT, |X|^2 averaged over the rows, fftshift
@@ -655,6 +729,10 @@ static void mti_newest(const RadarConfig *cfg, const PulseConfig *pc, PulseState
 static void doppler(const Processor *p, const PulseConfig *pc, PulseState *s)
 {
     const RadarConfig *cfg = p->cfg;
+    if (cfg->dopplerMethod == DOPPLER_NUFFT) {
+        doppler_nufft(p, pc, s);
+        return;
+    }
     const FftPlan *plan = &p->fft;
     const int nfft = cfg->nfft, nRows = cfg->nRows, rowLen = cfg->rowLen;
     const int nUsed = nRows * rowLen;
@@ -1321,6 +1399,7 @@ static void rdmap_post(Processor *p, const PriData *pri, const ProcessorCallback
     map.power = p->rd;
     map.vel_mps = p->rdVel;
     map.notchBins = cfg->notchBins;
+    map.zeroBin = cfg->zeroBin;
     map.noise = m ? select_kth(p->rdWork, (int)m, (int)(m / 2)) : 0.0;
     map.time_s = pri->time_s;
     map.az_deg = pri->az_deg;
@@ -1406,10 +1485,12 @@ static void run_tracker(Processor *p, double t_s, int flush, const ProcessorCall
  * (None of them depends on the CFAR or on the pulse compression filters.)
  * The record may be longer than the configured one (e.g. the DDC output of
  * the whole PRI): only the receive windows of the sub-pulses are taken out
- * of it, at their samples from the PRI start. */
+ * of it, at their samples from the PRI start. It may also have more channels
+ * than the nChUsed processed (cfg.rx.nChannelsUsed: the first ones are used). */
 static int pri_matches_config(const RadarConfig *cfg, const PriData *pri)
 {
-    if (pri->nCh != cfg->nCh || pri->nSamples < cfg->nDdc || !pri->iq) return 0;
+    const int nChUsed = cfg->nChUsed > 0 ? cfg->nChUsed : cfg->nCh;     /* the channels processed */
+    if (pri->nCh < nChUsed || pri->nSamples < cfg->nDdc || !pri->iq) return 0;
     const uint32_t *idx[N_PULSES] = { pri->shortIdx, pri->longIdx };
     for (int i = 0; i < N_PULSES; i++) {
         const PulseConfig *pc = &cfg->pulse[i];
@@ -1445,7 +1526,7 @@ static void prf_switch(Processor *p, int k, const ProcessorCallbacks *cb)
     if (!radar_config_select_prf(p->cfgPrf, k)) return;
     const RadarConfig *cfg = p->cfg;
     fft_plan_free(&p->fft);
-    if (fft_plan_init(&p->fft, cfg->nfft) != 0) abort();
+    if (cfg->dopplerMethod == DOPPLER_FFT && fft_plan_init(&p->fft, cfg->nfft) != 0) abort();
     for (int i = 0; i < N_PULSES; i++) {
         PulseState *s = &p->ps[i];
         extractor_free(&s->ext);
@@ -1509,11 +1590,25 @@ void processor_process(Processor *p, const PriData *pri, const ProcessorCallback
         load_segment(cfg, pc, pri, s);
         beamform(cfg, pc, s, p->nThreads);
         p->timing.dbf_ms += elapsed_ms(&t0);
+        if ((p->logMask & LOG_DBF) && cb && cb->block) {      /* (logging: the application's time) */
+            const BlockOutput o = { LOG_DBF, i, cfg->nBeams, pc->nRange, cfg->nfft, pc->ddcCount, pc->ddcFirst,
+                                    s->beamRe, s->beamIm, pri->pulseNumber };
+            cb->block(cb->user, &o);
+            t0 = now_seconds();
+        }
         if (profileKind == PROFILE_DBF) profile_add(p, i, s);   /* (the display's time, not the block's) */
         const int slot = (s->last + 1) % s->nSlots;
         s->mfLast = (s->mfLast + 1) % cfg->nMtiTaps;
         matched_filter(cfg, pc, s, s->mfLast, p->nThreads);
         if (profileKind == PROFILE_MF) profile_add(p, i, s);
+        if ((p->logMask & LOG_MF) && cb && cb->block) {
+            const double tl = now_seconds();
+            const BlockOutput o = { LOG_MF, i, cfg->nBeams, pc->nRange, cfg->nfft, 0, 0,
+                                    s->cpiRe + (size_t)s->mfLast * s->nCells, s->cpiIm + (size_t)s->mfLast * s->nCells,
+                                    pri->pulseNumber };
+            cb->block(cb->user, &o);
+            t0 += now_seconds() - tl;                       /* (not the time of the block) */
+        }
         s->last = slot;
         s->staggerIdx[slot] = pri->staggerIndex >= 1 && pri->staggerIndex <= cfg->nStagger ? pri->staggerIndex : 1;
         s->az[slot] = pri->az_deg;
@@ -1538,6 +1633,11 @@ void processor_process(Processor *p, const PriData *pri, const ProcessorCallback
         s->sinceUpdate = 0;
         doppler(p, pc, s);
         p->timing.doppler_ms += elapsed_ms(&t0);
+        if ((p->logMask & LOG_DOPPLER) && cb && cb->block) {
+            const BlockOutput o = { LOG_DOPPLER, i, cfg->nBeams, pc->nRange, cfg->nfft, 0, 0, s->P, NULL, pri->pulseNumber };
+            cb->block(cb->user, &o);
+            t0 = now_seconds();
+        }
         cfar(p, s, pc);
         prune_and_report(p, i, s);
         p->timing.cfar_ms += elapsed_ms(&t0);

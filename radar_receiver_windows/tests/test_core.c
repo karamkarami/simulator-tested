@@ -356,7 +356,7 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
      * 3-pulse clutter filter of the whole pulse train (at a quarter of the row axis it would be at about
      * 6% of the PRF, deep in the MTI notch); the plot gives the folded vr */
     double vrEcho = vr;
-    if (cfg.staggered) {
+    if (cfg.staggered && cfg.dopplerMethod == DOPPLER_FFT) {   /* (the NUFFT measures vr on its grid itself) */
         const double rowPrf = 1.0 / (cfg.nStagger * cfg.meanPri_s);
         vrEcho = vr - floor(0.4 * cfg.nStagger + 0.5) * rowPrf * pc->lambda_m / 2;
     }
@@ -375,9 +375,9 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
     set_header_intervals(&cfg, &pri);
     pri.iq = malloc(sizeof(int16_t) * 2 * (size_t)cfg.nCh * nRec);
     double *steerRe = malloc(sizeof(double) * cfg.nCh), *steerIm = malloc(sizeof(double) * cfg.nCh);
-    for (int ch = 0; ch < cfg.nCh; ch++) {               /* matched to the beam weights */
-        if (!cfg.dbfEnabled) { steerRe[ch] = 1; steerIm[ch] = 0; continue; }
-        const double wr = cfg.wRe[beam * cfg.nCh + ch], wi = cfg.wIm[beam * cfg.nCh + ch];
+    for (int ch = 0; ch < cfg.nCh; ch++) {               /* matched to the beam weights (of the channels used) */
+        if (!cfg.dbfEnabled || ch >= cfg.nChUsed) { steerRe[ch] = 1; steerIm[ch] = 0; continue; }
+        const double wr = cfg.wRe[beam * cfg.nChUsed + ch], wi = cfg.wIm[beam * cfg.nChUsed + ch];
         const double m = hypot(wr, wi);
         steerRe[ch] = m > 0 ? wr / m : 1;
         steerIm[ch] = m > 0 ? -wi / m : 0;
@@ -389,7 +389,7 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
     if (!isnan(threshold_dB)) processor_set_cfar_alpha(proc, pow(10.0, threshold_dB / 10.0));
     Sink sink;
     memset(&sink, 0, sizeof sink);
-    ProcessorCallbacks cb = { on_detections, on_plot, NULL, &sink, NULL, on_profile, on_rdmap };
+    ProcessorCallbacks cb = { on_detections, on_plot, NULL, &sink, NULL, on_profile, on_rdmap, NULL };
     const int taps = !mfDirect && isnan(threshold_dB) && snrNoise == SNR_NOISE_MEDIAN;   /* (one of the runs) */
     sink.beam = beam;
     if (taps) processor_set_rdmap(proc, 1, beam, 0.0);
@@ -484,8 +484,9 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
               "a profile every PRI (%d DBF, %d MF)", sink.nProfile[PROFILE_DBF], sink.nProfile[PROFILE_MF]);
         /* one PRI: the echo is spread over the pulse (about 1 dB above the noise per sample after the DBF with
          * 48 elements); after the pulse compression it stands out (with one element its SNR in one PRI is
-         * too low for a check: the range-Doppler map below integrates the CPI) */
-        if (cfg.nCh > 1) {
+         * too low for a check, also with a few channels used (cfg.rx.nChannelsUsed): the range-Doppler
+         * map below integrates the CPI) */
+        if (cfg.nChUsed > 8) {
             CHECK(abs(sink.mfPeakBin - tb) <= 1, "MF profile peak at bin %d, target %d", sink.mfPeakBin, tb);
             CHECK(sink.dbfTarget > 1.15 * sink.dbfElse, "DBF profile: echo %.1f, elsewhere %.1f", sink.dbfTarget, sink.dbfElse);
         }
@@ -564,8 +565,8 @@ static void test_mti_range(const char *configPath)
             const int first = pc->ddcFirst + (e ? r2 : r1) + pc->mfShift;
             for (int ch = 0; ch < cfg.nCh; ch++) {
                 double sr0 = 1, si0 = 0;
-                if (cfg.dbfEnabled) {
-                    const double wr = cfg.wRe[beam * cfg.nCh + ch], wi = cfg.wIm[beam * cfg.nCh + ch], m = hypot(wr, wi);
+                if (cfg.dbfEnabled && ch < cfg.nChUsed) {
+                    const double wr = cfg.wRe[beam * cfg.nChUsed + ch], wi = cfg.wIm[beam * cfg.nChUsed + ch], m = hypot(wr, wi);
                     if (m > 0) { sr0 = wr / m; si0 = -wi / m; }
                 }
                 for (int m = 0; m < nEcho; m++) {
@@ -752,7 +753,7 @@ static void test_scan2scan(const char *configPath)
     Processor *proc = processor_create(&cfg, 0);
     Sink sink;
     memset(&sink, 0, sizeof sink);
-    ProcessorCallbacks cb = { on_detections, on_plot, NULL, &sink, NULL, NULL, NULL };
+    ProcessorCallbacks cb = { on_detections, on_plot, NULL, &sink, NULL, NULL, NULL, NULL };
     srand(7);
     double t = 0;
     uint32_t pulse = 1;
@@ -775,7 +776,7 @@ static void test_scan2scan(const char *configPath)
                 for (int ch = 0; ch < cfg.nCh; ch++) {
                     double sr0 = 1, si0 = 0;
                     if (cfg.dbfEnabled) {
-                        const double wr = cfg.wRe[beam * cfg.nCh + ch], wi = cfg.wIm[beam * cfg.nCh + ch], mg = hypot(wr, wi);
+                        const double wr = cfg.wRe[beam * cfg.nChUsed + ch], wi = cfg.wIm[beam * cfg.nChUsed + ch], mg = hypot(wr, wi);
                         sr0 = mg > 0 ? wr / mg : 1;  si0 = mg > 0 ? -wi / mg : 0;
                     }
                     const double cr = 30.0 * (sr0 * cos(ph) - si0 * sin(ph)), ci = 30.0 * (sr0 * sin(ph) + si0 * cos(ph));

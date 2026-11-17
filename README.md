@@ -35,13 +35,14 @@ or `radar_receiver_linux/README.md`; below `radar_receiver_<os>`).
         |                       \--> optional UDP: int16 DDC output + pulse/scan/azimuth header
         |                             (-> radar_receiver_<os>/, the same processing in C)
         v  split in time: short-pulse samples | long-pulse samples
- DBF (21 x 48 matrix, off for 1 element)                   -> [21 beams x nSamples] per sub-pulse
- Pulse compression (valid convolution): matched filter (Taylor for LFM) or, for a phase code,
+ DBF (21 x 48 matrix, off for 1 element; the first cfg.rx.nChannelsUsed channels) -> [21 beams x nSamples] per sub-pulse
+ Pulse compression (valid convolution): matched filter (range window for LFM, cfg.proc.rangeWindow) or, for a phase code,
          the mismatch filter of inputs/phase_code.mat      -> [21 beams x nRange]   (range/delay axes)
  CPI buffer (circular, the pulses of one CPI)              -> [21 x nRange x 114], short and long
  MTI  fixed PRF: 3-pulse canceller | staggered: weights from file | or an FIR filter from file (cfg.mti.type)
- Doppler fixed: Hamming + FFT 128 (next power of 2 of 114) | staggered: de-interleave, Hamming, FFT 32, NCI
- CFAR on every range-Doppler map: CA, GO, SO or OS detector (cfg.cfar.type) with the
+ Doppler fixed: window + FFT 128 (next power of 2 of 114) | staggered: de-interleave, window, FFT 32, NCI,
+         or the NUFFT of the whole CPI on a velocity grid (cfg.proc.staggerDoppler = 'nufft')
+ CFAR on every range-Doppler map: CA, GO, SO, OS or CE (censored) detector (cfg.cfar.type) with the
          2-D, 1-D range or 1-D Doppler window (cfg.cfar.method),
          in a selectable range interval per sub-pulse, range window shifted inwards at the edges
  Pruning (local peaks + sidelobe blanking) -> peak interpolation (Doppler, elevation: cfg.report)
@@ -180,9 +181,9 @@ processing chain**, not only the timing:
 | antenna rotation | `cfg.ant.availableRpm` (the rotation speeds this mode may use [rev/min], e.g. `[6 12]`) and `cfg.ant.rpm` (the speed in use, one of them; default the first): rotation rate, scan time, CPI length (`'auto'`), azimuth steps of the plot extraction and the tracker |
 | input files of the processing | `cfg.files.stagger` (staggered PRIs and MTI weights), `cfg.files.scan2scan`, `cfg.files.phaseCode`, `cfg.files.mtiFir`: each mode may have its own |
 | STC | `cfg.rx.stc` (curves of both windows) |
-| pulse compression, CPI buffer, Doppler | `cfg.proc`: Taylor window, CPI length (buffer), FFT length, Doppler window (`dopplerWindow`), update rate |
+| pulse compression, CPI buffer, Doppler | `cfg.proc`: range window of the LFM matched filter (`rangeWindow`, default Taylor), CPI length (buffer), FFT length, Doppler window (`dopplerWindow`), Doppler processing of the staggered PRF (`staggerDoppler`: `'deinterleave'` or `'nufft'`, with `cfg.proc.nufft`: points, velocity limits, window), update rate |
 | clutter filter | `cfg.mti` |
-| CFAR | `cfg.cfar`: type, window, guard / training cells, Pfa / threshold, notch, tested ranges |
+| CFAR | `cfg.cfar`: type (CA, GO, SO, OS, CE), window, guard / training cells, Pfa / threshold, `osRank`, `ceCensor`, notch, tested ranges |
 | pruning, reports, plot extraction | `cfg.prune`, `cfg.report`, `cfg.extract` |
 | tracking | `cfg.track`: method (EKF, PMBM, TOMHT), model, errors, gates, confirmation, PMBM / TOMHT settings |
 
@@ -343,7 +344,9 @@ file was built for other values (for example after you change
 | `src/cpi_buffer_*.m` | circular CPI buffers |
 | `src/mti_filter.m`, `doppler_process.m` | clutter filter (canceller or FIR filter, `cfg.mti.type`), Doppler processing |
 | `src/cfar_detect.m` | CFAR block: the detector of `cfg.cfar.type` with the window of `cfg.cfar.method`, MTI notch |
-| `src/cfar_ca.m`, `cfar_goso.m`, `cfar_os.m` | CA (cell averaging), GO / SO (greatest / smallest of the half windows) and OS (order statistic) CFAR, each with the 2-D, 1-D range and 1-D Doppler window |
+| `src/cfar_ca.m`, `cfar_goso.m`, `cfar_os.m`, `cfar_ce.m` | CA (cell averaging), GO / SO (greatest / smallest of the half windows), OS (order statistic) and CE (censored mean) CFAR, each with the 2-D, 1-D range and 1-D Doppler window |
+| `src/cfar_ce_table.m` | distribution function of the CE statistic (mean of the smallest training cells) as a table, for its Pfa and threshold |
+| `src/window_function.m` | the windows of the range (LFM), Doppler FFT and NUFFT processing: rect, Hamming, Hann, Blackman, Blackman-Harris, Taylor, Chebyshev, Kaiser; on uniform or non-uniform samples |
 | `src/cfar_alpha.m`, `cfar_statistic.m`, `cfar_quadrature.m` | threshold factor of a detector for a Pfa; distribution of its noise statistic; the quadrature of the Pfa integral |
 | `src/track_setup.m`, `track_init.m`, `track_update.m`, `track_report.m` | tracking block: settings, the tracker of `cfg.track.method` (`track_update.m` calls `track_ekf.m` or `track_pmbm.m`), the tracks for the display |
 | `src/track_ekf.m` | EKF tracker (2-D / 3-D, CV / CA model, GNN association; `cfg.track.method = 'ekf'`) |
@@ -652,8 +655,23 @@ there, at the same beam and Doppler, behind very strong far targets.
   spaced in sine space with a Taylor taper. With 1 element the DBF block is
   skipped, the single channel goes straight to the matched filter, and
   plots carry no elevation (NaN).
+* **Channels used** (`cfg.rx.nChannelsUsed`, `radar_config.m`): the DDC
+  output keeps all `cfg.ant.nElements` channels (simulation, DDC files, UDP
+  stream, logs), but the processing uses only the first `nChannelsUsed` of
+  every PRI (`[]` = all). With 1 the DBF is off (one beam, no elevation);
+  with more the DBF uses the first `nChannelsUsed` columns of its matrix,
+  every beam scaled to unit noise gain again (the sub-array of the first
+  elements; a DBF file of your own may also have `nChannelsUsed` columns).
+  The C receiver gets it as `nChUsed` and accepts PRIs with at least that
+  many channels (e.g. a DDC stream of 4 channels of which only the first is
+  processed); its raw video averages the same channels.
 * **Pulse compression** (`cfg.wave.<pulse>.compression`): LFM uses its
-  matched filter with a Taylor window. A phase code uses its matched filter
+  matched filter weighted with the range window of the mode
+  (`cfg.proc.rangeWindow`: `'taylor'` (default; `rangeWindowNbar`,
+  `rangeWindowSll_dB`), `'chebyshev'` (`rangeWindowSll_dB`), `'kaiser'`
+  (`rangeWindowBeta`), `'hamming'`, `'hann'`, `'blackman'`,
+  `'blackmanharris'` or `'rect'`, `window_function.m`; the older
+  `cfg.proc.taylorNbar` / `taylorSll_dB` are still read). A phase code uses its matched filter
   (`'matched'`, the conjugate reversed code) or the **mismatch filter** of
   `cfg.files.phaseCode` (`'mismatch'`): a filter longer than the code that
   lowers the range sidelobes for a small SNR loss. Each coefficient is held
@@ -755,11 +773,43 @@ there, at the same beam and Doppler, behind very strong far targets.
   sum(PRI); it gets a Hamming window and a 32-point FFT (the next power of 2
   of 28), and |X|^2 is averaged over the rows. The window is a setting of
   the mode (`cfg.proc.dopplerWindow`: `'hamming'` (default), `'hann'`,
-  `'blackman'` or `'rect'`); the MTI notch that the CFAR does not test is
-  `cfg.cfar.notchWidth` times its mainlobe (+-2, +-2, +-3, +-1 bins times
-  nfft / samples). It is exported with the Doppler window (`dopWindow`), so
-  the C receiver needs no change for it.
-* **CFAR:** one of four detectors (`cfg.cfar.type`) with one of three
+  `'blackman'`, `'blackmanharris'`, `'taylor'`, `'chebyshev'`, `'kaiser'` or
+  `'rect'`, with `dopplerWindowSll_dB`, `dopplerWindowNbar`,
+  `dopplerWindowBeta`); the MTI notch that the CFAR does not test is
+  `cfg.cfar.notchWidth` times its mainlobe (first null: +-2, +-2, +-3, +-4 bins
+  times nfft / samples for Hamming, Hann, Blackman, Blackman-Harris, +-1 for
+  rect, from the parameters for Taylor, Chebyshev and Kaiser). It is exported
+  with the Doppler window (`dopWindow`), so the C receiver needs no change for it.
+* **NUFFT of the staggered PRF** (`cfg.proc.staggerDoppler = 'nufft'`, default
+  `'deinterleave'` as above): the MTI outputs of the whole CPI (all of them,
+  oldest first, each at the time of its oldest pulse) are one non-uniformly
+  sampled sequence y_m at times t_m. Its spectrum is the non-uniform DFT
+  Y(f_j) = sum_m a_m y_m exp(-j 2 pi f_j t_m) on `cfg.proc.nufft.nPoints`
+  frequencies f_j = -2 v_j / lambda of a velocity grid from
+  `cfg.proc.nufft.vMax_mps` down to `vMin_mps` (spacing (vMax - vMin) /
+  nPoints, ordered like the FFT bins after fftshift; defaults: the next power
+  of 2 of the outputs, +-lambda / (4 mean PRI)), and P = |Y|^2 goes to the
+  CFAR (no rows, no non-coherent integration: one look). The weights a_m are
+  the window `cfg.proc.nufft.window` (the names above, with `windowSll_dB`,
+  `windowNbar`, `windowBeta`) evaluated at the sample times scaled to
+  [0 1] (a window of non-uniform samples: the times are not equally
+  spaced, the window follows them; Chebyshev, defined on uniform samples,
+  is interpolated), times, with `densityComp` (default true), the mean
+  spacing of each sample to its neighbours (a densely sampled stretch does
+  not weigh more). The times depend on the stagger position of the oldest
+  output (the phase of the CPI), so there is one matrix A(f_j, t_m) per
+  position; each row is scaled so that white noise at the MTI input gives
+  unit power in its bin (the noise-gain equalisation of the FFT path; the
+  cells beyond `cfg.mti.maxRange_m` have their own gain). The grid is not
+  limited to the span of the de-interleaved rows: targets faster than
+  lambda / (2 sum(PRI)) get their true velocity (within the grid). The MTI
+  notch is the window mainlobe of the CPI duration around zero velocity
+  (none when zero is not on the grid); the CFAR treats the grid as circular.
+  It costs nPoints x MTI outputs complex multiply-adds per cell and update
+  (128 x 114 per cell with the defaults: several times the FFTs of the rows;
+  see the timing panel, `cfg.proc.updateEvery`). The C receiver gets the
+  matrices (`nufftA`, `nufftBypassGain`, `zeroBin`, `dopplerMethod`).
+* **CFAR:** one of five detectors (`cfg.cfar.type`) with one of three
   windows (`cfg.cfar.method`), each window with its own guard and training
   cells and Pfa (or a fixed threshold `threshold_dB`). The detector is the
   statistic of the training cells that the threshold factor alpha
@@ -772,22 +822,31 @@ there, at the same beam and Doppler, behind very strong far targets.
   training cells), `osRank` = 0.9 (k scaled to the training cells at the
   range edges; the textbook 0.75 lets the OS detect the ripple of the
   eclipsed long-pulse echo of a near target: 62 false plots in the 3 scans
-  of `test_multi_scan` instead of 1). alpha comes from the Pfa (`cfar_alpha.m`): for CA the closed
+  of `test_multi_scan` instead of 1); `'ce'` the censored mean (censored mean
+  level, CMLD): the mean of the training cells without the round(`ceCensor` x
+  training cells) largest (`ceCensor` = 0.1: 30 of the 296 cells of the 2-D
+  window; scaled at the range edges as the OS rank), so other targets and
+  clutter edges in the window do not raise the threshold, with less loss than
+  OS in homogeneous noise. Its distribution has no closed form for any number of looks:
+  `cfar_ce_table.m` computes it once as a table, conditioned on the largest
+  cell kept (its Beta distribution) with the sum of the others by the FFT of
+  their convolution (checked against the single-look closed form, within
+  0.2 %, and by Monte Carlo). alpha comes from the Pfa (`cfar_alpha.m`): for CA the closed
   form, for GO, SO and OS P(Z < S/alpha) integrated over the cell power S
   with the distribution of the statistic Z (`cfar_statistic.m`: Gamma of
   the looks, its maximum / minimum over two halves, or its order
   statistic; checked against the single-look closed forms of Gandhi and
   Kassam and of Rohling, `test_cfar`). The noise estimate of a detection
   (SNR with `cfg.report.snrNoise = 'cfar'`) is the statistic divided by its
-  mean for unit noise. OS is evaluated only at the cells that are local
+  mean for unit noise. OS and CE are evaluated only at the cells that are local
   maxima (3 x 3 x 3), the only ones the pruning keeps: the same result for
   a fraction of the work.
 
-  | Window | Each side | Training cells | CA | GO | SO | OS (k) |
-  |---|---|---|---|---|---|---|
-  | `'2d'` (default) | 3 + 8 range, 3 + 4 Doppler | 296 (halves 144) | 12.79 dB | 12.63 dB | 13.07 dB | 9.31 dB (266) |
-  | `'range'` | 3 + 16 range cells | 32 (halves 16) | 13.96 dB | 13.58 dB | 15.66 dB | 11.05 dB (29) |
-  | `'doppler'` | 2 + 8 Doppler bins | 16 (halves 8) | 15.39 dB | 14.88 dB | 18.99 dB | 13.52 dB (14) |
+  | Window | Each side | Training cells | CA | GO | SO | OS (k) | CE (kept) |
+  |---|---|---|---|---|---|---|---|
+  | `'2d'` (default) | 3 + 8 range, 3 + 4 Doppler | 296 (halves 144) | 12.79 dB | 12.63 dB | 13.07 dB | 9.31 dB (266) | 14.10 dB (266) |
+  | `'range'` | 3 + 16 range cells | 32 (halves 16) | 13.96 dB | 13.58 dB | 15.66 dB | 11.05 dB (29) | 15.29 dB (29) |
+  | `'doppler'` | 2 + 8 Doppler bins | 16 (halves 8) | 15.39 dB | 14.88 dB | 18.99 dB | 13.52 dB (14) | 17.26 dB (14) |
 
   (thresholds for Pfa 1e-8, one look, fixed PRF)
 
@@ -1367,11 +1426,12 @@ budget.
 | `test_clutter` | clutter power and terrain (5 min): the CNR measured at the matched filter output equals `cfg.clutter.cnr_dB` (60, 72.7, 85 dB) and `cnr_dB = []` keeps `sigma0_dB`; desert and sea 15 dB below land; nothing flat beyond the horizon, mountains seen beyond it, their back slopes shadowed, one steering vector per elevation group; internal motion of every type (sea: its drift); no ADC clipping over 360 deg at the default CNR, clipping above the warning at +15 dB; one CPI over land, hills, mountains, desert and sea: the target detected, nothing else |
 | `test_scenarios(scenario, ...)` | several scans (default 3, 48 elements, fixed PRF, terrain clutter) of the `'six'`, `'challenge'` or `'random'` scenario through `run_radar_sim`, with the simulated sectors around every look at every target. A target is expected in a scan unless it is at a blind speed, has less than 3 dB of SNR margin, is out of range or lies in the CFAR window of a stronger (or nearly as strong) target of the same pulse; it must give plots in all expected scans but one and, with enough scans, a confirmed track (not required above the DBF beams, 40 deg, for a 3-D track, or for a crosser faster than 15 deg per scan); at most 2 false plots per scan, no false confirmed track, no ADC overload; a maneuvering target (more than 2 m/s^2: C11 - C13) needs its track only with the PMBM tracker; options: `'prf'`, `'terrain'` (`'uniform'`, `'regions'`, `'off'`), `'cnrOffset'`, `'gainOffset'`, `'nElements'`, `'seed'`, `'method'` (`'ekf'`, `'pmbm'`) |
 | `test_multi_scan(mode, nScans, buildDir, replayOnly, trackMethod, cfarType)` | several scans of the six-target scenario through the C receiver (DDC files, `radar_stream_send`): every PRI received, a confirmed track on every target not at a blind speed, no confirmed false track, at most 2 false plots per scan; `replayOnly` processes the recording of an earlier run again, also with another tracker (`'ekf'`, `'pmbm'`) or CFAR detector |
-| `test_cfar` | the four CFAR detectors (CA, GO, SO, OS) with the three windows on exponential noise: false alarm rate 1e-3 in the interior (CA also at the range edges, the shifted window; GO / SO edges reported), targets in the first and last range cell detected, only the tested range interval is tested, the noise estimate equals the statistic computed directly from the (shifted) window, also when the whole tested interval lies within the edge cells; OS testing only the local maxima gives the same local maxima as testing every cell; `cfar_pfa` against the single-look closed forms of CA, GO, SO and OS |
+| `test_processing_options` | the windows of `window_function.m` (Chebyshev and Kaiser equal `chebwin` / `kaiser`, the peak sidelobe level and mainlobe of every window, the non-uniform evaluation equals the uniform window at uniform positions, unknown names refused for range, Doppler and NUFFT); the range window of the LFM matched filter (Taylor, Chebyshev lower the range sidelobes); the NUFFT of the staggered PRF (a flat noise floor of 1 in every bin for every stagger phase, the bins equal the direct non-uniform DFT, a target at +250 m/s in its own bin where the de-interleaved rows fold it, the notch bin at zero velocity, none on a grid without it); `cfg.rx.nChannelsUsed` (4 of 48: a DBF matrix of 4 columns with unit noise gain; 1: no DBF; 0 or 49 refused) |
+| `test_cfar` | the five CFAR detectors (CA, GO, SO, OS, CE) with the three windows on exponential noise: false alarm rate 1e-3 in the interior (CA also at the range edges, the shifted window; GO / SO edges reported), targets in the first and last range cell detected, only the tested range interval is tested, the noise estimate equals the statistic computed directly from the (shifted) window, also when the whole tested interval lies within the edge cells; OS and CE testing only the local maxima gives the same local maxima as testing every cell; `cfar_pfa` against the single-look closed forms of CA, GO, SO and OS, and for CE (the censored mean of the exponential order statistics) within 0.2 % |
 | `test_tracker_pmbm` | PMBM tracker with IMM-UKF on synthetic plots (target positions from `target_state`, plots at the antenna looks, errors of `cfg.track`, folded radial velocity), 3-D and 2-D, against the EKF on the same plots: six targets with 8 false plots per scan (fixed and staggered PRF): one confirmed track per target, no false track; a 4 deg/s turn: one track, smaller position error than the EKF, CT dominant in the turn; a 6 m/s^2 acceleration: one track, CA dominant, smaller velocity error than the EKF; Pd 0.7 with 30 false plots per scan: every target detected in the last 3 scans tracked, at most one false track; two targets 200 m apart and two crossing targets: no merge, no swap; track termination after the missed scans; speed gate; the 13 challenge targets with detections from the SNR budget: every target detected in the last 3 scans tracked, no false track |
 | `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA, with and without the radial velocity: one confirmed track per target, close to it, no false track; the radial velocity lowers the velocity error after two scans; staggered PRF (folded plot velocities): the track radial velocity is unfolded; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |
 | `test_peak_interpolation` | peak interpolation: a peak that is Gaussian in Doppler and across the beams gives its exact fractional Doppler bin (radial velocity) and beam (elevation); the Doppler axis wraps; the lowest beam keeps its centre; with the options off the bin and beam centres stay (the C `test_cfar` checks the same in `processor.c`) |
-| `test_new_options` | the options of this revision: `cfg.proc.cpiMode` auto / manual; `cfg.mti.maxRange_m` (a stationary echo cancelled before the limit and kept beyond it, a flat noise floor on both sides); the long pulse off (the short pulse to 80.6 km, a target at 50 km as a short-pulse plot), the short pulse off (blind below 22.9 km, long-pulse plots only); the sub-pulses on 165 / 175 MHz (IF 30 MHz for both, LO 135 / 145 MHz, echo spectra at the ADC on 30 MHz and the short-pulse echo in the long window on 20 MHz, the radial velocity of each plot on its own carrier within one Doppler bin, the DBF beams scaled by fc / fc_Hz); `cfg.io.saveMf` / `saveDoppler` (one file per PRI / per CPI update, block sizes, `[]` for a sub-pulse that is off); the PPI video noise floor over a mountain sector (0.5 dB); `radar_export_config` writes the same records as `export_receiver_config` for all of them, the TOMHT tracker, the Blackman Doppler window, a short pulse at 11 us with set receive windows and radar mode 2 |
+| `test_new_options` | the options of this revision: `cfg.proc.cpiMode` auto / manual; `cfg.mti.maxRange_m` (a stationary echo cancelled before the limit and kept beyond it, a flat noise floor on both sides); the long pulse off (the short pulse to 80.6 km, a target at 50 km as a short-pulse plot), the short pulse off (blind below 22.9 km, long-pulse plots only); the sub-pulses on 165 / 175 MHz (IF 30 MHz for both, LO 135 / 145 MHz, echo spectra at the ADC on 30 MHz and the short-pulse echo in the long window on 20 MHz, the radial velocity of each plot on its own carrier within one Doppler bin, the DBF beams scaled by fc / fc_Hz); `cfg.io.saveMf` / `saveDoppler` (one file per PRI / per CPI update, block sizes, `[]` for a sub-pulse that is off); the PPI video noise floor over a mountain sector (0.5 dB); `radar_export_config` writes the same records as `export_receiver_config` for all of them, the TOMHT tracker, the Blackman Doppler window, a short pulse at 11 us with set receive windows and radar mode 2, the CE-CFAR (its table), the NUFFT (its matrices), the channels used and the range / Doppler windows |
 | `test_tracker_tomht` | the cases of `test_tracker_pmbm` with the TOMHT tracker (`test_tracker_pmbm('tomht')`), and the C TOMHT tracker on the same calls |
 | `test_generate_ddc_c` | the C program `radar_generate_ddc` against `generate_ddc_files.m`: equal files without noise (2 / 4 MHz, other carriers, long pulse off, phase codes, radar mode 2 with its transmit times and receive windows), equal clutter with fixed reflectivities, the same power of random clutter and noise, reproducible with any number of threads, the six targets generated in C detected by the C receiver |
 | `test_mti_fir` | clutter filter option: the FIR file instead of [1 -2 1], CPI - (L - 1) outputs, deeper notch than the canceller, flat noise floor after the noise gain of every bin, one row for every stagger position or one row per position, invalid files refused, `mtiCoeffs` and `mtiType` exported |

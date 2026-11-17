@@ -64,8 +64,9 @@ V.time = -Inf(V.nAz, 1);                                      % time of the newe
 V.sum = zeros(1, V.nR);  V.n = 0;  V.azBin = 0;                % PRIs of the current azimuth bin
 V.noise_dB = NaN;                                             % noise floor (running 10th percentile of the video)
 V.azNoise = nan(V.nAz, 1);                                    % its estimate in every azimuth bin (ppi_video_add_row.m)
-x = gammaincinv(0.1, sys.nCh);                                % its offset: the 10th percentile of the mean of
-V.p10Video_dB = 10*log10(sys.nCh / x);                        % nCh exponential powers is below the mean (1: 9.77
+nCh = sys.nCh;  if isfield(sys, 'nChUsed'), nCh = sys.nChUsed; end   % the channels averaged
+x = gammaincinv(0.1, nCh);                                % its offset: the 10th percentile of the mean of
+V.p10Video_dB = 10*log10(nCh / x);                        % nCh exponential powers is below the mean (1: 9.77
 V.p10Sample_dB = 10*log10(1 / gammaincinv(0.1, 1));           % dB, 48: 0.86 dB); one sample (DBF, MF out): 9.77 dB
 V.span_dB = 50;                                               % colour scale: noise - 3 dB ... + span
 % Image of the PPI: nPix x nPix pixels over [-rMax, rMax] (km in the axes), lookup into the map

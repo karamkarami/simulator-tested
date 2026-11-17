@@ -29,7 +29,8 @@ extern "C" {
 enum { PULSE_SHORT = 0, PULSE_LONG = 1, N_PULSES = 2 };
 enum { MF_AUTO = 0, MF_DIRECT = 1, MF_FFT = 2 };
 enum { CFAR_2D = 0, CFAR_RANGE = 1, CFAR_DOPPLER = 2 };        /* window (cfg.cfar.method)  */
-enum { CFAR_CA = 0, CFAR_GO = 1, CFAR_SO = 2, CFAR_OS = 3 };     /* detector (cfg.cfar.type)  */
+enum { CFAR_CA = 0, CFAR_GO = 1, CFAR_SO = 2, CFAR_OS = 3, CFAR_CE = 4 };   /* detector (cfg.cfar.type) */
+enum { DOPPLER_FFT = 0, DOPPLER_NUFFT = 1 };   /* Doppler processing (cfg.proc.staggerDoppler)    */
 enum { TRACK_CV = 0, TRACK_CA = 1 };                          /* EKF motion model          */
 enum { TRACK_METHOD_EKF = 0, TRACK_METHOD_PMBM = 1, TRACK_METHOD_TOMHT = 2 };   /* tracker (cfg.track.method) */
 enum { PMBM_CV = 0, PMBM_CA = 1, PMBM_CT = 2 };               /* IMM models of the PMBM     */
@@ -38,7 +39,7 @@ enum { COMPRESSION_MATCHED = 0, COMPRESSION_MISMATCH = 1 };
 enum { SNR_NOISE_MEDIAN = 0, SNR_NOISE_CFAR = 1 };   /* noise floor of the SNR of the reports */
 enum { MTI_CANCELLER = 0, MTI_FIR = 1 };             /* clutter filter (cfg.mti.type; information) */
 const char *cfar_method_name(int method);   /* "2-D", "1-D range", "1-D Doppler" */
-const char *cfar_type_name(int type);       /* "CA", "GO", "SO", "OS" */
+const char *cfar_type_name(int type);       /* "CA", "GO", "SO", "OS", "CE" */
 
 typedef struct {
     int     enable;        /* the sub-pulse is transmitted and processed (cfg.wave.<pulse>.enable;
@@ -88,10 +89,12 @@ typedef struct {
 
 typedef struct {
     /* antenna and beamforming */
-    int     nCh;           /* receive elements                                        */
+    int     nCh;           /* receive elements: channels of the DDC output (cfg.ant.nElements) */
+    int     nChUsed;       /* channels processed: the first nChUsed of every PRI (cfg.rx.nChannelsUsed;
+                              optional in the file: nCh). A PRI needs at least nChUsed channels */
     int     nBeams;        /* elevation beams (1 when DBF is disabled)                */
     int     dbfEnabled;    /* 0 with a single element                                 */
-    float  *wRe, *wIm;     /* DBF matrix, row-major [nBeams x nCh]: beam b = sum_ch w[b*nCh+ch]*x[ch] */
+    float  *wRe, *wIm;     /* DBF matrix, row-major [nBeams x nChUsed]: beam b = sum_ch w[b*nChUsed+ch]*x[ch] */
     double *beamU;         /* [nBeams] sine of the beam angle from broadside (NaN without DBF) */
     double  tilt_deg;
     double  height_m;
@@ -123,6 +126,15 @@ typedef struct {
     float  *noiseGainBypass; /* [nfft] noise gain of the cells beyond it (no clutter filter) */
     double *dopFreq_Hz;    /* [nfft] Doppler axis (after fftshift)                    */
     int     notchBins;     /* bins on each side of zero Doppler that are not tested   */
+    int     zeroBin;       /* bin of zero Doppler (FFT: nfft/2; NUFFT: from the file, -1 = not on
+                              the grid: no notch)                                      */
+    /* Doppler processing (optional in the file: FFT): DOPPLER_FFT (the FFT of the CPI or of the
+     * de-interleaved rows) or DOPPLER_NUFFT (staggered PRF, cfg.proc.staggerDoppler = 'nufft': the
+     * non-uniform DFT of all rowLen MTI outputs on the nfft velocity bins, P = |A y|^2 with the matrix
+     * of the stagger position of the oldest output, already scaled for a flat noise floor) */
+    int     dopplerMethod;
+    float  *nufftARe, *nufftAIm;   /* [nStagger][nfft][rowLen] */
+    float  *nufftBypassGain;       /* [nStagger][nfft]: noise gain of the cells without clutter filter */
     double  notchMaxRange_m; /* apply the MTI notch only at range_m <= this limit      */
     double  medianToMean;  /* median / mean of the noise power (noise floor estimate) */
 
@@ -133,6 +145,10 @@ typedef struct {
     int     guardRange, trainRange, guardDoppler, trainDoppler, nTrain;
     int     cfarNHalf;     /* GO, SO: training cells per half window                  */
     int     cfarOsK;       /* OS: rank of the statistic (of nTrain)                    */
+    int     cfarCeKeep;    /* CE: training cells averaged (the nTrain - cfarCeKeep largest are
+                              censored; at the range edges in proportion)                  */
+    int     nCeTable;      /* CE: distribution of the statistic for the Pfa: log z, log G(z)  */
+    double *ceLogZ, *ceLogG;
     double  cfarNoiseScale;  /* mean of the statistic for unit noise (noise estimate =
                                 statistic / this; 1 for CA)                            */
     double  alpha;         /* CFAR threshold factor (design value from cfg.cfar.pfa)  */
@@ -341,6 +357,7 @@ typedef struct {
     const float  *power;       /* [nfft][nBins]                                    */
     const double *vel_mps;     /* [nfft] radial velocity of every bin (+ = away)  */
     int           notchBins;   /* bins on each side of zero Doppler not tested     */
+    int           zeroBin;     /* bin of zero Doppler (-1: none, NUFFT grid)         */
     double        noise;       /* median power of the cells (noise floor estimate) */
     double        time_s, az_deg;
     const Detection *dets;
@@ -352,6 +369,24 @@ typedef struct {
  * compression output |y|^2 of both sub-pulses, joined like the video (short
  * pulse up to the first long-pulse range cell, then the long pulse). */
 enum { PROFILE_NONE = 0, PROFILE_DBF = 1, PROFILE_MF = 2 };
+
+/* Block outputs for logging (processor_set_log): the bits of the mask. LOG_DDC and LOG_DETECTION
+ * are written by the application (the PRI as received, the detections callback). */
+enum { LOG_DDC = 1, LOG_DBF = 2, LOG_MF = 4, LOG_DOPPLER = 8, LOG_DETECTION = 16 };
+
+typedef struct {
+    int          kind;         /* LOG_DBF, LOG_MF or LOG_DOPPLER                              */
+    int          pulse;        /* PULSE_SHORT or PULSE_LONG                                   */
+    int          nBeams, nRange, nfft;
+    /* LOG_DBF:     beamformer output [nBeams][nSamples] (complex): the pulse compression input,
+     *              DDC samples first ... first+nSamples-1 (0-based; zero outside the receive window)
+     * LOG_MF:      pulse compression output [nBeams][nRange] (complex)
+     * LOG_DOPPLER: range-Doppler power after the noise-gain equalisation [nfft][nBeams][nRange]
+     *              (im = NULL), Doppler axis dopFreq_Hz */
+    int          nSamples, first;
+    const float *re, *im;
+    uint32_t     pulseNumber;
+} BlockOutput;
 
 typedef struct {
     /* called for the pruned CFAR detections of every CPI update (n may be 0) */
@@ -368,6 +403,8 @@ typedef struct {
     void (*profile)(void *user, int kind, const float *row, int nBins, double dR_m, double az_deg, double time_s);
     /* called with the range-Doppler map of processor_set_rdmap() */
     void (*rdmap)(void *user, const RdMap *map);
+    /* called with the block outputs of processor_set_log() (logging) */
+    void (*block)(void *user, const BlockOutput *out);
 } ProcessorCallbacks;
 
 typedef struct {
@@ -377,6 +414,8 @@ typedef struct {
      * processor leaves it 0): console output (printf of plots, tracks and
      * messages) and the data handed to the PPI display */
     double console_ms, display_ms;
+    double log_ms;       /* logging (main.c adds it): the copies of the block outputs handed
+                            to the log writer thread (the files are written by that thread) */
     uint64_t pris, updates;
     uint64_t rejected;   /* PRIs whose layout (channels, DDC samples, sub-pulse samples,
                             DDC rate) differs from the configuration: not processed */
@@ -399,6 +438,9 @@ void processor_set_profile(Processor *p, int kind, int beam);
  * (default) computes nothing; else it is handed to the callback after the
  * CPI updates of a PRI, at most every minPeriod_s seconds. */
 void processor_set_rdmap(Processor *p, int enabled, int beam, double minPeriod_s);
+/* Block outputs handed to the block callback (logging): mask of LOG_DBF, LOG_MF, LOG_DOPPLER
+ * (0 = none, the default). */
+void processor_set_log(Processor *p, int mask);
 /* CFAR threshold factor (of the configured detector) used from the next
  * CPI update on (starts at cfg->alpha). threshold [dB] = 10*log10(alpha).
  * Call from the processing thread. */
@@ -414,10 +456,39 @@ int  processor_threads(const Processor *p);    /* processing threads (OpenMP tea
 void processor_destroy(Processor *p);
 
 /* ------------------------------------------------------------------------ */
+/* Logging of the block outputs (logger.c)                                   */
+/* ------------------------------------------------------------------------ */
+
+/* logger_start: the log <folder>/<name> (name NULL or "": log_<date>_<time>) with a folder per
+ * block of mask (LOG_DDC ddc/, LOG_DBF dbf/, LOG_MF mf/, LOG_DOPPLER doppler/, LOG_DETECTION
+ * detection/), one MAT-file per PRI, written by a thread of its own. Per PRI the processing
+ * thread calls logger_begin_pri (copies the DDC output), hands the block outputs (processor
+ * callback block), the detections and plots, then logger_end_pri. logger_stop writes what is
+ * queued and ends the log. */
+typedef struct Logger Logger;
+typedef struct {
+    uint64_t pris, files, dropped, bytes, errors;
+    size_t   queuedBytes;          /* waiting for the writer                          */
+    double   seconds;              /* since the start                                 */
+    double   writeSeconds;         /* time of the writer thread in the files           */
+    char     lastError[256];
+} LoggerStats;
+Logger *logger_start(const char *folder, const char *name, int mask, const RadarConfig *cfg, char *err, size_t errLen);
+void logger_begin_pri(Logger *L, const PriData *pri);
+void logger_block(Logger *L, const BlockOutput *out);
+void logger_detections(Logger *L, const Detection *dets, int n);
+void logger_plot(Logger *L, const Detection *plot);
+void logger_end_pri(Logger *L);
+void logger_stats(Logger *L, LoggerStats *s);
+const char *logger_dir(const Logger *L);
+int  logger_mask(const Logger *L);
+void logger_stop(Logger *L, LoggerStats *final);   /* final: the statistics at the end (may be NULL) */
+
+/* ------------------------------------------------------------------------ */
 /* Raw video of the PPI (video.c)                                            */
 /* ------------------------------------------------------------------------ */
 
-/* The DDC output of a PRI averaged non-coherently over the elements (mean of
+/* The DDC output of a PRI averaged non-coherently over the elements used (mean of
  * I^2 + Q^2), the receive intervals of the short pulse (up to the first range
  * cell of the long pulse) and of the long pulse joined, in range bins of
  * c / (2 fsOut) from 0 to maxRange_m (as ppi_video_add.m). */
@@ -429,6 +500,7 @@ typedef struct {
     int    *bin;          /* [nSamples] its range bin                              */
     float  *binInv;       /* [nBins] 1 / (samples x channels) of the bin, 0 = none */
     float  *acc;          /* work buffer [nSamples]                                */
+    int     nCh;          /* channels averaged: the first nChUsed                  */
 } VideoLayout;
 int  video_layout_init(VideoLayout *v, const RadarConfig *cfg, double maxRange_m);   /* 0 on success */
 void video_row(const VideoLayout *v, const PriData *pri, float *row);              /* row[nBins] */
@@ -516,6 +588,16 @@ int  ppi_video_wanted(void);
 void ppi_post_video(const float *row, int nBins, int nAvg, double dR_m, double az_deg, double time_s);
 /* Track updates and deletions (drawn as hollow triangles, Tracks checkbox). */
 void ppi_post_track(const Track *track);
+/* Range-Doppler tab before the first map: its empty axes show this Doppler axis [m/s] (call
+ * before ppi_run; the range axis is 0 ... maxRange_m of ppi_run). */
+void ppi_set_rd_axes(double vMin_mps, double vMax_mps);
+/* Logging (tab "Controls"): the folder, name and blocks (LOG_* mask) the controls start with
+ * (call before ppi_run); ppi_take_log_request() returns 1 when the user pressed Start (*start = 1,
+ * with the folder, name and mask) or Stop (*start = 0); the worker reports the state of the log
+ * (shown in the tab, the REC mark of the PPI) with ppi_post_log_status (error: NULL or a message). */
+void ppi_set_log_defaults(const char *folder, const char *name, int mask);
+int  ppi_take_log_request(int *start, char *folder, size_t folderLen, char *name, size_t nameLen, int *mask);
+void ppi_post_log_status(int active, const char *dir, const LoggerStats *stats, const char *error);
 /* Accumulated processing times: the panel shows the mean per PRI of every
  * block [us]. detectionName / trackingName label the CFAR and tracking rows
  * (e.g. "CFAR 2-D", "Track 3D CV"; NULL keeps the previous; the panel shortens

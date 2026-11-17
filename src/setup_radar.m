@@ -41,6 +41,13 @@ sys.ant.rate_dps = sys.ant.rpm * 360 / 60;                    % rotation rate [d
 sys.ant.azBeamwidth_deg = beamwidth_3dB(ant.az_deg, ant.azGain_dB);
 sys.ant.azSpan_deg = 3 * sys.ant.azBeamwidth_deg;             % echoes outside +-azSpan are ignored
 sys.nCh = cfg.ant.nElements;
+% channels of the DDC output the processing uses: the first cfg.rx.nChannelsUsed ([] or missing: all)
+sys.nChUsed = sys.nCh;
+if isfield(cfg.rx, 'nChannelsUsed') && ~isempty(cfg.rx.nChannelsUsed), sys.nChUsed = cfg.rx.nChannelsUsed; end
+if ~isscalar(sys.nChUsed) || ~isreal(sys.nChUsed) || sys.nChUsed ~= round(sys.nChUsed) || sys.nChUsed < 1 || ...
+        sys.nChUsed > sys.nCh
+    error('cfg.rx.nChannelsUsed must be a whole number 1 ... cfg.ant.nElements = %d (or [] = all).', sys.nCh);
+end
 
 % Received power per element = radarConst * rcs / R^4 * (pattern factors)
 sys.radarConst = cfg.tx.peakPower_W * 10^(ant.txGain_dBi/10) * 10^(ant.rxChannelGain_dBi/10) ...
@@ -462,15 +469,22 @@ for i = 1:2
     sys.wave.(names{i}) = wv;
 end
 
-%% Digital beamforming (disabled with a single receive element)
-sys.dbf.enabled = sys.nCh > 1;
+%% Digital beamforming (disabled with a single receive element, or with one channel used)
+% With cfg.rx.nChannelsUsed < cfg.ant.nElements the DBF uses only the first nChannelsUsed elements:
+% the first nChannelsUsed columns of the DBF matrix, every beam scaled to unit noise gain again (a
+% matrix of your own may also have nChannelsUsed columns: then it is used as it is).
+sys.dbf.enabled = sys.nChUsed > 1;
 if sys.dbf.enabled
     dbfF = load_input(cfg, 'dbf', struct('fc', cfg.fc, 'nElements', sys.nCh, 'tilt_deg', cfg.ant.tilt_deg, ...
                                          'spacing', cfg.ant.elementSpacing_lambda));
-    if size(dbfF.W, 2) ~= sys.nCh
+    if size(dbfF.W, 2) ~= sys.nCh && size(dbfF.W, 2) ~= sys.nChUsed
         error('The DBF matrix has %d columns but cfg.ant.nElements = %d.', size(dbfF.W, 2), sys.nCh);
     end
     sys.dbf.W = dbfF.W;
+    if size(sys.dbf.W, 2) ~= sys.nChUsed                      % the sub-array of the first elements
+        sys.dbf.W = sys.dbf.W(:, 1:sys.nChUsed);
+        sys.dbf.W = sys.dbf.W ./ sqrt(sum(abs(sys.dbf.W).^2, 2));
+    end
     sys.dbf.beamEl_deg = dbfF.beamEl_deg(:);
     sys.dbf.beamU = sind(sys.dbf.beamEl_deg - sys.ant.tilt_deg);
 else
@@ -562,6 +576,11 @@ else
     sys.cfar.nHalf = oR * (2*oD + 1) - c.guardRange * (2*c.guardDoppler + 1);
 end
 sys.cfar.osK = min(sys.cfar.nTrain, max(1, round(c.osRank * sys.cfar.nTrain)));   % OS: rank of the statistic
+% CE: the training cells kept (the round(ceCensor * nTrain) largest are left out of the mean)
+sys.cfar.ceKeep = sys.cfar.nTrain - round(c.ceCensor * sys.cfar.nTrain);
+if strcmp(c.type, 'ce') && sys.cfar.ceKeep < 1
+    error('cfg.cfar.ceCensor = %g leaves no training cell of the %d (CE-CFAR).', c.ceCensor, sys.cfar.nTrain);
+end
 if any(strcmp(c.type, {'go', 'so'})) && sys.cfar.nHalf < 1
     error('cfg.cfar.type = ''%s'' needs training cells on both sides of the cell (cfg.cfar.%s).', c.type, c.method);
 end
@@ -637,6 +656,21 @@ if sys.staggered
 end
 nTaps = size(sys.mtiCoeffs, 2);
 nOut  = sys.cpi.length - (nTaps - 1);                         % MTI output samples
+% Doppler processing of the staggered PRF (cfg.proc.staggerDoppler): 'deinterleave' (rows of one
+% stagger position, FFT, non-coherent sum of the rows) or 'nufft' (the whole CPI as one non-uniformly
+% sampled sequence: non-uniform DFT on a velocity grid, nufft_setup below)
+sys.dop.method = 'fft';
+if sys.staggered && isfield(cfg.proc, 'staggerDoppler') && ~isempty(cfg.proc.staggerDoppler)
+    switch lower(cfg.proc.staggerDoppler)
+        case 'deinterleave'
+        case 'nufft', sys.dop.method = 'nufft';
+        otherwise, error('cfg.proc.staggerDoppler must be ''deinterleave'' or ''nufft''.');
+    end
+end
+if strcmp(sys.dop.method, 'nufft')
+    sys = nufft_setup(sys, cfg, nOut);
+    return
+end
 if sys.staggered
     nRows  = sys.nStagger;                                    % one row per stagger position
     rowLen = floor(nOut / nRows);
@@ -707,6 +741,7 @@ end
 % and Hann, 3 for Blackman, 1 for the rectangular window).
 sys.dop.notchBins = round(cfg.cfar.notchWidth * sys.dop.mainlobe * nfft / rowLen);
 zeroBin = floor(nfft/2) + 1;
+sys.dop.zeroBin = zeroBin;                                    % zero Doppler after fftshift (1-based)
 if sys.cfar.notchMaxRange_m < cfg.rx.maxRange_m
     tested = true(1, nfft);                  % beyond the notch range, every Doppler bin is tested
 else
@@ -720,6 +755,102 @@ sys.dop.nLooks = min(nLooks(tested));
 % Median / mean of the noise power (used to estimate the noise floor of a beam)
 L = sys.dop.nLooks;
 sys.dop.medianToMean = fzero(@(x) gammainc(L*x, L) - 0.5, [0.1 2]);
+end
+
+function sys = nufft_setup(sys, cfg, nOut)
+% Staggered PRF with cfg.proc.staggerDoppler = 'nufft': the MTI outputs of the CPI (nOut, oldest
+% first; output m at the time of its oldest pulse) are one non-uniformly sampled sequence. The
+% Doppler spectrum is its non-uniform DFT on cfg.proc.nufft.nPoints frequencies,
+%   Y(f_j) = sum_m a_m y_m exp(-j 2 pi f_j t_m),   P = |Y|^2,
+% with a_m the window cfg.proc.nufft.window evaluated at the sample times (t_m scaled to [0, 1]:
+% a non-uniformly sampled window) times the density compensation (the mean spacing of the
+% neighbouring samples, cfg.proc.nufft.densityComp) and the bins f_j = -2 v_j / lambda of the velocity
+% grid from cfg.proc.nufft.vMax_mps down to vMin_mps (nPoints bins of (vMax - vMin)/nPoints, ordered by
+% increasing Doppler frequency like the FFT after fftshift; vMin itself is the next bin). The times
+% depend on the stagger position of the oldest output (the phase of the CPI): one matrix A(:, :, p) per
+% position p, every row scaled so that white noise at the MTI input gives unit noise power in every
+% bin (no further noise-gain equalisation; the range cells beyond cfg.mti.maxRange_m, without clutter
+% filter, are divided by their own gain bypassGain(:, p)). Every bin is a linear combination of the
+% samples: one look of the noise (nLooks = 1).
+nu = struct();
+if isfield(cfg.proc, 'nufft') && ~isempty(cfg.proc.nufft), nu = cfg.proc.nufft; end
+K = 2^nextpow2(nOut);
+if isfield(nu, 'nPoints') && ~isempty(nu.nPoints), K = nu.nPoints; end
+if ~isscalar(K) || ~isreal(K) || K < 2 || K ~= round(K) || K > 65536
+    error('cfg.proc.nufft.nPoints must be a whole number 2 ... 65536 (velocity bins of the NUFFT).');
+end
+if nOut < 2
+    error('The CPI of %d pulses is too short for the MTI and the Doppler processing (cfg.proc.cpiLength).', ...
+          sys.cpi.length);
+end
+lam = sys.lambda;
+vMax = lam / (4 * mean(sys.pri));                             % default: +- half the span of the mean PRF
+vMin = -vMax;
+if isfield(nu, 'vMax_mps') && ~isempty(nu.vMax_mps), vMax = nu.vMax_mps; end
+if isfield(nu, 'vMin_mps') && ~isempty(nu.vMin_mps), vMin = nu.vMin_mps; end
+if ~isscalar(vMax) || ~isscalar(vMin) || ~isfinite(vMax) || ~isfinite(vMin) || ~(vMax > vMin)
+    error('cfg.proc.nufft.vMin_mps must be smaller than vMax_mps (finite velocities [m/s]).');
+end
+dens = true;
+if isfield(nu, 'densityComp') && ~isempty(nu.densityComp), dens = logical(nu.densityComp); end
+[wname, wp] = window_spec(nu, 'window', 'hamming', 'cfg.proc.nufft.');
+dv = (vMax - vMin) / K;
+df = 2 * dv / lam;
+f = -2 * vMax / lam + (0:K-1) * df;                           % increasing frequency, decreasing velocity
+n = sys.cpi.length;
+L = size(sys.mtiCoeffs, 2);
+nS = sys.nStagger;
+A = zeros(K, nOut, nS);
+gB = zeros(K, nS);
+for p = 1:nS                                                  % stagger position of the oldest pulse
+    pos = mod(p - 1 + (0:n-1), nS) + 1;                       % positions of the pulses of the CPI
+    tp = [0, cumsum(reshape(sys.pri(pos(1:n-1)), 1, []))];    % their times; pulse k is followed by pri(pos(k))
+    t = tp(1:nOut);                                           % output m: its oldest pulse
+    w = window_function(wname, nOut, wp, t / t(end));
+    if dens
+        d = diff(t);
+        dd = [d(1), (d(1:end-1) + d(2:end)) / 2, d(end)];
+        w = w .* (dd(:) / mean(dd));
+    end
+    a = exp(-2i*pi * f(:) * t) .* w(:).';                     % [K x nOut]
+    H = zeros(nOut, n);                                       % the MTI of this phase
+    for m = 1:nOut
+        H(m, m:m+L-1) = sys.mtiCoeffs(pos(m), :);
+    end
+    g = sum(abs(a * H).^2, 2);                                % noise gain of every bin
+    g = max(g, eps * max(g));
+    a = a ./ sqrt(g);
+    A(:, :, p) = a;
+    gB(:, p) = sum(abs(a).^2, 2);                             % white noise without the clutter filter
+end
+[w1, mainlobe] = window_function(wname, nOut, wp);
+sys.cpi.nRows = 1;
+sys.cpi.rowLen = nOut;
+sys.dop.nfft = K;
+sys.dop.window = w1 / norm(w1);
+sys.dop.mainlobe = mainlobe;
+sys.dop.rowPri_s = 1 / (K * df);                              % velocity span of the grid: lambda/(2*rowPri)
+sys.dop.f_Hz = f;
+sys.dop.v_mps = -f * lam / 2;
+names = {'short', 'long'};
+for i = 1:2
+    sys.wave.(names{i}).v_mps = -f * sys.wave.(names{i}).lambda_m / 2;
+end
+sys.dop.noiseGain = ones(K, 1);                               % (in the matrices)
+sys.dop.noiseGainBypass = ones(K, 1);
+sys.dop.nufft = struct('A', A, 'bypassGain', gB, 'vMin_mps', vMin, 'vMax_mps', vMax, 'window', wname, ...
+                       'densityComp', dens);
+% MTI notch: the window mainlobe of the CPI duration around zero velocity
+sys.dop.notchBins = round(cfg.cfar.notchWidth * mainlobe / (nOut * mean(sys.pri)) / df);
+j0 = round(2 * vMax / lam / df) + 1;                          % the bin of zero velocity (1-based)
+sys.dop.zeroBin = 0;                                          % 0: zero velocity is not on the grid (no notch)
+if j0 >= 1 && j0 <= K && abs(f(j0)) <= df/2 * (1 + 1e-9), sys.dop.zeroBin = j0; end
+if sys.dop.zeroBin > 0 && ~(sys.cfar.notchMaxRange_m < cfg.rx.maxRange_m) && 2*sys.dop.notchBins + 1 >= K
+    error('The MTI notch (cfg.cfar.notchWidth = %g: +-%d bins) covers every Doppler bin (NUFFT %d points).', ...
+          cfg.cfar.notchWidth, sys.dop.notchBins, K);
+end
+sys.dop.nLooks = 1;
+sys.dop.medianToMean = log(2);                                % median / mean of an exponential power
 end
 
 function [rpm, list] = rpm_choice(ant)
@@ -833,21 +964,34 @@ end
 
 function [w, mainlobe] = doppler_window(cfg, N)
 % Window of the Doppler FFT (cfg.proc.dopplerWindow, default 'hamming'; N x 1, not normalised) and
-% the half-width of its mainlobe in units of nfft/N bins.
-name = 'hamming';
-if isfield(cfg.proc, 'dopplerWindow') && ~isempty(cfg.proc.dopplerWindow), name = lower(cfg.proc.dopplerWindow); end
-n = (0:N-1)';
-x = 2*pi*n / max(N - 1, 1);
-switch name
-    case 'hamming',  w = 0.54 - 0.46*cos(x);  mainlobe = 2;
-    case 'hann',     w = 0.5 - 0.5*cos(x);  mainlobe = 2;
-    case 'blackman', w = 0.42 - 0.5*cos(x) + 0.08*cos(2*x);  mainlobe = 3;
-    case {'rect', 'rectangular', 'none'}, w = ones(N, 1);  mainlobe = 1;
-    otherwise
-        error('cfg.proc.dopplerWindow must be ''hamming'', ''hann'', ''blackman'' or ''rect''.');
+% the half-width of its mainlobe in units of nfft/N bins (window_function.m).
+[name, p] = window_spec(cfg.proc, 'dopplerWindow', 'hamming');
+[w, mainlobe] = window_function(name, N, p);
 end
-if N == 1, w = 1; end
-if ~any(w), w(:) = 1; end                                     % (Hann/Blackman of 2 samples are zero)
+
+function [name, p] = window_spec(s, key, default, path)
+% Window s.(key) (default: default) and its parameters s.(key)Sll_dB, s.(key)Nbar, s.(key)Beta
+% (window_function.m). The range window also takes the older cfg.proc.taylorNbar / taylorSll_dB.
+% path: the prefix of the fields in the messages (default 'cfg.proc.').
+if nargin < 4, path = 'cfg.proc.'; end
+name = default;
+if isfield(s, key) && ~isempty(s.(key)), name = s.(key); end
+if ~ischar(name), error('%s%s must be the name of a window.', path, key); end
+name = lower(name);
+p = struct('sll_dB', -35, 'nbar', 4, 'beta', 6);
+if strcmp(key, 'rangeWindow')
+    if isfield(s, 'taylorSll_dB') && ~isempty(s.taylorSll_dB), p.sll_dB = s.taylorSll_dB; end
+    if isfield(s, 'taylorNbar') && ~isempty(s.taylorNbar), p.nbar = s.taylorNbar; end
+end
+f = {'Sll_dB', 'sll_dB'; 'Nbar', 'nbar'; 'Beta', 'beta'};
+for i = 1:size(f, 1)
+    if isfield(s, [key f{i, 1}]) && ~isempty(s.([key f{i, 1}])), p.(f{i, 2}) = s.([key f{i, 1}]); end
+end
+known = {'rect', 'rectangular', 'none', 'hamming', 'hann', 'blackman', 'blackmanharris', 'taylor', 'chebyshev', 'kaiser'};
+if ~any(strcmp(name, known))
+    error(['%s%s must be ''rect'', ''hamming'', ''hann'', ''blackman'', ''blackmanharris'', ''taylor'', ' ...
+           '''chebyshev'' or ''kaiser'' (is ''%s'').'], path, key, name);
+end
 end
 
 function [iv, recEnd, isSet] = receive_windows(ws, wl, defaultEnd, halfSpan)
@@ -931,8 +1075,9 @@ fsOut = sys.fsOut;
 Lp  = round(wv.width_s * fsOut);                              % pulse length [samples]
 ref = waveform_envelope(wv, ((0:Lp-1)' + 0.5) / fsOut);       % mid-sample times (not on chip edges)
 win = ones(Lp, 1);
-if strcmpi(wv.type, 'lfm')
-    win = taylor_window(Lp, cfg.proc.taylorNbar, cfg.proc.taylorSll_dB);
+if strcmpi(wv.type, 'lfm')                                    % cfg.proc.rangeWindow (default Taylor)
+    [wname, wp] = window_spec(cfg.proc, 'rangeWindow', 'taylor');
+    win = window_function(wname, Lp, wp);
 end
 hMatched = conj(flipud(ref .* win));
 switch wv.compression
@@ -998,13 +1143,18 @@ if ~isscalar(w.notchMaxRange_m) || ~isreal(w.notchMaxRange_m) || isnan(w.notchMa
 end
 w.type = 'ca';                                     % detector: cfg.cfar.type
 if isfield(c, 'type') && ~isempty(c.type), w.type = lower(c.type); end
-if ~any(strcmp(w.type, {'ca', 'go', 'so', 'os'}))
-    error('cfg.cfar.type must be ''ca'', ''go'', ''so'' or ''os''.');
+if ~any(strcmp(w.type, {'ca', 'go', 'so', 'os', 'ce'}))
+    error('cfg.cfar.type must be ''ca'', ''go'', ''so'', ''os'' or ''ce''.');
 end
 w.osRank = 0.9;
 if isfield(c, 'osRank') && ~isempty(c.osRank), w.osRank = c.osRank; end
 if ~(w.osRank > 0 && w.osRank <= 1)
     error('cfg.cfar.osRank must lie in (0, 1].');
+end
+w.ceCensor = 0.1;                                  % CE: fraction of the training cells left out (the largest)
+if isfield(c, 'ceCensor') && ~isempty(c.ceCensor), w.ceCensor = c.ceCensor; end
+if ~isscalar(w.ceCensor) || ~isreal(w.ceCensor) || ~(w.ceCensor >= 0 && w.ceCensor < 1)
+    error('cfg.cfar.ceCensor must lie in [0, 1).');
 end
 switch w.method
     case '2d'

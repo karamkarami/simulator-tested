@@ -188,10 +188,16 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
 
     if (ok) {
         cfg->nCh             = get_int(&rs, "nCh");
+        {                                              /* optional: every channel in older files */
+            const Record *r = find_optional(&rs, "nChUsed");
+            cfg->nChUsed = r && r->rows * r->cols >= 1 ? (int)lround(r->data[0]) : cfg->nCh;
+            if (!rs.failed && (cfg->nChUsed < 1 || cfg->nChUsed > cfg->nCh))
+                set_error(&rs, "invalid number of channels used (nChUsed %d of %d)", cfg->nChUsed, cfg->nCh);
+        }
         cfg->nBeams          = get_int(&rs, "nBeams");
         cfg->dbfEnabled      = get_int(&rs, "dbfEnabled");
         if (cfg->dbfEnabled)
-            get_complex(&rs, "W", cfg->nBeams, cfg->nCh, 1, &cfg->wRe, &cfg->wIm);
+            get_complex(&rs, "W", cfg->nBeams, cfg->nChUsed, 1, &cfg->wRe, &cfg->wIm);
         cfg->beamU           = get_doubles(&rs, "beamU", cfg->nBeams, NULL);
         cfg->tilt_deg        = get_scalar(&rs, "tilt_deg");
         cfg->height_m        = get_scalar(&rs, "height_m");
@@ -300,6 +306,28 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         }
         cfg->dopFreq_Hz   = get_doubles(&rs, "dopFreq_Hz", cfg->nfft, NULL);
         cfg->notchBins    = get_int(&rs, "notchBins");
+        cfg->zeroBin      = cfg->nfft / 2;
+        {                                              /* optional: the FFT in older files */
+            const Record *r = find_optional(&rs, "dopplerMethod");
+            cfg->dopplerMethod = r && r->rows * r->cols >= 1 && lround(r->data[0]) == 1 ? DOPPLER_NUFFT : DOPPLER_FFT;
+        }
+        if (cfg->dopplerMethod == DOPPLER_NUFFT && !rs.failed) {
+            cfg->zeroBin = get_int(&rs, "zeroBin");
+            const int K = cfg->nfft, N = cfg->rowLen, S = cfg->nStagger;
+            float *ar = NULL, *ai = NULL;
+            if (K < 1 || N < 1 || S < 1 || cfg->nRows != 1 || !cfg->staggered || cfg->zeroBin < -1 || cfg->zeroBin >= K)
+                set_error(&rs, "invalid NUFFT settings in the configuration");
+            else if (get_complex(&rs, "nufftA", K * S, N, 1, &ar, &ai) == 0) {
+                cfg->nufftARe = ar;                    /* row (p*K + j), row-major: [p][j][n] */
+                cfg->nufftAIm = ai;
+                float *g = get_floats(&rs, "nufftBypassGain", K * S);   /* [K x S] column-major = [p][j] */
+                cfg->nufftBypassGain = g;
+                for (int i = 0; g && i < K * S && !rs.failed; i++)
+                    if (!(g[i] > 0.0f)) set_error(&rs, "invalid NUFFT bypass gain in the configuration");
+            } else {
+                free(ar); free(ai);
+            }
+        }
         {                                              /* optional: preserve the old all-range notch in older files */
             const Record *r = find_optional(&rs, "notchMaxRange_m");
             if (!r) cfg->notchMaxRange_m = INFINITY;
@@ -323,6 +351,19 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             cfg->cfarOsK = (r && r->rows * r->cols >= 1) ? (int)lround(r->data[0]) : 0;
             r = find_optional(&rs, "cfarNoiseScale");
             cfg->cfarNoiseScale = (r && r->rows * r->cols >= 1) ? r->data[0] : 1.0;
+            r = find_optional(&rs, "cfarCeKeep");
+            cfg->cfarCeKeep = (r && r->rows * r->cols >= 1) ? (int)lround(r->data[0]) : 0;
+            r = find_optional(&rs, "cfarCeTable");               /* CE: [log z; log G] (2 x n) */
+            if (r && !r->isComplex && r->rows == 2 && r->cols >= 2) {
+                cfg->nCeTable = (int)r->cols;
+                cfg->ceLogZ = malloc(sizeof(double) * r->cols);
+                cfg->ceLogG = malloc(sizeof(double) * r->cols);
+                if (!cfg->ceLogZ || !cfg->ceLogG) set_error(&rs, "out of memory");
+                for (uint32_t k = 0; k < r->cols && !rs.failed; k++) {
+                    cfg->ceLogZ[k] = r->data[2 * k];
+                    cfg->ceLogG[k] = r->data[2 * k + 1];
+                }
+            }
         }
         cfg->alpha        = get_scalar(&rs, "alpha");
         {                                              /* optional: no limit in older files */
@@ -455,7 +496,8 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         }
 
         if (!rs.failed && (cfg->updateEvery < 1 || cfg->minHits < 1 || cfg->maxMiss < 0 || cfg->cpiLength < 1 ||
-                           cfg->nfft < 1 || cfg->nRows < 1 || cfg->rowLen < 1 || cfg->rowLen > cfg->nfft ||
+                           cfg->nfft < 1 || cfg->nRows < 1 || cfg->rowLen < 1 ||
+                           (cfg->rowLen > cfg->nfft && cfg->dopplerMethod == DOPPLER_FFT) ||
                            cfg->nBeams < 1 || cfg->nCh < 1 || cfg->nStagger < 1 || cfg->nMtiTaps < 1 ||
                            !cfg->mtiCoeffs || cfg->notchBins < 0 || isnan(cfg->notchMaxRange_m) || cfg->notchMaxRange_m < 0.0))
             set_error(&rs, "invalid sizes in the configuration");
@@ -469,9 +511,10 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
         }
         if (!rs.failed && (cfg->cfarMethod < CFAR_2D || cfg->cfarMethod > CFAR_DOPPLER))
             set_error(&rs, "invalid CFAR method in the configuration");
-        if (!rs.failed && (cfg->cfarType < CFAR_CA || cfg->cfarType > CFAR_OS || !(cfg->cfarNoiseScale > 0.0) ||
+        if (!rs.failed && (cfg->cfarType < CFAR_CA || cfg->cfarType > CFAR_CE || !(cfg->cfarNoiseScale > 0.0) ||
                            ((cfg->cfarType == CFAR_GO || cfg->cfarType == CFAR_SO) && cfg->cfarNHalf < 1) ||
-                           (cfg->cfarType == CFAR_OS && (cfg->cfarOsK < 1 || cfg->cfarOsK > cfg->nTrain))))
+                           (cfg->cfarType == CFAR_OS && (cfg->cfarOsK < 1 || cfg->cfarOsK > cfg->nTrain)) ||
+                           (cfg->cfarType == CFAR_CE && (cfg->cfarCeKeep < 1 || cfg->cfarCeKeep > cfg->nTrain))))
             set_error(&rs, "invalid CFAR detector (type, half window, rank or noise scale) in the configuration");
         if (!rs.failed) {                                  /* CFAR window */
             const int gR = cfg->guardRange, oR = gR + cfg->trainRange;
@@ -483,7 +526,7 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
                 nTrain != cfg->nTrain || 2 * oD + 1 > cfg->nfft || 2 * oR + 1 >= 64 || tooShort)
                 set_error(&rs, "invalid CFAR window in the configuration");
         }
-        if (!rs.failed && (cfg->nfft & (cfg->nfft - 1)) != 0)
+        if (!rs.failed && cfg->dopplerMethod == DOPPLER_FFT && (cfg->nfft & (cfg->nfft - 1)) != 0)
             set_error(&rs, "the Doppler FFT length %d is not a power of 2", cfg->nfft);
         if (!rs.failed && cfg->nRows * cfg->rowLen + cfg->nMtiTaps - 1 > cfg->cpiLength)
             set_error(&rs, "the CPI buffer is shorter than the Doppler processing needs");
@@ -579,7 +622,8 @@ void radar_config_free(RadarConfig *cfg)
         free(pc->pulseRe);  free(pc->pulseIm);  free(pc->beamU);
     }
     free(cfg->mtiCoeffs);  free(cfg->dopWindow);  free(cfg->noiseGain);  free(cfg->dopFreq_Hz);
-    free(cfg->noiseGainBypass);
+    free(cfg->noiseGainBypass);  free(cfg->nufftARe);  free(cfg->nufftAIm);  free(cfg->nufftBypassGain);
+    free(cfg->ceLogZ);  free(cfg->ceLogG);
     for (int j = 0; j < cfg->nPrf && cfg->prf; j++) {
         PrfProfile *q = &cfg->prf[j];
         free(q->dopWindow);  free(q->noiseGain);  free(q->noiseGainBypass);  free(q->dopFreq_Hz);
@@ -595,6 +639,7 @@ int radar_config_select_prf(RadarConfig *cfg, int k)
     cfg->cpiLength = q->cpiLength;
     cfg->rowLen = q->rowLen;
     cfg->nfft = q->nfft;
+    cfg->zeroBin = q->nfft / 2;
     cfg->notchBins = q->notchBins;
     cfg->minHits = q->minHits;
     cfg->meanPri_s = q->pri_s;
