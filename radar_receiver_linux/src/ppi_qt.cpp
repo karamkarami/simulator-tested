@@ -3258,7 +3258,7 @@ private:
         g->setHorizontalSpacing(10);
         auto combo = [&](const QString &label, int row, int col, int item) {
             QLabel *l = new QLabel(label, box);
-            if (col > 0) l->setContentsMargins(48, 0, 0, 0);   /* a gap after the field on its left */
+            if (col > 0) l->setContentsMargins(80, 0, 0, 0);   /* a gap after the field on its left */
             g->addWidget(l, row, 2 * col);
             QComboBox *c = new QComboBox(box);
             c->setMinimumWidth(110);
@@ -3281,7 +3281,7 @@ private:
         bOp_ = combo(QStringLiteral("Operation Mode"), 3, 0, BOARD_OPMODE);
         for (int i = 0; i < 2; i++) {                    /* F1 (short pulse), F2 (long pulse) [MHz] */
             QLabel *fl = new QLabel(i ? QStringLiteral("F2") : QStringLiteral("F1"), box);
-            fl->setContentsMargins(48, 0, 0, 0);
+            fl->setContentsMargins(80, 0, 0, 0);
             g->addWidget(fl, 3, 2 + 2 * i);
             QHBoxLayout *h = new QHBoxLayout();
             bF_[i] = new QSpinBox(box);
