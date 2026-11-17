@@ -38,7 +38,8 @@ enum { WAVE_LFM = 0, WAVE_PHASE_CODE = 1 };
 enum { COMPRESSION_MATCHED = 0, COMPRESSION_MISMATCH = 1 };
 enum { SNR_NOISE_MEDIAN = 0, SNR_NOISE_CFAR = 1 };   /* noise floor of the SNR of the reports */
 enum { MTI_CANCELLER = 0, MTI_FIR = 1 };
-enum { UDP_FORMAT_RDDC = 0, UDP_FORMAT_VBDR = 1 };   /* packet format of the DDC stream (cfg.udp.format) */             /* clutter filter (cfg.mti.type; information) */
+enum { UDP_FORMAT_RDDC = 0, UDP_FORMAT_VBDR = 1 };
+typedef struct BoardControl BoardControl;   /* board_control.c */   /* packet format of the DDC stream (cfg.udp.format) */             /* clutter filter (cfg.mti.type; information) */
 const char *cfar_method_name(int method);   /* "2-D", "1-D range", "1-D Doppler" */
 const char *cfar_type_name(int type);       /* "CA", "GO", "SO", "OS", "CE" */
 
@@ -541,7 +542,10 @@ void logger_end_pri(Logger *L);
 void logger_stats(Logger *L, LoggerStats *s);
 const char *logger_dir(const Logger *L);
 int  logger_mask(const Logger *L);
-void logger_stop(Logger *L, LoggerStats *final);   /* final: the statistics at the end (may be NULL) */
+void logger_stop(Logger *L, LoggerStats *final);
+/* Runs fn(arg) when the writer has written every queued file, while it cannot start the next one
+ * (a change of the configuration the logger reads, e.g. a new radar mode). L NULL: fn(arg) now. */
+void logger_when_idle(Logger *L, void (*fn)(void *), void *arg);   /* final: the statistics at the end (may be NULL) */
 
 /* ------------------------------------------------------------------------ */
 /* Raw video of the PPI (video.c)                                            */
@@ -663,11 +667,140 @@ void ppi_post_log_status(int active, const char *dir, int mask, const LoggerStat
  * rate (default 10). The window (with the mouse pointer drawn) and the sound go to
  * <log>/screen_record.mp4 (H.264 + AAC) until the log stops. */
 void ppi_set_screen_record(const char *ffmpeg, const char *audio, double fps);
+/* Radar Settings of the tab Controls (call before ppi_run; NULL: the section says that the board
+ * control is off): the board control of the receiver. */
+void ppi_set_board_control(BoardControl *bc);
+/* A new radar mode in use: the instrumented range and the Doppler axis of the range-Doppler tab. */
+void ppi_post_geometry(double maxRange_m, double vMin_mps, double vMax_mps);
 /* Accumulated processing times: the panel shows the mean per PRI of every
  * block [us]. detectionName / trackingName label the CFAR and tracking rows
  * (e.g. "CFAR 2-D", "Track 3D CV"; NULL keeps the previous; the panel shortens
  * a label to 15 characters, "1-D" -> "1D"). */
 void ppi_post_timing(const ProcessorTiming *timing, const char *detectionName, const char *trackingName);
+
+/* ------------------------------------------------------------------------ */
+/* VBDR board: commands (board_link.c), settings of the modes (radar_settings.c) */
+/* and the control of the PPI (board_control.c)                              */
+/* ------------------------------------------------------------------------ */
+
+/* Registers of the board (README "VBDR stream and board control"): the commands are ASCII text
+ * "CNTL W 0xAA 0xVV" (write VV to address AA) and "CNTL R 0xAA 0x00" (read); the board answers
+ * "<command> Returned Value = 0x%08X" (write: 0, read: the value in the low byte). */
+enum { BOARD_MODE = 0, BOARD_CODE, BOARD_F1, BOARD_F2, BOARD_STAGGER, BOARD_OPMODE,
+       BOARD_STC_MAIN, BOARD_STC_J1, BOARD_STC_J2, BOARD_STC_J3,
+       BOARD_GAIN_MAIN, BOARD_GAIN_J1, BOARD_GAIN_J2, BOARD_GAIN_J3,
+       BOARD_RPM, BOARD_EXT_TRIG, BOARD_N_ITEMS };
+int         board_item_address(int item);      /* 0x00, 0x01, 0x02, 0x03, 0x05, 0x28, 0x29 ... 0x30, 0x32, 0x31 */
+const char *board_item_name(int item);         /* "Radar Mode", "Phase Code", ..., "STC Main", ... */
+const char *board_register_name(int address);  /* "Radar_Mode", "Code_index", ... ("unknown") */
+
+/* Text of a command / of the answer of the board; parsing of both. */
+void board_format_command(char *buf, size_t len, int write, int address, int value);
+void board_format_reply(char *buf, size_t len, int write, int address, int value, uint32_t returned);
+/* Parses "CNTL W|R 0xAA 0xVV": returns 1 with *write, *address, *value, else 0. */
+int  board_parse_command(const char *text, int *write, int *address, int *value);
+/* Parses an answer to the command (write, address, value): returns 1 with *returned, else 0. */
+int  board_parse_reply(const char *text, int write, int address, int value, uint32_t *returned);
+
+/* Client of the receiver: sends to host:port, receives the answers on replyPort. */
+typedef struct BoardLink BoardLink;
+BoardLink *board_link_open(const char *host, int port, int replyPort, char *err, size_t errLen);
+/* One command with its answer: waits timeout_s for it and sends it again up to 'retries' times.
+ * Returns 1 with *returned, 0 when the board did not answer, -1 on a socket error. */
+int  board_link_exchange(BoardLink *l, int write, int address, int value, double timeout_s, int retries,
+                         uint32_t *returned);
+void board_link_close(BoardLink *l);
+
+/* The simulator as the board: listens on 'port', answers to replyHost:replyPort. board_sim_poll()
+ * answers the commands that arrived (never waits; wait_ms > 0: waits up to that long for the
+ * first one) and returns how many; *written (may be NULL) gets a bit per address written
+ * (written[addr / 32] bit addr % 32, 8 words). The registers start with regs[256]. */
+typedef struct BoardSim BoardSim;
+BoardSim *board_sim_open(int port, const char *replyHost, int replyPort, const uint8_t *regs, int verbose,
+                         char *err, size_t errLen);
+int  board_sim_poll(BoardSim *b, int wait_ms, uint32_t *written);
+uint8_t board_sim_register(const BoardSim *b, int address);
+void board_sim_set_register(BoardSim *b, int address, uint8_t value);
+void board_sim_close(BoardSim *b);
+
+/* Settings of a radar mode that the PPI can change. */
+typedef struct {
+    int    code;          /* phase code pair (1-based, both sub-pulses; 0: the mode has no phase code) */
+    int    stagger;       /* stagger pair (1-based; 0: no staggered PRF)                         */
+    double rpm;           /* rotation speed [rev/min]                                            */
+    int    f1_MHz, f2_MHz;/* carriers of the short / long pulse [MHz] (0: the sub-pulse is off)  */
+    int    stc[4], gain[4];   /* STC and gain of Main, J1, J2, J3 (1-based options)              */
+} ModeSettings;
+
+typedef struct {
+    int    mode;                       /* 0 ... 7                                               */
+    char   name[64];
+    int    enable[N_PULSES], phaseCode[N_PULSES];
+    int    nCodes, codes[64];          /* phase codes the mode may use (all phase-coded sub-pulses) */
+    int    staggered, nStagger, staggerSets[64];
+    int    nRpm;
+    double rpms[64];
+    int    stcOptions[4], gainOptions[4];
+    ModeSettings defaults;             /* the settings of the mode file                         */
+} ModeInfo;
+
+typedef struct {
+    int      nModes;
+    ModeInfo modes[8];                 /* cfg.modes.available                                  */
+    int      activeMode;               /* cfg.modes.active                                     */
+    int      fcMin_MHz, fcMax_MHz;     /* cfg.fcMin_Hz, cfg.fcMax_Hz                            */
+    int      nOperationModes, operationMode, sendRpm;
+    char     host[64];                 /* cfg.board: host, port, replyPort, timeout_s, retries   */
+    int      port, replyPort;
+    double   timeout_s;
+    int      retries;
+    char     mPath[1024];              /* radar_config.m and the statements run after it        */
+    int      nSets;
+    char     sets[16][512];
+} BoardInfo;
+
+/* Reads cfg.board, cfg.fcMin_Hz / fcMax_Hz and the settings of every mode of cfg.modes.available
+ * from mPath (radar_config.m, evaluated as by radar_export_config, with the statements sets[]).
+ * Returns 0, or -1 with the message in err. */
+int  board_info_load(const char *mPath, const char *const *sets, int nSets, BoardInfo *bi, char *err, size_t errLen);
+const ModeInfo *board_mode_info(const BoardInfo *bi, int mode);    /* NULL: not available */
+/* 1 when s is a valid setting of the mode (else 0 with the reason in err). */
+int  board_settings_valid(const BoardInfo *bi, int mode, const ModeSettings *s, char *err, size_t errLen);
+/* The receiver configuration of the mode with the settings s (radar_config.m with cfg.modes.active,
+ * the code, stagger pair, rotation speed and carriers): 0, or -1 with the message in err. */
+int  board_build_config(const BoardInfo *bi, int mode, const ModeSettings *s, RadarConfig *cfg, char *err, size_t errLen);
+/* The settings of a loaded configuration (mode cfg->radarMode): code, stagger, rpm and carriers
+ * from cfg, STC and gain the defaults of the mode. */
+void board_settings_of_config(const BoardInfo *bi, const RadarConfig *cfg, ModeSettings *s);
+
+/* Control of the board for the PPI (tab Controls, Radar Settings): a thread of its own sends the
+ * settings (write, then read back), keeps the confirmed settings of every mode while the program
+ * runs, builds the receiver configuration of a new mode / code / stagger pair / rotation speed /
+ * carrier and hands it to the worker (board_control_take_config). */
+enum { BOARD_REQ_SET = 0,        /* item, value                                       */
+       BOARD_REQ_RESET_MODE,     /* the defaults of the current mode, sent now          */
+       BOARD_REQ_RESET_ALL,      /* forget every mode; the current one sent now         */
+       BOARD_REQ_EXPORT,         /* path: the settings of every mode to a MAT-file       */
+       BOARD_REQ_IMPORT,         /* path: settings of a MAT-file (checked), sent now     */
+       BOARD_REQ_CHECK };        /* read every register and compare (the start)          */
+typedef struct {
+    uint64_t     serial;         /* changes with every new state                         */
+    int          busy;           /* a request is running                                  */
+    int          mode;           /* the mode the receiver uses                            */
+    ModeSettings cur;            /* its settings in use                                   */
+    int          opMode;
+    int          level;          /* 0 ok, 1 warning, 2 error (colour of the status)       */
+    char         status[2048];
+} BoardState;
+BoardControl *board_control_start(const BoardInfo *bi, int mode, const ModeSettings *cur, char *err, size_t errLen);
+const BoardInfo *board_control_info(const BoardControl *bc);
+int  board_control_request(BoardControl *bc, int kind, int item, double value, const char *path);   /* 0: queued */
+void board_control_state(BoardControl *bc, BoardState *st);
+/* A new receiver configuration (1: *cfg filled, the caller owns it; *mode / *s its settings). */
+int  board_control_take_config(BoardControl *bc, RadarConfig *cfg, int *mode, ModeSettings *s);
+/* The changes for log_info.txt of a running log and the console: 1 with the next line. */
+int  board_control_take_note(BoardControl *bc, char *text, size_t len);
+void board_control_stop(BoardControl *bc);
 
 /* ------------------------------------------------------------------------ */
 /* Platform helpers (platform.c)                                             */

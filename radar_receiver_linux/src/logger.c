@@ -102,6 +102,7 @@ struct Logger {
     Job     *head, *tail;
     size_t   queuedBytes;
     int      stop;
+    int      writing;                   /* the writer is writing a job (not under lock)   */
     Mutex    lock;
     Cond     notEmpty;
 #ifdef _WIN32
@@ -248,10 +249,11 @@ static void write_job(Logger *L, const Job *j)
                 free(x);
                 char nm[40];
                 snprintf(nm, sizeof nm, "%sRange_m", g_pulseName[p]);
-                mat_write_double(w, nm, cfg->pulse[p].range_m, 1, (size_t)cfg->pulse[p].nRange);
+                if (cfg->pulse[p].range_m) mat_write_double(w, nm, cfg->pulse[p].range_m, 1, (size_t)cfg->pulse[p].nRange);
                 double *v = malloc(sizeof(double) * (size_t)nD);
                 if (!v) abort();
-                for (int d = 0; d < nD; d++) v[d] = -cfg->dopFreq_Hz[d] * cfg->pulse[p].lambda_m / 2;
+                for (int d = 0; d < nD; d++)          /* (a job of the mode before a change of the mode: NaN) */
+                    v[d] = nD == cfg->nfft ? -cfg->dopFreq_Hz[d] * cfg->pulse[p].lambda_m / 2 : NAN;
                 snprintf(nm, sizeof nm, "%sV_mps", g_pulseName[p]);
                 mat_write_double(w, nm, v, 1, (size_t)nD);
                 free(v);
@@ -295,11 +297,13 @@ static void writer(Logger *L)
         if (!j) { mutex_unlock(&L->lock); break; }       /* stopped and empty */
         L->head = j->next;
         if (!L->head) L->tail = NULL;
+        L->writing = 1;
         mutex_unlock(&L->lock);
         const double t0 = now_seconds();
         write_job(L, j);
         const double dt = now_seconds() - t0;
         mutex_lock(&L->lock);
+        L->writing = 0;
         L->queuedBytes -= j->bytes;
         L->bytes += j->bytes;
         L->pris++;
@@ -629,4 +633,22 @@ void logger_stop(Logger *L, LoggerStats *final)
     mutex_destroy(&L->lock);
     cond_destroy(&L->notEmpty);
     free(L);
+}
+
+void logger_when_idle(Logger *L, void (*fn)(void *), void *arg)
+{
+    if (!L) { fn(arg); return; }
+    mutex_lock(&L->lock);
+    while (L->head || L->writing) {                     /* the queued files first */
+        mutex_unlock(&L->lock);
+#ifdef _WIN32
+        Sleep(2);
+#else
+        struct timespec ts = { 0, 2000000L };
+        nanosleep(&ts, NULL);
+#endif
+        mutex_lock(&L->lock);
+    }
+    fn(arg);                                            /* the writer cannot start a job meanwhile */
+    mutex_unlock(&L->lock);
 }

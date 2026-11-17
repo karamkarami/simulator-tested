@@ -65,6 +65,7 @@
 #include <QContextMenuEvent>
 #include <QCursor>
 #include <QDoubleSpinBox>
+#include <QSpinBox>
 #include <QFileDialog>
 #include <QDateTime>
 #include <QDir>
@@ -288,7 +289,11 @@ struct Shared {
     ProcessorTiming       timing;          /* accumulated block times               */
     std::string           detName = "CFAR", trackName = "Tracking";
     uint64_t              timingSerial = 0;
+    bool                  geomNew = false;   /* a new radar mode: range and Doppler axis (ppi_post_geometry) */
+    double                geomRange_m = 0.0, geomV0 = 0.0, geomV1 = 0.0;
 };
+
+BoardControl *g_board = nullptr;   /* Radar Settings of the tab Controls (ppi_set_board_control) */
 
 /* Monotonic clock of the GUI thread's display time [s]. */
 double gui_seconds()
@@ -489,6 +494,13 @@ public:
     {
         finished_ = true;
         workerCode_ = workerCode;
+        update();
+    }
+    /* a new radar mode: its instrumented range */
+    void setMaxRange(double maxRange_m)
+    {
+        if (!(maxRange_m > 0.0) || maxRange_m == maxRange_m_) return;
+        maxRange_m_ = maxRange_m;
         update();
     }
     /* the recording mark in the top right corner while the log runs (tab Controls) */
@@ -2988,6 +3000,21 @@ public:
         ppi_->addGuiMs((gui_seconds() - t0) * 1e3);
         if (pause_->isChecked() != ppi_->paused()) setPaused(ppi_->paused());   /* Space or the context menu */
         showLog();
+        showBoard();
+        {                                                   /* a new radar mode */
+            bool geom = false;
+            double r = 0.0, v0 = 0.0, v1 = 0.0;
+            {
+                Shared &sh = shared();
+                std::lock_guard<std::mutex> lock(sh.mutex);
+                if (sh.geomNew) { geom = true; r = sh.geomRange_m; v0 = sh.geomV0; v1 = sh.geomV1; sh.geomNew = false; }
+            }
+            if (geom) {
+                ppi_->setMaxRange(r);
+                if (v1 > v0) { g_rdVmin = v0; g_rdVmax = v1; }
+                rd_->setEmptyRange(r);
+            }
+        }
         if (recorder_.active() && gui_seconds() - recordShown_ > 1.0) { showRecording(); recordShown_ = gui_seconds(); }
         if (tracks_->isChecked() != ppi_->showTracks()) {          /* changed with T or the context menu */
             const bool b = tracks_->blockSignals(true);
@@ -3209,8 +3236,173 @@ private:
         note->setObjectName(QStringLiteral("note"));
         note->setWordWrap(true);
         v->addWidget(note);
+        v->addWidget(buildRadarSettings(page));
         v->addStretch(1);
         return page;
+    }
+
+    /* Radar Settings (VBDR board): every change is sent to the board and read back (board_control.c);
+     * the receiver uses a new mode, phase code, stagger pattern, rotation speed or carrier when the
+     * board confirms it. */
+    QWidget *buildRadarSettings(QWidget *page)
+    {
+        QGroupBox *box = new QGroupBox(QStringLiteral("Radar Settings"), page);
+        QVBoxLayout *v = new QVBoxLayout(box);
+        if (!g_board) {
+            QLabel *off = new QLabel(QStringLiteral("off: the settings of the modes (radar_config.m) could not be read, "
+                                                    "or the receiver runs with --no-board (see the console)"), box);
+            off->setObjectName(QStringLiteral("note"));
+            off->setWordWrap(true);
+            v->addWidget(off);
+            return box;
+        }
+        const BoardInfo *bi = board_control_info(g_board);
+        QGridLayout *g = new QGridLayout();
+        g->setHorizontalSpacing(10);
+        auto combo = [&](const QString &label, int row, int col, int item) {
+            g->addWidget(new QLabel(label, box), row, 2 * col);
+            QComboBox *c = new QComboBox(box);
+            c->setMinimumWidth(110);
+            g->addWidget(c, row, 2 * col + 1);
+            QObject::connect(c, QOverload<int>::of(&QComboBox::activated), [this, c, item](int index) {
+                const QVariant d = c->itemData(index);
+                if (d.isValid()) board_control_request(g_board, BOARD_REQ_SET, item, d.toDouble(), nullptr);
+            });
+            return c;
+        };
+        bMode_    = combo(QStringLiteral("Radar Mode"), 0, 0, BOARD_MODE);
+        bCode_    = combo(QStringLiteral("Phase Code"), 0, 1, BOARD_CODE);
+        bStagger_ = combo(QStringLiteral("Stagger Pattern"), 0, 2, BOARD_STAGGER);
+        bRpm_     = combo(QStringLiteral("RPM"), 0, 3, BOARD_RPM);
+        static const char *const ch[4] = { "Main", "J1", "J2", "J3" };
+        for (int k = 0; k < 4; k++) {
+            bStc_[k]  = combo(QStringLiteral("STC %1").arg(QLatin1String(ch[k])), 1, k, BOARD_STC_MAIN + k);
+            bGain_[k] = combo(QStringLiteral("Gain %1").arg(QLatin1String(ch[k])), 2, k, BOARD_GAIN_MAIN + k);
+        }
+        bOp_ = combo(QStringLiteral("Operation Mode"), 3, 0, BOARD_OPMODE);
+        for (int i = 0; i < 2; i++) {                    /* F1 (short pulse), F2 (long pulse) [MHz] */
+            g->addWidget(new QLabel(i ? QStringLiteral("F2") : QStringLiteral("F1"), box), 3, 2 + 2 * i);
+            QHBoxLayout *h = new QHBoxLayout();
+            bF_[i] = new QSpinBox(box);
+            bF_[i]->setRange(bi->fcMin_MHz, bi->fcMax_MHz);
+            bF_[i]->setSuffix(QStringLiteral(" MHz"));
+            bF_[i]->setToolTip(i ? QStringLiteral("carrier of the long pulse (sent as F2 - %1 MHz)").arg(bi->fcMin_MHz)
+                                 : QStringLiteral("carrier of the short pulse (sent as F1 - %1 MHz)").arg(bi->fcMin_MHz));
+            h->addWidget(bF_[i]);
+            bFApply_[i] = new QPushButton(QStringLiteral("Apply"), box);
+            h->addWidget(bFApply_[i]);
+            g->addLayout(h, 3, 3 + 2 * i);
+            QObject::connect(bFApply_[i], &QPushButton::clicked, [this, i]() {
+                board_control_request(g_board, BOARD_REQ_SET, i ? BOARD_F2 : BOARD_F1, bF_[i]->value(), nullptr);
+            });
+        }
+        v->addLayout(g);
+        QHBoxLayout *b = new QHBoxLayout();
+        QPushButton *resetMode = new QPushButton(QStringLiteral("Reset defaults for this mode"), box);
+        QPushButton *resetAll = new QPushButton(QStringLiteral("Reset defaults for all modes"), box);
+        QPushButton *exportB = new QPushButton(QStringLiteral("Export settings ..."), box);
+        QPushButton *importB = new QPushButton(QStringLiteral("Import settings ..."), box);
+        for (QPushButton *p : { resetMode, resetAll, exportB, importB }) { b->addWidget(p); bButtons_.push_back(p); }
+        b->addStretch(1);
+        v->addLayout(b);
+        QObject::connect(resetMode, &QPushButton::clicked, [this]() {
+            board_control_request(g_board, BOARD_REQ_RESET_MODE, 0, 0, nullptr);
+        });
+        QObject::connect(resetAll, &QPushButton::clicked, [this]() {
+            board_control_request(g_board, BOARD_REQ_RESET_ALL, 0, 0, nullptr);
+        });
+        QObject::connect(exportB, &QPushButton::clicked, [this]() {
+            const QString f = QFileDialog::getSaveFileName(this, QStringLiteral("Export the radar settings"),
+                                                           QDir::currentPath() + QStringLiteral("/radar_settings.mat"),
+                                                           QStringLiteral("MAT-files (*.mat)"));
+            if (!f.isEmpty()) board_control_request(g_board, BOARD_REQ_EXPORT, 0, 0, f.toLocal8Bit().constData());
+        });
+        QObject::connect(importB, &QPushButton::clicked, [this]() {
+            const QString f = QFileDialog::getOpenFileName(this, QStringLiteral("Import radar settings"), QDir::currentPath(),
+                                                           QStringLiteral("MAT-files (*.mat)"));
+            if (!f.isEmpty()) board_control_request(g_board, BOARD_REQ_IMPORT, 0, 0, f.toLocal8Bit().constData());
+        });
+        bStatus_ = new QLabel(QStringLiteral("reading the settings of the board ..."), box);
+        bStatus_->setObjectName(QStringLiteral("info"));
+        bStatus_->setWordWrap(true);
+        bStatus_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        v->addWidget(bStatus_);
+        QLabel *info = new QLabel(QStringLiteral(
+            "Board %1:%2 (answers on UDP port %3). Every setting is written to the board and read back; the receiver "
+            "uses a new radar mode, phase code, stagger pattern, RPM, F1 or F2 when the board confirms it (RPM: %4). "
+            "The confirmed settings of every mode are kept until the program ends; a mode chosen again gets them sent "
+            "again. Export / Import: the settings of all modes in a MAT-file.")
+                                      .arg(QString::fromLatin1(bi->host)).arg(bi->port).arg(bi->replyPort)
+                                      .arg(bi->sendRpm ? QStringLiteral("also sent to the board, address 0x32")
+                                                       : QStringLiteral("only the receiver")), box);
+        info->setObjectName(QStringLiteral("note"));
+        info->setWordWrap(true);
+        v->addWidget(info);
+        return box;
+    }
+
+    /* the state of the board control: the lists and values of the current mode, the status */
+    void showBoard()
+    {
+        if (!g_board || !bMode_) return;
+        BoardState st;
+        board_control_state(g_board, &st);
+        if (st.serial == boardSerial_) return;
+        boardSerial_ = st.serial;
+        const BoardInfo *bi = board_control_info(g_board);
+        const ModeInfo *m = board_mode_info(bi, st.mode);
+        auto fill = [](QComboBox *c, const QList<QPair<QString, double>> &items, double value, bool enabled) {
+            const bool b = c->blockSignals(true);
+            c->clear();
+            int sel = -1;
+            for (int i = 0; i < items.size(); i++) {
+                c->addItem(items[i].first, items[i].second);
+                if (std::fabs(items[i].second - value) < 1e-9) sel = i;
+            }
+            c->setCurrentIndex(sel);
+            c->setEnabled(enabled);
+            c->blockSignals(b);
+        };
+        QList<QPair<QString, double>> modes, codes, staggers, rpms, ops;
+        for (int i = 0; i < bi->nModes; i++)
+            modes << qMakePair(QStringLiteral("%1  %2").arg(bi->modes[i].mode).arg(QString::fromLatin1(bi->modes[i].name)),
+                               (double)bi->modes[i].mode);
+        for (int i = 1; i <= bi->nOperationModes; i++) ops << qMakePair(QString::number(i), (double)i);
+        const bool idle = !st.busy;
+        fill(bMode_, modes, st.mode, idle);
+        fill(bOp_, ops, st.opMode, idle);
+        if (m) {
+            for (int i = 0; i < m->nCodes; i++) codes << qMakePair(QString::number(m->codes[i]), (double)m->codes[i]);
+            for (int i = 0; i < m->nStagger; i++)
+                staggers << qMakePair(QString::number(m->staggerSets[i]), (double)m->staggerSets[i]);
+            for (int i = 0; i < m->nRpm; i++) rpms << qMakePair(QString::number(m->rpms[i]), m->rpms[i]);
+            fill(bCode_, codes, st.cur.code, idle && m->nCodes > 0);
+            fill(bStagger_, staggers, st.cur.stagger, idle && m->staggered);
+            fill(bRpm_, rpms, st.cur.rpm, idle);
+            for (int k = 0; k < 4; k++) {
+                QList<QPair<QString, double>> a, b;
+                for (int i = 1; i <= m->stcOptions[k]; i++) a << qMakePair(QString::number(i), (double)i);
+                for (int i = 1; i <= m->gainOptions[k]; i++) b << qMakePair(QString::number(i), (double)i);
+                fill(bStc_[k], a, st.cur.stc[k], idle);
+                fill(bGain_[k], b, st.cur.gain[k], idle);
+            }
+            const int f[2] = { st.cur.f1_MHz, st.cur.f2_MHz };
+            for (int i = 0; i < 2; i++) {
+                const bool on = m->enable[i] != 0;
+                const bool b = bF_[i]->blockSignals(true);
+                if (on) bF_[i]->setValue(f[i]);
+                bF_[i]->setEnabled(idle && on);
+                bFApply_[i]->setEnabled(idle && on);
+                bF_[i]->setSpecialValueText(QString());
+                bF_[i]->blockSignals(b);
+            }
+        }
+        for (QPushButton *p : bButtons_) p->setEnabled(idle);
+        QString text = st.busy ? QStringLiteral("sending to the board ...\n") : QString();
+        text += QString::fromLocal8Bit(st.status);
+        bStatus_->setText(text);
+        bStatus_->setStyleSheet(st.level >= 2 ? QStringLiteral("color: #ff8080;")
+                                : st.level == 1 ? QStringLiteral("color: #ffd060;") : QStringLiteral("color: #a0e0a0;"));
     }
     void toggleLog()
     {
@@ -3348,6 +3540,13 @@ private:
     double                 recordGuiMs_ = 0.0, recordPrev_ = 0.0, recordShown_ = 0.0;
     QPushButton           *logButton_;
     QLabel                *logStatus_;
+    QComboBox             *bMode_ = nullptr, *bCode_ = nullptr, *bStagger_ = nullptr, *bRpm_ = nullptr, *bOp_ = nullptr;
+    QComboBox             *bStc_[4] = {}, *bGain_[4] = {};
+    QSpinBox              *bF_[2] = {};
+    QPushButton           *bFApply_[2] = {};
+    std::vector<QPushButton *> bButtons_;
+    QLabel                *bStatus_ = nullptr;
+    uint64_t               boardSerial_ = 0;
     uint64_t               logSerial_ = 0;
     int                    logPending_ = 0;     /* 1: start requested, 2: stop requested */
     double                 logWriterPrev_ = 0.0;
@@ -3574,6 +3773,21 @@ extern "C" void ppi_set_rd_axes(double vMin_mps, double vMax_mps)
         g_rdVmin = vMin_mps;
         g_rdVmax = vMax_mps;
     }
+}
+
+extern "C" void ppi_set_board_control(BoardControl *bc)
+{
+    g_board = bc;
+}
+
+extern "C" void ppi_post_geometry(double maxRange_m, double vMin_mps, double vMax_mps)
+{
+    Shared &s = shared();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.geomNew = true;
+    s.geomRange_m = maxRange_m;
+    s.geomV0 = vMin_mps;
+    s.geomV1 = vMax_mps;
 }
 
 extern "C" void ppi_set_log_defaults(const char *folder, const char *name, int mask)

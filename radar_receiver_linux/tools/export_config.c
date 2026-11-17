@@ -2388,6 +2388,7 @@ static void export_config(void)
     }
 }
 
+#ifndef RADAR_EXPORT_LIBRARY
 /* The export and the file (errors of export_config() come back here). */
 static int run_export(const char *outPath)
 {
@@ -2404,6 +2405,46 @@ static int run_export(const char *outPath)
     return 0;
 }
 
+#endif
+#ifdef RADAR_EXPORT_LIBRARY
+/* The export as a function of the receiver (runtime change of the radar mode and its settings,
+ * radar_settings.c): evaluates mPath with the statements sets[] and writes outPath. Not thread
+ * safe (globals): one call at a time. Returns 0, or -1 with the message in err. */
+int radar_export_run(const char *mPath, const char *const *sets, int nSets, const char *outPath, char *err, size_t errLen)
+{
+    char e[1024];
+    g_quiet = 1;
+    MValue *cfg = mfile_eval(mPath, sets, nSets, e, sizeof e);
+    if (!cfg) {
+        snprintf(err, errLen, "%s", e);
+        return -1;
+    }
+    if (cfg->type != MV_STRUCT) {
+        snprintf(err, errLen, "%s: %s", mPath, cfg->type == MV_UNEVAL ? cfg->str : "does not return a struct");
+        mvalue_free(cfg);
+        return -1;
+    }
+    g_cfg = cfg;
+    int r = 0;
+    if (setjmp(g_jb) != 0) {
+        snprintf(err, errLen, "%s", g_err);
+        r = -1;
+    } else {
+        export_config();
+        if (write_file(outPath) != 0) {
+            snprintf(err, errLen, "cannot write %s", outPath);
+            r = -1;
+        }
+    }
+    for (int i = 0; i < g_nRec; i++) { free(g_rec[i].re); free(g_rec[i].im); }
+    free(g_rec);
+    g_rec = NULL;
+    g_nRec = g_capRec = 0;
+    g_cfg = NULL;
+    mvalue_free(cfg);
+    return r;
+}
+#else
 static void usage(void)
 {
     puts("usage: radar_export_config [--config-m FILE] [--out FILE] [--set STATEMENT]... [--quiet]\n"
@@ -2459,3 +2500,4 @@ int main(int argc, char **argv)
     mvalue_free(cfg);
     return 0;
 }
+#endif /* RADAR_EXPORT_LIBRARY */
