@@ -222,6 +222,128 @@ void mat_write_char(MatWriter *w, const char *name, const char *text)
     emit(w, &v);
 }
 
+/* ------------------------------------------------------------------------ */
+/* Nested structs                                                           */
+/* ------------------------------------------------------------------------ */
+
+typedef struct { char name[64]; Buf body; } MatField;   /* body: a complete miMATRIX element (no name) */
+
+struct MatStruct {
+    MatField *f;
+    int       n, cap;
+};
+
+MatStruct *mat_struct_new(void)
+{
+    MatStruct *s = calloc(1, sizeof *s);
+    if (!s) abort();
+    return s;
+}
+
+static Buf *add_field(MatStruct *s, const char *name)
+{
+    if (s->n == s->cap) {
+        s->cap = s->cap ? 2 * s->cap : 16;
+        MatField *f = realloc(s->f, sizeof *f * (size_t)s->cap);
+        if (!f) abort();
+        s->f = f;
+    }
+    MatField *f = &s->f[s->n++];
+    memset(f, 0, sizeof *f);
+    snprintf(f->name, sizeof f->name, "%s", name);
+    return &f->body;
+}
+
+void mat_struct_double(MatStruct *s, const char *field, const double *v, size_t rows, size_t cols)
+{
+    Buf m = { 0 };
+    matrix_head(&m, mxDOUBLE, (uint32_t)rows, (uint32_t)cols, "");
+    element(&m, miDOUBLE, v, (uint32_t)(sizeof(double) * rows * cols));
+    matrix_end(add_field(s, field), &m);
+}
+
+void mat_struct_scalar(MatStruct *s, const char *field, double v) { mat_struct_double(s, field, &v, 1, 1); }
+
+void mat_struct_single(MatStruct *s, const char *field, const float *re, const float *im, const size_t *dims, int nd)
+{
+    Buf m = { 0 };
+    const uint32_t flags[2] = { mxSINGLE | (im ? mxCOMPLEX_FLAG : 0), 0 };
+    int32_t d[8];
+    size_t n = 1;
+    const int ndIn = nd;
+    if (nd < 2) nd = 2;
+    if (nd > 8) nd = 8;
+    for (int k = 0; k < nd; k++) {
+        const size_t dk = k < ndIn ? dims[k] : 1;
+        d[k] = (int32_t)dk;
+        n *= dk;
+    }
+    element(&m, miUINT32, flags, 8);
+    element(&m, miINT32, d, (uint32_t)(4 * nd));
+    element(&m, miINT8, "", 0);
+    element(&m, miSINGLE, re, (uint32_t)(sizeof(float) * n));
+    if (im) element(&m, miSINGLE, im, (uint32_t)(sizeof(float) * n));
+    matrix_end(add_field(s, field), &m);
+}
+
+void mat_struct_char(MatStruct *s, const char *field, const char *text)
+{
+    Buf m = { 0 };
+    const size_t n = strlen(text);
+    uint16_t *c = malloc(sizeof(uint16_t) * (n ? n : 1));
+    if (!c) abort();
+    for (size_t i = 0; i < n; i++) c[i] = (unsigned char)text[i];
+    matrix_head(&m, mxCHAR, n ? 1 : 0, (uint32_t)n, "");
+    element(&m, miUINT16, c, (uint32_t)(sizeof(uint16_t) * n));
+    free(c);
+    matrix_end(add_field(s, field), &m);
+}
+
+/* the struct as an miMATRIX element named 'name' into out; frees s */
+static void struct_element(Buf *out, const char *name, MatStruct *s)
+{
+    Buf m = { 0 };
+    int32_t len = 1;
+    for (int k = 0; k < s->n; k++) {
+        const int32_t l = (int32_t)strlen(s->f[k].name) + 1;
+        if (l > len) len = l;
+    }
+    char *names = calloc((size_t)(s->n ? s->n : 1), (size_t)len);
+    if (!names) abort();
+    for (int k = 0; k < s->n; k++) memcpy(names + (size_t)k * len, s->f[k].name, strlen(s->f[k].name));
+    matrix_head(&m, mxSTRUCT, 1, 1, name);
+    element(&m, miINT32, &len, 4);
+    element(&m, miINT8, names, (uint32_t)(len * s->n));
+    free(names);
+    for (int k = 0; k < s->n; k++) {
+        put(&m, s->f[k].body.p, s->f[k].body.n);
+        free(s->f[k].body.p);
+    }
+    free(s->f);
+    free(s);
+    matrix_end(out, &m);
+}
+
+void mat_struct_struct(MatStruct *s, const char *field, MatStruct *child)
+{
+    struct_element(add_field(s, field), "", child);
+}
+
+void mat_struct_free(MatStruct *s)
+{
+    if (!s) return;
+    for (int k = 0; k < s->n; k++) free(s->f[k].body.p);
+    free(s->f);
+    free(s);
+}
+
+void mat_write_tree(MatWriter *w, const char *name, MatStruct *s)
+{
+    Buf v = { 0 };
+    struct_element(&v, name, s);
+    emit(w, &v);
+}
+
 int mat_write_close(MatWriter *w)
 {
     if (!w) return -1;

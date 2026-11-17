@@ -34,7 +34,13 @@
  *     --log-dir DIR          log the processing chain from the start to DIR/<name> (also: tab
  *                            "Controls" of the PPI): one MAT-file per PRI and block (logger.c)
  *     --log-name NAME        name of the log folder (default log_<date>_<time>)
- *     --log-blocks LIST      blocks of the log, e.g. ddc,dbf,mf,doppler,detection (default ddc,detection)
+ *     --log-blocks LIST      blocks of the log, e.g. ddc,dbf,mf,doppler,detection (default ddc,detection);
+ *                            'screen': with --ppi also a video of the window (screen_record.mp4, ffmpeg)
+ *     --ffmpeg PATH          ffmpeg program of the screen recording (default: next to the program, else PATH)
+ *     --record-audio SPEC    sound of the screen recording: 'auto' (default: the default microphone),
+ *                            'none', or an ffmpeg input 'FORMAT:DEVICE', e.g. pulse:default, alsa:hw:1,
+ *                            dshow:audio=Microphone (Realtek Audio)
+ *     --record-fps N         frames per second of the screen recording (default 10)
  *     --cfar-threshold DB    CFAR threshold factor in dB (default from the configuration,
  *                            i.e. from cfg.cfar.pfa); can also be changed in the PPI
  *     --quiet                do not print every plot and confirmed track
@@ -68,6 +74,8 @@ typedef struct {
     double idleTimeout_s;
     double cfarThreshold_dB;      /* NAN: from the configuration */
     const char *logDir, *logName, *logBlocks;   /* logging from the start (--log-dir) */
+    const char *ffmpeg, *recordAudio;             /* screen recording (PPI) */
+    double recordFps;
     int logMask;
 } Options;
 
@@ -83,6 +91,9 @@ typedef struct {
     double console_ms, display_ms;   /* time in the console output and in the PPI calls */
     double log_ms;                /* time of the logging in the processing thread (copies) */
     Logger *log;                  /* the running log (NULL: none) */
+    int havePri;                  /* the last PRI processed (radar_parameters.mat) */
+    uint32_t lastPulse;
+    double lastTime_s, lastAz_deg;
     int exitCode;
 } App;
 
@@ -106,7 +117,8 @@ static void usage(void)
          "                      [--plots-csv FILE] [--detections-csv FILE] [--tracks-csv FILE]\n"
          "                      [--idle-timeout S] [--quiet | --print-plots]\n"
          "                      [--queue N] [--no-skip] [--cfar-threshold DB]\n"
-         "                      [--log-dir DIR] [--log-name NAME] [--log-blocks ddc,dbf,mf,doppler,detection]\n"
+         "                      [--log-dir DIR] [--log-name NAME] [--log-blocks ddc,dbf,mf,doppler,detection,screen]\n"
+         "                      [--ffmpeg PATH] [--record-audio SPEC] [--record-fps N]\n"
          "                      [--rt-priority N] [--cpus LIST] [--input-cpus LIST] [--mlock]");
 }
 
@@ -159,6 +171,9 @@ static int parse_options(int argc, char **argv, Options *o)
         else if (!strcmp(a, "--log-dir"))        TAKE(o->logDir = v);
         else if (!strcmp(a, "--log-name"))       TAKE(o->logName = v);
         else if (!strcmp(a, "--log-blocks"))     TAKE(o->logBlocks = v);
+        else if (!strcmp(a, "--ffmpeg"))         TAKE(o->ffmpeg = v);
+        else if (!strcmp(a, "--record-audio"))   TAKE(o->recordAudio = v);
+        else if (!strcmp(a, "--record-fps"))     TAKE(o->recordFps = atof(v));
         else if (!strcmp(a, "--rt-priority"))    TAKE(o->rtPriority = atoi(v));
         else if (!strcmp(a, "--cpus"))           TAKE(o->cpus = v);
         else if (!strcmp(a, "--input-cpus"))     TAKE(o->inputCpus = v);
@@ -202,17 +217,18 @@ static int parse_options(int argc, char **argv, Options *o)
     }
     o->logMask = LOG_DDC | LOG_DETECTION;
     if (o->logBlocks) {                                  /* ddc,dbf,mf,doppler,detection */
-        static const struct { const char *name; int bit; } blocks[5] = {
-            { "ddc", LOG_DDC }, { "dbf", LOG_DBF }, { "mf", LOG_MF }, { "doppler", LOG_DOPPLER }, { "detection", LOG_DETECTION } };
+        static const struct { const char *name; int bit; } blocks[6] = {
+            { "ddc", LOG_DDC }, { "dbf", LOG_DBF }, { "mf", LOG_MF }, { "doppler", LOG_DOPPLER }, { "detection", LOG_DETECTION },
+            { "screen", LOG_SCREEN } };
         o->logMask = 0;
         const char *s = o->logBlocks;
         while (*s) {
             size_t n = strcspn(s, ",");
             int found = 0;
-            for (int i = 0; i < 5; i++)
+            for (int i = 0; i < 6; i++)
                 if (n == strlen(blocks[i].name) && !strncmp(s, blocks[i].name, n)) { o->logMask |= blocks[i].bit; found = 1; }
             if (!found && n > 0) {
-                fprintf(stderr, "--log-blocks: unknown block '%.*s' (ddc, dbf, mf, doppler, detection)\n", (int)n, s);
+                fprintf(stderr, "--log-blocks: unknown block '%.*s' (ddc, dbf, mf, doppler, detection, screen)\n", (int)n, s);
                 return -1;
             }
             s += n + (s[n] == ',');
@@ -221,6 +237,8 @@ static int parse_options(int argc, char **argv, Options *o)
             fprintf(stderr, "--log-blocks needs at least one block\n");
             return -1;
         }
+        if ((o->logMask & LOG_SCREEN) && !o->ppi)
+            fprintf(stderr, "--log-blocks screen: the screen recording needs --ppi (ignored)\n");
     }
     return 0;
 }
@@ -410,15 +428,25 @@ static void start_log(App *app, Processor *proc, const char *folder, const char 
 {
     char err[512] = "";
     if (app->log) return;
-    app->log = logger_start(folder, name, mask, &app->cfg, err, sizeof err);
-    processor_set_log(proc, app->log ? mask : 0);
+    RuntimeParams rt;                                  /* the state now, for radar_parameters.mat */
+    memset(&rt, 0, sizeof rt);
+    rt.configPath = app->opt.configPath;
+    rt.alpha = processor_cfar_alpha(proc);
+    rt.threads = processor_threads(proc);
+    rt.slowTimeSkipping = app->opt.replayPath == NULL && !app->opt.noSkip;   /* live: Doppler/CFAR skipped when behind */
+    rt.havePri = app->havePri;
+    rt.pulseNumber = app->lastPulse;
+    rt.time_s = app->lastTime_s;
+    rt.az_deg = app->lastAz_deg;
+    app->log = logger_start(folder, name, mask, &app->cfg, &rt, err, sizeof err);
+    processor_set_log(proc, app->log ? mask & LOG_BLOCKS : 0);
     if (app->log) fprintf(stderr, "Logging to %s\n", logger_dir(app->log));
     else fprintf(stderr, "logging: %s\n", err);
 #ifdef RADAR_WITH_QT
     if (app->opt.ppi) {
         LoggerStats st;
         logger_stats(app->log, &st);
-        ppi_post_log_status(app->log != NULL, app->log ? logger_dir(app->log) : "", &st, app->log ? NULL : err);
+        ppi_post_log_status(app->log != NULL, app->log ? logger_dir(app->log) : "", mask, &st, app->log ? NULL : err);
     }
 #endif
 }
@@ -436,7 +464,7 @@ static void stop_log(App *app, Processor *proc)
     logger_stop(L, &st);                           /* writes the queued files; st: the final state */
     fprintf(stderr, "Log %s ended\n", dir);
 #ifdef RADAR_WITH_QT
-    if (app->opt.ppi) ppi_post_log_status(0, dir, &st, NULL);
+    if (app->opt.ppi) ppi_post_log_status(0, dir, 0, &st, NULL);
 #else
     (void)st;
 #endif
@@ -618,7 +646,7 @@ static int worker(void *arg)
             if (app->log && now_seconds() - lastLogStatus > 0.5) {    /* the state of the log */
                 LoggerStats st;
                 logger_stats(app->log, &st);
-                ppi_post_log_status(1, logger_dir(app->log), &st, NULL);
+                ppi_post_log_status(1, logger_dir(app->log), logger_mask(app->log), &st, NULL);
                 lastLogStatus = now_seconds();
             }
         }
@@ -637,8 +665,16 @@ static int worker(void *arg)
         const int request = app->opt.ppi && ppi_take_cfar_request(&request_dB);
         if (app->opt.ppi) app->display_ms += ms_since(tReq);
         if (request) {                                         /* Apply in the PPI */
+            const double before_dB = 10.0 * log10(processor_cfar_alpha(proc));
             set_cfar_threshold(app, proc, request_dB);
             report_cfar(app, proc, default_dB, 1);
+            if (app->log) {                                    /* in log_info.txt of the running log */
+                char note[160];
+                const double a = processor_cfar_alpha(proc), pfa = cfar_pfa(&app->cfg, a);
+                snprintf(note, sizeof note, "CFAR threshold %.2f dB -> %.2f dB (Pfa %.1e) at pulse %u", before_dB,
+                         10.0 * log10(a), pfa, (unsigned)pri->pulseNumber);
+                logger_note(app->log, note);
+            }
         }
 #endif
 #ifdef RADAR_WITH_QT
@@ -671,6 +707,10 @@ static int worker(void *arg)
         }
         processor_process(proc, pri, &cb);
         if (app->log) logger_end_pri(app->log);
+        app->havePri = 1;
+        app->lastPulse = pri->pulseNumber;
+        app->lastTime_s = pri->time_s;
+        app->lastAz_deg = pri->az_deg;
 #ifdef RADAR_WITH_QT
         if (app->opt.ppi && lastData - lastTiming > 0.25) {   /* block times in the PPI panel */
             const double tPost = now_seconds();
@@ -847,6 +887,7 @@ int main(int argc, char **argv)
             }
             ppi_set_rd_axes(v0, v1);
             ppi_set_log_defaults(app.opt.logDir ? app.opt.logDir : "", app.opt.logName ? app.opt.logName : "", app.opt.logMask);
+            ppi_set_screen_record(app.opt.ffmpeg, app.opt.recordAudio, app.opt.recordFps);
         }
         app.exitCode = ppi_run(argc, argv, app.cfg.maxRange_m, worker, &app, &g_stop, app.opt.snapshotPath);
 #else

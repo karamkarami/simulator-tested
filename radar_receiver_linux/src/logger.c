@@ -3,6 +3,11 @@
  * the outputs of the blocks the user selects are written for every PRI as
  * MAT-files (-v6), each block in a folder of its own:
  *
+ *   <folder>/<name>/radar_parameters.mat   every setting of the processing chain when the log
+ *                                           started (struct params, params_mat.c)
+ *   <folder>/<name>/log_info.txt           what the log holds; parameters changed during the log
+ *   <folder>/<name>/screen_record.mp4      the PPI window with the microphone (LOG_SCREEN,
+ *                                           recorded by ppi_qt.cpp)
  *   <folder>/<name>/ddc/ddc_<n>.mat        the DDC output as received: I, Q (int16 [nSamples x
  *                                           nCh]) and hdr, the format of the simulator's DDC files
  *                                           (save_ddc_file.m): the receiver can process them again
@@ -331,11 +336,12 @@ static int make_dirs(const char *path)                   /* mkdir -p */
     return 0;
 }
 
-Logger *logger_start(const char *folder, const char *name, int mask, const RadarConfig *cfg, char *err, size_t errLen)
+Logger *logger_start(const char *folder, const char *name, int mask, const RadarConfig *cfg, const RuntimeParams *rt,
+                     char *err, size_t errLen)
 {
     if (!folder || !folder[0]) { snprintf(err, errLen, "no log folder"); return NULL; }
-    if (!(mask & (LOG_DDC | LOG_DBF | LOG_MF | LOG_DOPPLER | LOG_DETECTION))) {
-        snprintf(err, errLen, "no block selected for the log");
+    if (!(mask & (LOG_BLOCKS | LOG_SCREEN))) {
+        snprintf(err, errLen, "nothing selected for the log");
         return NULL;
     }
     Logger *L = calloc(1, sizeof *L);
@@ -349,12 +355,39 @@ Logger *logger_start(const char *folder, const char *name, int mask, const Radar
     snprintf(L->dir, sizeof L->dir, "%s/%s", folder, name);
     static const struct { int bit; const char *sub; } subs[5] = {
         { LOG_DDC, "ddc" }, { LOG_DBF, "dbf" }, { LOG_MF, "mf" }, { LOG_DOPPLER, "doppler" }, { LOG_DETECTION, "detection" } };
+    if (make_dirs(L->dir) != 0) {
+        snprintf(err, errLen, "cannot create the folder %s", L->dir);
+        free(L);
+        return NULL;
+    }
     for (int i = 0; i < 5; i++) {
         if (!(mask & subs[i].bit)) continue;
         char p[1200];
         snprintf(p, sizeof p, "%s/%s", L->dir, subs[i].sub);
         if (make_dirs(p) != 0) {
             snprintf(err, errLen, "cannot create the folder %s", p);
+            free(L);
+            return NULL;
+        }
+    }
+    char started[64], blocks[96];
+    {
+        const time_t now = time(NULL);
+        strftime(started, sizeof started, "%Y-%m-%d %H:%M:%S", localtime(&now));
+        snprintf(blocks, sizeof blocks, "%s%s%s%s%s%s", mask & LOG_DDC ? " ddc" : "", mask & LOG_DBF ? " dbf" : "",
+                 mask & LOG_MF ? " mf" : "", mask & LOG_DOPPLER ? " doppler" : "", mask & LOG_DETECTION ? " detection" : "",
+                 mask & LOG_SCREEN ? " screen" : "");
+    }
+    {                                                    /* the settings of the processing chain now */
+        char p[1200];
+        RuntimeParams r;
+        if (rt) r = *rt; else memset(&r, 0, sizeof r);
+        r.started = started;
+        r.logBlocks = blocks[0] ? blocks + 1 : "";
+        r.screenRecord = (mask & LOG_SCREEN) != 0;
+        snprintf(p, sizeof p, "%s/radar_parameters.mat", L->dir);
+        if (radar_parameters_write(p, cfg, &r) != 0) {
+            snprintf(err, errLen, "cannot write %s", p);
             free(L);
             return NULL;
         }
@@ -366,13 +399,15 @@ Logger *logger_start(const char *folder, const char *name, int mask, const Radar
         if (f) {
             const time_t now = time(NULL);
             fprintf(f, "Radar receiver log, started %s", ctime(&now));
-            fprintf(f, "blocks:%s%s%s%s%s\n", mask & LOG_DDC ? " ddc" : "", mask & LOG_DBF ? " dbf" : "",
-                    mask & LOG_MF ? " mf" : "", mask & LOG_DOPPLER ? " doppler" : "", mask & LOG_DETECTION ? " detection" : "");
+            fprintf(f, "blocks:%s\n", blocks);
             fprintf(f, "channels %d (processed %d), beams %d, DDC %d samples at %.0f Hz, short %d / long %d range cells, "
                        "Doppler %d bins (%s), CPI %d pulses, radar mode %d\n", cfg->nCh, cfg->nChUsed, cfg->nBeams,
                     cfg->nDdc, cfg->fsOut_Hz, cfg->pulse[0].nRange, cfg->pulse[1].nRange, cfg->nfft,
                     cfg->dopplerMethod == DOPPLER_NUFFT ? "NUFFT" : "FFT", cfg->cpiLength, cfg->radarMode);
-            fprintf(f, "files: <block>/<block>_<pulse number>.mat (see logger.c / README)\n");
+            fprintf(f, "CFAR threshold %.2f dB at the start\n", 10.0 * log10(rt && rt->alpha > 0 ? rt->alpha : cfg->alpha));
+            fprintf(f, "files: radar_parameters.mat (every setting at the start), <block>/<block>_<pulse number>.mat%s "
+                       "(see logger.c / README)\n", mask & LOG_SCREEN ? ", screen_record.mp4" : "");
+            fprintf(f, "changes during the log:\n");
             fclose(f);
         }
     }
@@ -408,6 +443,19 @@ Logger *logger_start(const char *folder, const char *name, int mask, const Radar
 }
 
 const char *logger_dir(const Logger *L) { return L ? L->dir : ""; }
+
+void logger_note(Logger *L, const char *text)
+{
+    if (!L) return;
+    char p[1200], stamp[32];
+    snprintf(p, sizeof p, "%s/log_info.txt", L->dir);
+    FILE *f = fopen(p, "a");
+    if (!f) return;
+    const time_t now = time(NULL);
+    strftime(stamp, sizeof stamp, "%H:%M:%S", localtime(&now));
+    fprintf(f, "  %s (%.1f s into the log): %s\n", stamp, now_seconds() - L->startTime, text);
+    fclose(f);
+}
 
 int logger_mask(const Logger *L) { return L ? L->mask : 0; }
 

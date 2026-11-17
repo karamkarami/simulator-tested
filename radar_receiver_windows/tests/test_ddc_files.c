@@ -461,7 +461,7 @@ static void test_log(const char *configPath)
     make_dir("test_log_dir");
     const int mask = LOG_DDC | LOG_DBF | LOG_MF | LOG_DOPPLER | LOG_DETECTION;
     LogSink sink = { NULL, 0, 0 };
-    sink.log = logger_start("test_log_dir", "run", mask, &cfg, err, sizeof err);
+    sink.log = logger_start("test_log_dir", "run", mask, &cfg, NULL, err, sizeof err);
     CHECK(sink.log != NULL);
     if (!sink.log) { printf("logger_start: %s\n", err); processor_destroy(proc); radar_config_free(&cfg); return; }
     processor_set_log(proc, mask);
@@ -493,6 +493,7 @@ static void test_log(const char *configPath)
         logger_end_pri(sink.log);
     }
     processor_flush(proc, &cb);
+    logger_note(sink.log, "CFAR threshold 12.00 dB -> 13.00 dB");
     LoggerStats st;
     logger_stop(sink.log, &st);
     const int updates = nPri - cfg.cpiLength + 1;
@@ -541,7 +542,20 @@ static void test_log(const char *configPath)
     v = mat_get(&m, "dets");
     CHECK(v && v->cols == 13 && mat_get(&m, "plots") && mat_get(&m, "columns"));
     mat_free(&m);
-    printf("log files read back: DDC (replayable), DBF, MF, Doppler, detections (%d in the CPI updates)\n", sink.nDet);
+    /* the settings at the start (struct params) and the change noted during the log */
+    CHECK(mat_load("test_log_dir/run/radar_parameters.mat", &m, err, sizeof err) == 0);
+    CHECK(mat_get(&m, "params") != NULL);
+    mat_free(&m);
+    {
+        FILE *f = fopen("test_log_dir/run/log_info.txt", "r");
+        char text[4096] = "";
+        const size_t n = f ? fread(text, 1, sizeof text - 1, f) : 0;
+        if (f) fclose(f);
+        text[n] = 0;
+        CHECK(strstr(text, "changes during the log:") && strstr(text, "CFAR threshold 12.00 dB -> 13.00 dB"));
+    }
+    printf("log files read back: DDC (replayable), DBF, MF, Doppler, detections (%d in the CPI updates), "
+           "radar_parameters.mat, log_info.txt\n", sink.nDet);
     free(pri.iq);
     processor_destroy(proc);
     radar_config_free(&cfg);

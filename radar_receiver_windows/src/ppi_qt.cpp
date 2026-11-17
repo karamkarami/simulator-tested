@@ -96,6 +96,9 @@
 #include <QPen>
 #include <QPixmap>
 #include <QPointF>
+#include <QPolygonF>
+#include <QProcess>
+#include <QCoreApplication>
 #include <QRectF>
 #include <QString>
 #include <QStringList>
@@ -263,6 +266,7 @@ struct LogShared {
     std::string folder, name;
     int         mask = 0;
     bool        active = false;
+    int         activeMask = 0;       /* mask of the running log (LOG_SCREEN: record the window) */
     std::string dir, error;
     LoggerStats stats = {};
     uint64_t    serial = 0;
@@ -2505,6 +2509,265 @@ void RdWidget::paintEvent(QPaintEvent *)
 /* and the CFAR threshold                                                    */
 /* ------------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------------ */
+/* Screen recording of a log (LOG_SCREEN, the check box "Screen record" of the tab Controls)  */
+/* ------------------------------------------------------------------------ */
+
+/* Settings of ppi_set_screen_record */
+std::string g_recFfmpeg, g_recAudio = "auto";
+double      g_recFps = 10.0;
+
+/* Records a window to an MP4 file with ffmpeg (a separate process, so the encoding does not load
+ * the GUI thread): a timer grabs the window (QWidget::grab: the window as drawn, also when other
+ * windows cover it; menus and dialogs, own windows, are not in it), draws the mouse pointer on it
+ * and writes the frame to ffmpeg's standard input (raw BGRA at a constant frame rate: a frame that
+ * comes late is repeated, so the video keeps the time of the sound). The sound comes from the
+ * microphone through ffmpeg's capture devices (PulseAudio / ALSA on Linux, DirectShow on Windows,
+ * AVFoundation on macOS). ffmpeg encodes H.264 (else MPEG-4) and AAC; closing its input ends the
+ * file (-shortest). */
+class ScreenRecorder {
+public:
+    ~ScreenRecorder() { stop(); }
+
+    /* starts recording win to path; false and msg on an error */
+    bool start(QWidget *win, const QString &path, bool sound, QString *msg)
+    {
+        stop();
+        win_ = win;
+        path_ = path;
+        error_.clear();
+        note_.clear();
+        const QPixmap pm = win->grab();
+        if (pm.isNull()) { *msg = QStringLiteral("cannot grab the window"); return false; }
+        /* even sizes (yuv420p), at most 1920 pixels wide */
+        QSize sz = pm.size();
+        if (sz.width() > 1920) sz = QSize(1920, (int)std::lround(sz.height() * 1920.0 / sz.width()));
+        size_ = QSize(sz.width() & ~1, sz.height() & ~1);
+        fps_ = g_recFps > 0.5 && g_recFps <= 60 ? g_recFps : 10.0;
+        audio_ = sound ? audio_input() : QStringList();
+        if (sound && audio_.isEmpty() && g_recAudio != "none")
+            note_ = QStringLiteral("no microphone found: video without sound");
+        if (!launch(msg)) return false;
+        timer_ = new QTimer();
+        QObject::connect(timer_, &QTimer::timeout, [this]() { tick(); });
+        t0_ = gui_seconds();
+        frames_ = 0;
+        guiMs_ = 0.0;
+        tick();
+        timer_->start((int)std::lround(1000.0 / fps_ / 2));   /* twice the frame rate: on time */
+        return true;
+    }
+
+    /* ends the file (ffmpeg writes the index); waits for ffmpeg */
+    void stop()
+    {
+        if (timer_) { timer_->stop(); delete timer_; timer_ = nullptr; }
+        if (!proc_) return;
+        proc_->closeWriteChannel();
+        if (!proc_->waitForFinished(15000)) {
+            proc_->terminate();                    /* (Linux: ffmpeg ends the file on SIGTERM) */
+            if (!proc_->waitForFinished(5000)) proc_->kill(), proc_->waitForFinished(2000);
+            error_ = QStringLiteral("ffmpeg did not end in time");
+        } else if (proc_->exitStatus() != QProcess::NormalExit || proc_->exitCode() != 0) {
+            error_ = QStringLiteral("ffmpeg: %1").arg(last_error());
+        }
+        delete proc_;
+        proc_ = nullptr;
+        win_ = nullptr;
+    }
+
+    bool active() const { return proc_ != nullptr; }
+    double seconds() const { return proc_ ? gui_seconds() - t0_ : 0.0; }
+    double guiMs() const { return guiMs_; }     /* time of the grabbing in the GUI thread */
+    QString path() const { return path_; }
+    QString error() const { return error_; }
+    QString note() const { return note_; }
+    QString describe() const
+    {
+        return QStringLiteral("%1x%2 @ %3 fps, sound: %4").arg(size_.width()).arg(size_.height()).arg(fps_, 0, 'g', 3)
+                   .arg(audio_.isEmpty() ? QStringLiteral("none") : audioName_);
+    }
+
+private:
+    static QString ffmpeg_program()
+    {
+        if (!g_recFfmpeg.empty()) return QString::fromStdString(g_recFfmpeg);
+#ifdef _WIN32
+        const QString local = QCoreApplication::applicationDirPath() + QStringLiteral("/ffmpeg.exe");
+#else
+        const QString local = QCoreApplication::applicationDirPath() + QStringLiteral("/ffmpeg");
+#endif
+        return QFileInfo::exists(local) ? local : QStringLiteral("ffmpeg");
+    }
+
+    /* runs ffmpeg with args, returns its exit code (-1: did not start or run) and its stderr */
+    static int run_ffmpeg(const QStringList &args, QString *out, int timeout_ms)
+    {
+        QProcess p;
+        p.setProcessChannelMode(QProcess::MergedChannels);
+        p.start(ffmpeg_program(), args);
+        if (!p.waitForStarted(5000)) return -1;
+        p.closeWriteChannel();
+        if (!p.waitForFinished(timeout_ms)) { p.kill(); p.waitForFinished(2000); return -1; }
+        if (out) *out = QString::fromLocal8Bit(p.readAll());
+        return p.exitStatus() == QProcess::NormalExit ? p.exitCode() : -1;
+    }
+
+    /* the -f FORMAT -i DEVICE of the sound ("auto": the first that delivers sound) */
+    QStringList audio_input()
+    {
+        const QString spec = QString::fromStdString(g_recAudio);
+        if (spec == QLatin1String("none")) return {};
+        QStringList cands;                                  /* FORMAT:DEVICE */
+        if (spec != QLatin1String("auto") && !spec.isEmpty()) cands << spec;
+        else {
+#if defined(_WIN32)
+            QString out;                                    /* DirectShow: the first audio device */
+            run_ffmpeg({ "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy" }, &out, 8000);
+            bool audioSection = false;
+            for (const QString &line : out.split(QChar('\n'))) {
+                if (line.contains(QLatin1String("DirectShow audio devices"))) audioSection = true;
+                else if (line.contains(QLatin1String("DirectShow video devices"))) audioSection = false;
+                const int a = line.indexOf(QChar('"')), b = line.indexOf(QChar('"'), a + 1);
+                if (a < 0 || b <= a || line.contains(QLatin1String("Alternative name"))) continue;
+                if (line.contains(QLatin1String("(audio)")) || (audioSection && !line.contains(QLatin1String("(video)"))))
+                    cands << QStringLiteral("dshow:audio=") + line.mid(a + 1, b - a - 1);
+            }
+#elif defined(__APPLE__)
+            cands << QStringLiteral("avfoundation::0");
+#else
+            cands << QStringLiteral("pulse:default") << QStringLiteral("alsa:default");
+#endif
+        }
+        for (const QString &c : cands) {
+            const int k = c.indexOf(QChar(':'));
+            if (k <= 0) continue;
+            const QStringList in = { "-f", c.left(k), "-i", c.mid(k + 1) };
+            if (c.startsWith(QLatin1String("lavfi:"))) {           /* a test source: in real time */
+                audioName_ = c;
+                return QStringList{ "-re" } + in;
+            }
+            if (spec != QLatin1String("auto") && !spec.isEmpty()) { audioName_ = c; return in; }
+            QString out;                                         /* auto: does it deliver sound? */
+            if (run_ffmpeg(QStringList{ "-hide_banner", "-loglevel", "error" } + in + QStringList{ "-t", "0.2", "-f", "null", "-" },
+                           &out, 6000) == 0) {
+                audioName_ = c;
+                return in;
+            }
+        }
+        return {};
+    }
+
+    static bool has_encoder(const char *name)
+    {
+        static int cache[2] = { -1, -1 };                   /* libx264, aac */
+        const int k = !std::strcmp(name, "libx264") ? 0 : 1;
+        if (cache[k] < 0) {
+            QString out;
+            run_ffmpeg({ "-hide_banner", "-encoders" }, &out, 8000);
+            cache[k] = out.contains(QStringLiteral(" %1 ").arg(QLatin1String(name))) ? 1 : 0;
+        }
+        return cache[k] == 1;
+    }
+
+    bool launch(QString *msg)
+    {
+        QStringList a = { "-hide_banner", "-loglevel", "error", "-y",
+                          "-f", "rawvideo", "-pix_fmt", "bgra",
+                          "-video_size", QStringLiteral("%1x%2").arg(size_.width()).arg(size_.height()),
+                          "-framerate", QString::number(fps_), "-i", "-" };
+        if (!audio_.isEmpty()) a << "-thread_queue_size" << "4096" << audio_;
+        if (has_encoder("libx264"))
+            a << "-c:v" << "libx264" << "-preset" << "ultrafast" << "-tune" << "stillimage" << "-crf" << "24";
+        else
+            a << "-c:v" << "mpeg4" << "-q:v" << "4";
+        a << "-pix_fmt" << "yuv420p" << "-g" << QString::number((int)std::lround(2 * fps_));
+        if (!audio_.isEmpty()) a << "-c:a" << (has_encoder("aac") ? "aac" : "libmp3lame") << "-b:a" << "128k" << "-shortest";
+        a << path_;
+        proc_ = new QProcess();
+        proc_->setProcessChannelMode(QProcess::SeparateChannels);
+        proc_->setStandardOutputFile(QProcess::nullDevice());
+        proc_->start(ffmpeg_program(), a);
+        if (!proc_->waitForStarted(5000)) {
+            *msg = QStringLiteral("ffmpeg (%1) does not start: install ffmpeg or give its path (--ffmpeg)").arg(ffmpeg_program());
+            delete proc_;
+            proc_ = nullptr;
+            return false;
+        }
+        return true;
+    }
+
+    QString last_error()
+    {
+        if (proc_) stderr_ += QString::fromLocal8Bit(proc_->readAllStandardError());
+        QString e = stderr_.trimmed();
+        if (e.size() > 300) e = e.right(300);
+        return e.isEmpty() ? QStringLiteral("exit code %1").arg(proc_ ? proc_->exitCode() : -1) : e;
+    }
+
+    /* the window with the mouse pointer, as a frame of size_ */
+    QImage frame()
+    {
+        QPixmap pm = win_->grab();
+        QImage img = pm.toImage().convertToFormat(QImage::Format_ARGB32);
+        if (img.size() != size_) img = img.scaled(size_, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                                          .convertToFormat(QImage::Format_ARGB32);
+        const QPoint local = win_->mapFromGlobal(QCursor::pos());
+        if (win_->rect().contains(local)) {                  /* the arrow (grab does not hold it) */
+            const double sx = (double)size_.width() / std::max(1, win_->width());
+            const double sy = (double)size_.height() / std::max(1, win_->height());
+            const QPointF p(local.x() * sx, local.y() * sy);
+            const double k = std::max(1.0, std::min(sx, sy));
+            QPolygonF arrow;
+            const double pts[][2] = { { 0, 0 }, { 0, 17 }, { 4.2, 13 }, { 7, 19.5 }, { 9.6, 18.4 }, { 6.9, 12.2 }, { 12.5, 12.2 } };
+            for (const auto &q : pts) arrow << p + QPointF(q[0] * k, q[1] * k);
+            QPainter g(&img);
+            g.setRenderHint(QPainter::Antialiasing);
+            g.setPen(QPen(Qt::black, 1.2 * k));
+            g.setBrush(Qt::white);
+            g.drawPolygon(arrow);
+            if (QGuiApplication::mouseButtons() != Qt::NoButton) {   /* a click: a ring around the tip */
+                g.setPen(QPen(QColor(255, 200, 0), 2.0 * k));
+                g.setBrush(Qt::NoBrush);
+                g.drawEllipse(p, 11 * k, 11 * k);
+            }
+        }
+        return img;
+    }
+
+    void tick()
+    {
+        if (!proc_ || !win_) return;
+        if (proc_->state() != QProcess::Running) {          /* ffmpeg ended (e.g. the device failed) */
+            error_ = QStringLiteral("ffmpeg ended: %1").arg(last_error());
+            if (timer_) timer_->stop();
+            return;
+        }
+        stderr_ += QString::fromLocal8Bit(proc_->readAllStandardError());
+        if (stderr_.size() > 4000) stderr_ = stderr_.right(2000);
+        const long long due = (long long)std::floor((gui_seconds() - t0_) * fps_) + 1;   /* frames by now */
+        if (due <= frames_) return;
+        const qint64 frameBytes = (qint64)size_.width() * size_.height() * 4;
+        if (proc_->bytesToWrite() > 3 * frameBytes) return;  /* ffmpeg is behind: repeat later */
+        const double t = gui_seconds();
+        const QImage img = frame();
+        long long n = due - frames_;                         /* a late frame is repeated */
+        if (n > (long long)(5 * fps_)) n = (long long)(5 * fps_);
+        for (long long i = 0; i < n; i++) proc_->write((const char *)img.constBits(), frameBytes);
+        frames_ = due;
+        guiMs_ += (gui_seconds() - t) * 1e3;
+    }
+
+    QWidget    *win_ = nullptr;
+    QProcess   *proc_ = nullptr;
+    QTimer     *timer_ = nullptr;
+    QString     path_, error_, note_, stderr_, audioName_;
+    QStringList audio_;
+    QSize       size_;
+    double      fps_ = 10.0, t0_ = 0.0, guiMs_ = 0.0;
+    long long   frames_ = 0;
+};
+
 class PpiWindow : public QWidget {
 public:
     PpiWindow(double maxRange_m, volatile sig_atomic_t *stopFlag) : stopFlag_(stopFlag)
@@ -2603,7 +2866,7 @@ public:
         mono.setPixelSize(11);
         timing_->setFont(mono);
         timing_->setStyleSheet(QStringLiteral("background: #101010; padding: 4px;"));
-        timing_->setMinimumHeight(QFontMetrics(mono).lineSpacing() * 17 + 12);  /* 17 rows, stable layout */
+        timing_->setMinimumHeight(QFontMetrics(mono).lineSpacing() * 18 + 12);  /* 18 rows, stable layout */
         timing_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
         v->addWidget(timing_);
         QLabel *help = new QLabel(QStringLiteral("Wheel: zoom   Drag: pan\nDouble click: reset\nHover: data tip   "
@@ -2656,6 +2919,9 @@ public:
     QLineEdit *logFolderEdit() { return logFolder_; }
     QLineEdit *logNameEdit() { return logName_; }
     QCheckBox *logBlockBox(int i) { return logBlock_[i]; }
+    QCheckBox *screenRecordBox() { return screenBox_; }
+    QCheckBox *microphoneBox() { return micBox_; }
+    bool recording() const { return recorder_.active(); }
     QPushButton *logButton() { return logButton_; }
     QString logStatus() const { return logStatus_->text(); }
     QWidget *panel() { return panel_; }
@@ -2722,6 +2988,7 @@ public:
         ppi_->addGuiMs((gui_seconds() - t0) * 1e3);
         if (pause_->isChecked() != ppi_->paused()) setPaused(ppi_->paused());   /* Space or the context menu */
         showLog();
+        if (recorder_.active() && gui_seconds() - recordShown_ > 1.0) { showRecording(); recordShown_ = gui_seconds(); }
         if (tracks_->isChecked() != ppi_->showTracks()) {          /* changed with T or the context menu */
             const bool b = tracks_->blockSignals(true);
             tracks_->setChecked(ppi_->showTracks());
@@ -2816,6 +3083,10 @@ public:
         }
         lines << timing_row(QStringLiteral("Total"), sum);
         lines << timing_row(QStringLiteral("PPI draw (GUI)"), (ppi_->guiMs() - guiPrev_) * k);
+        const double rec = recordGuiMs_ + recorder_.guiMs();   /* grabbing the frames (GUI thread) */
+        if (rec < recordPrev_) recordPrev_ = 0.0;
+        lines << timing_row(QStringLiteral("Screen record"), (rec - recordPrev_) * k);
+        recordPrev_ = rec;
         double writer = 0.0;                                   /* the log writer thread [s] */
         {
             Shared &s = shared();
@@ -2825,7 +3096,7 @@ public:
         if (writer < logWriterPrev_) logWriterPrev_ = 0.0;     /* a new log */
         lines << timing_row(QStringLiteral("Log writer"), (writer - logWriterPrev_) * 1e3 * k);
         logWriterPrev_ = writer;
-        lines << QStringLiteral(" (GUI and log writer threads,");
+        lines << QStringLiteral(" (GUI, writer threads, ffmpeg");
         lines << QStringLiteral("  in parallel: not in Total)");
         lines << QStringLiteral("last %1 of %2 PRIs").arg((qulonglong)nPri).arg((qulonglong)t.pris);
         timingPrev_ = t;
@@ -2837,6 +3108,7 @@ protected:
     void closeEvent(QCloseEvent *event) override
     {
         if (!finished_ && stopFlag_) *stopFlag_ = 1;    /* ask the worker to stop */
+        stopRecording();                                /* the video file is complete */
         event->accept();
     }
 
@@ -2896,6 +3168,16 @@ private:
             logBlock_[i]->setChecked(mask & (1 << i));
             c->addWidget(logBlock_[i]);
         }
+        /* the video of this window with the sound of the microphone (ffmpeg) */
+        screenBox_ = new QCheckBox(QStringLiteral("Screen record (this window, mouse pointer: screen_record.mp4)"), box);
+        screenBox_->setChecked(mask & LOG_SCREEN);
+        c->addWidget(screenBox_);
+        micBox_ = new QCheckBox(QStringLiteral("with the sound of the microphone"), box);
+        micBox_->setChecked(g_recAudio != "none");
+        micBox_->setEnabled(screenBox_->isChecked());
+        micBox_->setStyleSheet(QStringLiteral("margin-left: 22px;"));
+        c->addWidget(micBox_);
+        QObject::connect(screenBox_, &QCheckBox::toggled, [this](bool on) { micBox_->setEnabled(on && !logOn_); });
         row->addLayout(c, 2);
         /* start / stop and the state */
         QVBoxLayout *s = new QVBoxLayout();
@@ -2914,12 +3196,16 @@ private:
         QObject::connect(logButton_, &QPushButton::clicked, [this]() { toggleLog(); });
         v->addWidget(box);
         QLabel *note = new QLabel(QStringLiteral(
+            "At the start, radar_parameters.mat holds every setting of the processing chain (struct params; changes of "
+            "the CFAR threshold during the log are noted in log_info.txt). "
             "One MAT-file per PRI and block: ddc/ddc_<n>.mat (I, Q, hdr: the DDC files of the simulator, the receiver can "
             "process them again with radar_stream_send), dbf/dbf_<n>.mat (beams), mf/mf_<n>.mat (pulse compression), "
             "doppler/doppler_<n>.mat (range-velocity maps of the CPI updates), detection/detection_<n>.mat (detections "
             "and plots); <n> is the pulse number. A thread of its own writes the files; while the log runs the PPI shows "
             "REC in its corner and the timing panel the time of the logging. When the disk cannot keep up, PRIs are "
-            "dropped from the log (counted below)."), page);
+            "dropped from the log (counted below). Screen record: this window with the mouse pointer and the sound of the "
+            "microphone, encoded by ffmpeg (installed, or next to the program) to screen_record.mp4 of the log; it ends "
+            "with Stop logging."), page);
         note->setObjectName(QStringLiteral("note"));
         note->setWordWrap(true);
         v->addWidget(note);
@@ -2934,14 +3220,16 @@ private:
             sh.log.requested = true;
             sh.log.requestStart = false;
             logPending_ = 2;
+            stopRecording();                                   /* the video ends now */
             logStatus_->setText(QStringLiteral("stopping ..."));
             return;
         }
         int mask = 0;
         for (int i = 0; i < 5; i++) if (logBlock_[i]->isChecked()) mask |= 1 << i;
+        if (screenBox_->isChecked()) mask |= LOG_SCREEN;
         const QString folder = logFolder_->text().trimmed();
         if (folder.isEmpty()) { logStatus_->setText(QStringLiteral("choose the folder of the logs first")); return; }
-        if (!mask) { logStatus_->setText(QStringLiteral("choose at least one block to log")); return; }
+        if (!mask) { logStatus_->setText(QStringLiteral("choose at least one block (or the screen record) to log")); return; }
         sh.log.requested = true;
         sh.log.requestStart = true;
         sh.log.folder = folder.toStdString();
@@ -2958,6 +3246,7 @@ private:
         LoggerStats st;
         std::string dir, err;
         uint64_t serial;
+        int mask;
         {
             Shared &s = shared();
             std::lock_guard<std::mutex> lock(s.mutex);
@@ -2966,16 +3255,31 @@ private:
             dir = s.log.dir;
             err = s.log.error;
             serial = s.log.serial;
+            mask = s.log.activeMask;
         }
         ppi_->setLogging(active, st.seconds);
         if (serial == logSerial_) return;
         logSerial_ = serial;
+        if (active && (mask & LOG_SCREEN) && !recorder_.active() && !recordTried_) {   /* the log started */
+            recordTried_ = true;
+            QString msg;
+            const QString file = QString::fromStdString(dir) + QStringLiteral("/screen_record.mp4");
+            recordError_.clear();
+            if (!recorder_.start(window(), file, micBox_->isChecked(), &msg)) recordError_ = msg;
+        }
+        if (!active) {
+            stopRecording();
+            recordTried_ = false;
+        }
+        logOn_ = active || logPending_ == 1;
         if (active) logPending_ = 0;
         else if (logPending_ == 2 || !err.empty()) logPending_ = 0;
         const bool on = active || logPending_ == 1;
         logButton_->setText(on ? QStringLiteral("Stop logging") : QStringLiteral("Start logging"));
         logButton_->setStyleSheet(on ? QStringLiteral("background: #6a1010; color: white;") : QString());
         for (int i = 0; i < 5; i++) logBlock_[i]->setEnabled(!on);
+        screenBox_->setEnabled(!on);
+        micBox_->setEnabled(!on && screenBox_->isChecked());
         logFolder_->setEnabled(!on);
         logName_->setEnabled(!on);
         QString text;
@@ -2989,7 +3293,32 @@ private:
                         .arg(st.errors ? QStringLiteral(", %1 file errors: %2").arg((qulonglong)st.errors)
                                              .arg(QString::fromLatin1(st.lastError)) : QString());
         else if (text.isEmpty()) text = QStringLiteral("not logging");
-        logStatus_->setText(text);
+        logText_ = text;
+        showRecording();
+    }
+    /* the line of the screen recording below the state of the log */
+    void showRecording()
+    {
+        QString r;
+        if (recorder_.active())
+            r = QStringLiteral("\nscreen: recording %1 s, %2%3").arg(recorder_.seconds(), 0, 'f', 0).arg(recorder_.describe())
+                    .arg(recorder_.note().isEmpty() ? QString() : QStringLiteral("\n") + recorder_.note());
+        else if (!recordError_.isEmpty())
+            r = QStringLiteral("\nscreen recording: %1").arg(recordError_);
+        else if (!recordFile_.isEmpty())
+            r = QStringLiteral("\nscreen recording saved: %1").arg(recordFile_);
+        if (recorder_.active() && !recorder_.error().isEmpty()) r += QStringLiteral("\n") + recorder_.error();
+        logStatus_->setText(logText_ + r);
+    }
+    void stopRecording()
+    {
+        if (!recorder_.active()) return;
+        recordGuiMs_ += recorder_.guiMs();
+        const QString file = recorder_.path();
+        recorder_.stop();
+        recordError_ = recorder_.error();
+        recordFile_ = recordError_.isEmpty() ? file : QString();
+        showRecording();
     }
 
     void requestCfar(double dB)
@@ -3012,6 +3341,11 @@ private:
     QWidget               *panel_ = nullptr;
     QLineEdit             *logFolder_, *logName_;
     QCheckBox             *logBlock_[5];
+    QCheckBox             *screenBox_ = nullptr, *micBox_ = nullptr;
+    ScreenRecorder         recorder_;
+    bool                   recordTried_ = false, logOn_ = false;
+    QString                recordError_, recordFile_, logText_;
+    double                 recordGuiMs_ = 0.0, recordPrev_ = 0.0, recordShown_ = 0.0;
     QPushButton           *logButton_;
     QLabel                *logStatus_;
     uint64_t               logSerial_ = 0;
@@ -3264,11 +3598,19 @@ extern "C" int ppi_take_log_request(int *start, char *folder, size_t folderLen, 
     return 1;
 }
 
-extern "C" void ppi_post_log_status(int active, const char *dir, const LoggerStats *stats, const char *error)
+extern "C" void ppi_set_screen_record(const char *ffmpeg, const char *audio, double fps)
+{
+    if (ffmpeg && ffmpeg[0]) g_recFfmpeg = ffmpeg;
+    if (audio && audio[0]) g_recAudio = audio;
+    if (fps > 0) g_recFps = fps;
+}
+
+extern "C" void ppi_post_log_status(int active, const char *dir, int mask, const LoggerStats *stats, const char *error)
 {
     Shared &s = shared();
     std::lock_guard<std::mutex> lock(s.mutex);
     s.log.active = active != 0;
+    s.log.activeMask = active ? mask : 0;
     if (dir) s.log.dir = dir;
     if (stats) s.log.stats = *stats;
     s.log.error = error ? error : "";

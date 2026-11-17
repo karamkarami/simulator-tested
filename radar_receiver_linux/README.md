@@ -369,7 +369,10 @@ Not supported: `cfg.adc.quantize = false` (analog ADC values, MATLAB only).
 | `--cfar-threshold DB` | CFAR threshold factor 10 log10(alpha) in dB of the configured detector and window (default: the configuration, i.e. the method's Pfa); can also be changed in the PPI |
 | `--log-dir DIR` | log the processing chain from the start into `DIR/<name>` (see Logging below; also the PPI tab *Controls*, whose folder field it fills) |
 | `--log-name NAME` | name of the log folder (default `log_<date>_<time>`) |
-| `--log-blocks LIST` | blocks of the log, comma separated: `ddc`, `dbf`, `mf`, `doppler`, `detection` (default `ddc,detection`) |
+| `--log-blocks LIST` | blocks of the log, comma separated: `ddc`, `dbf`, `mf`, `doppler`, `detection` (default `ddc,detection`), and `screen`: with `--ppi` the video of the window (see Screen recording below) |
+| `--ffmpeg PATH` | the ffmpeg program of the screen recording (default: `ffmpeg` / `ffmpeg.exe` next to `radar_receiver`, else the one on `PATH`) |
+| `--record-audio SPEC` | sound of the screen recording: `auto` (default: the default microphone), `none`, or an ffmpeg input `FORMAT:DEVICE` (`-f FORMAT -i DEVICE`), e.g. `pulse:default`, `alsa:hw:1,0`, `dshow:audio=Microphone (Realtek(R) Audio)` |
+| `--record-fps N` | frames per second of the screen recording (default 10) |
 | `--serial DEVICE` | send the CFAR output to a serial port (`/dev/ttyUSB0`, `COM3`, ...) |
 | `--baud N` | serial baud rate (default 921600) |
 | `--serial-content X` | `detections` (default: the pruned CFAR detections of every CPI update) or `plots` |
@@ -502,10 +505,11 @@ PPI) and the panel with the settings and the block times.
 tabs. For now it has the **Logging** box: *Folder* (with *Browse ...*; default
 `./logs`, or `--log-dir`) and *Log name* (empty: `log_<date>_<time>`), next to
 them the blocks to log (*DDC output*, *DBF output*, *Pulse compression
-output (MF)*, *Doppler output (range-velocity maps)*, *Detection output*),
-and next to them *Start logging* / *Stop logging* with the state of the log
+output (MF)*, *Doppler output (range-velocity maps)*, *Detection output*)
+and *Screen record* (with *with the sound of the microphone*), and next to them *Start logging* / *Stop logging* with the state of the log
 (its folder, PRIs, files and MB written, the queue, PRIs dropped, file
-errors). While the log runs the blocks and the folder cannot be changed, the
+errors, and the screen recording: its time, size, frame rate and sound input,
+then the file saved or an error). While the log runs the blocks and the folder cannot be changed, the
 PPI shows a blinking red **REC hh:mm:ss** in its top right corner (also the
 small PPI of the range-Doppler tab), and the timing panel the time of the
 logging (see Logging below).
@@ -597,8 +601,10 @@ The panel on the right of the window has:
   calls included. Every label has at most 15 characters (longer names are
   shortened, `1-D` -> `1D`), so the values stay inside the panel. Then
   *PPI draw (GUI)*: the time the GUI thread spends
-  taking the data and drawing the PPI, per PRI, and *Log writer*: the time
-  the writer thread of the log spends in the files, per PRI; both run on
+  taking the data and drawing the PPI, per PRI, *Screen record*: the time the
+  GUI thread spends grabbing the frames of the screen recording (the encoding
+  runs in ffmpeg, a process of its own), per PRI, and *Log writer*: the time
+  the writer thread of the log spends in the files, per PRI; these run on
   other threads (cores) at the same time as the processing, so they do not
   lengthen the PRI processing and are not in the total. The worker posts its
   accumulated times 4 times a second; the console and display times are
@@ -606,10 +612,13 @@ The panel on the right of the window has:
 
 **Logging** (`logger.c`; the tab *Controls* or `--log-dir`, `--log-name`,
 `--log-blocks`): the outputs of the selected blocks of every PRI as MAT-files
-(-v6), each block in its folder of `<folder>/<name>/` (with `log_info.txt`):
+(-v6), each block in its folder of `<folder>/<name>/`:
 
 | Folder, file | Variables |
 |---|---|
+| `radar_parameters.mat` | written when the log starts: struct `params` with every setting of the processing chain at that moment: `info` (start time, configuration file, blocks, last PRI before the start), `antenna` (channels, channels processed, beams, DBF matrix `W` [beams x channels] complex, beam elevations, tilt, height, rotation, ranges), `ddc`, `short` and `long` (carrier, waveform, receive interval, compression filter `taps` complex, range axis, CFAR cells, velocity axis), `slowTime` (CPI, stagger, clutter filter, Doppler method, window, noise gains, Doppler axis, NUFFT matrices `nufftA` [bins x samples x stagger], notch), `cfar` (detector, window, the threshold factor **in use** with its Pfa, and the design value of the configuration, CE table), `report`, `tracker`, `runtime` (matched filter method, threads, update skipping, range-Doppler rate) |
+| `log_info.txt` | what the log holds, the CFAR threshold at the start and the changes during the log (*Apply* of the CFAR threshold: time, old and new threshold, Pfa, pulse number) |
+| `screen_record.mp4` | with *Screen record* (`screen`): the video of the window, see Screen recording below |
 | `ddc/ddc_<n>.mat` | `I`, `Q` (int16 [samples x channels], all channels of the PRI as received) and `hdr` (pulse and scan number, time, azimuth, PRI, stagger index, DDC rate, time of the first sample, receive intervals): the format of the simulator's DDC files, so a log is processed again with `radar_stream_send <folder>/<name>/ddc` (or `replay_ddc_udp.m`); `hdr.pri_s` is the time to the next PRI of the log |
 | `dbf/dbf_<n>.mat` | `short`, `long`: the beamformer output (complex single [beams x samples], the pulse compression input: zero outside the receive window), `shortFirstSample`, `longFirstSample` (1-based DDC sample of the first column), `hdr` |
 | `mf/mf_<n>.mat` | `short`, `long`: the pulse compression output (complex single [beams x range cells]), `shortRange_m`, `longRange_m`, `hdr` (as `cfg.io.saveMf` of the simulator) |
@@ -625,7 +634,40 @@ up to 1 GB: when the disk cannot keep up (e.g. the Doppler maps of every
 update: 48 MB per update with 21 beams, 2245 range cells and 64 bins), whole
 PRIs are dropped from the log and counted (shown in the tab and printed when
 the log ends). *Stop logging* writes the queued PRIs first. At the end of the
-run the log is closed the same way.
+run the log is closed the same way. A log may hold only the screen recording
+(no block checked): then `radar_parameters.mat`, `log_info.txt` and the video.
+
+**Screen recording** (*Screen record* in the tab *Controls*, `--log-blocks
+...,screen`): from *Start logging* to *Stop logging* the whole window of the
+receiver (the shown tab, the panel, the tab bar, with every setting the user
+changes) is recorded with the mouse pointer (drawn on the frames: an arrow,
+with a yellow ring while a button is pressed) and the sound of the
+microphone into `screen_record.mp4` of the log (H.264 and AAC; without
+libx264 in ffmpeg MPEG-4 video). Qt itself has no screen recorder in Qt Widgets
+(Qt 6.5+ Multimedia has `QScreenCapture` with `QMediaRecorder`, a module
+that Qt 5 and many installations lack), so the receiver uses **ffmpeg**,
+which must be installed: Linux `sudo apt install ffmpeg`; Windows: the
+`ffmpeg.exe` of a build from ffmpeg.org (e.g. gyan.dev) next to
+`radar_receiver.exe` or on `PATH` (or `--ffmpeg PATH`). A GUI timer grabs
+the window (`QWidget::grab`: the window as drawn, also when other windows
+cover it; menus and dialogs are windows of their own and are not in the
+video) at 10 frames per second (`--record-fps`), at most 1920 pixels wide,
+and writes the frames to ffmpeg, which encodes them in its own process
+(`-preset ultrafast`). The frame rate is constant: a frame that comes late
+is repeated, so the video keeps the time of the sound. The sound: with
+*with the sound of the microphone* (default), `--record-audio auto` takes
+the default input: on Linux PulseAudio's default source (else ALSA
+`default`), on Windows the first DirectShow audio device (a headset in the
+3.5 mm jack is usually *Microphone (Realtek ...)*: choose it as the default
+recording device of the system, or name it with `--record-audio
+"dshow:audio=Microphone (Realtek(R) Audio)"`; `ffmpeg -list_devices true -f
+dshow -i dummy` lists the names). When no input delivers sound the video is
+recorded without it (noted in the tab). *Stop logging* (or closing the
+window) ends the file: ffmpeg writes its index, so stop the log before
+killing the program. Grabbing a frame costs the GUI thread about one redraw
+of the window (*Screen record* in the timing panel; measured about 10 ms per
+frame for 800 x 800 pixels without a GPU), and ffmpeg one core at most; the
+processing thread is not involved.
 
 **CFAR detectors** (`cfar.c`, `cfg.cfar.type` and `cfg.cfar.method` in the
 configuration): the same CA (mean of the training cells), GO / SO (larger /

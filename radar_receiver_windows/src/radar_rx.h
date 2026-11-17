@@ -373,6 +373,9 @@ enum { PROFILE_NONE = 0, PROFILE_DBF = 1, PROFILE_MF = 2 };
 /* Block outputs for logging (processor_set_log): the bits of the mask. LOG_DDC and LOG_DETECTION
  * are written by the application (the PRI as received, the detections callback). */
 enum { LOG_DDC = 1, LOG_DBF = 2, LOG_MF = 4, LOG_DOPPLER = 8, LOG_DETECTION = 16 };
+/* LOG_SCREEN: the PPI records its window (with the microphone) to <log>/screen_record.mp4 (ppi_qt.cpp);
+ * not a block of the processing (a log with only this bit holds radar_parameters.mat and the video) */
+enum { LOG_SCREEN = 32, LOG_BLOCKS = LOG_DDC | LOG_DBF | LOG_MF | LOG_DOPPLER | LOG_DETECTION };
 
 typedef struct {
     int          kind;         /* LOG_DBF, LOG_MF or LOG_DOPPLER                              */
@@ -473,7 +476,27 @@ typedef struct {
     double   writeSeconds;         /* time of the writer thread in the files           */
     char     lastError[256];
 } LoggerStats;
-Logger *logger_start(const char *folder, const char *name, int mask, const RadarConfig *cfg, char *err, size_t errLen);
+/* The state of the receiver when the log starts, for radar_parameters.mat (params_mat.c) */
+typedef struct {
+    const char *started;          /* date and time                                     */
+    const char *configPath;       /* configuration file                                */
+    const char *logBlocks;        /* filled by logger_start                            */
+    int         screenRecord;     /* LOG_SCREEN requested                              */
+    double      alpha;            /* CFAR threshold factor in use (0: the configuration's) */
+    int         threads, slowTimeSkipping;
+    int         havePri;          /* the last PRI processed before the start:          */
+    uint32_t    pulseNumber;
+    double      time_s, az_deg;
+} RuntimeParams;
+/* Writes every setting of the processing chain (cfg) and the receiver state (rt) as struct 'params'
+ * to a MAT-file (-v6). Returns 0 on success. */
+int radar_parameters_write(const char *path, const RadarConfig *cfg, const RuntimeParams *rt);
+
+/* logger_start also writes <log>/radar_parameters.mat (rt may be NULL: the configuration's values)
+ * and log_info.txt; logger_note appends a line (e.g. a parameter changed during the log) to it. */
+Logger *logger_start(const char *folder, const char *name, int mask, const RadarConfig *cfg, const RuntimeParams *rt,
+                     char *err, size_t errLen);
+void logger_note(Logger *L, const char *text);
 void logger_begin_pri(Logger *L, const PriData *pri);
 void logger_block(Logger *L, const BlockOutput *out);
 void logger_detections(Logger *L, const Detection *dets, int n);
@@ -597,7 +620,13 @@ void ppi_set_rd_axes(double vMin_mps, double vMax_mps);
  * (shown in the tab, the REC mark of the PPI) with ppi_post_log_status (error: NULL or a message). */
 void ppi_set_log_defaults(const char *folder, const char *name, int mask);
 int  ppi_take_log_request(int *start, char *folder, size_t folderLen, char *name, size_t nameLen, int *mask);
-void ppi_post_log_status(int active, const char *dir, const LoggerStats *stats, const char *error);
+void ppi_post_log_status(int active, const char *dir, int mask, const LoggerStats *stats, const char *error);
+/* Screen recording of a log with LOG_SCREEN (call before ppi_run; NULL / 0: the defaults): the
+ * ffmpeg program (default: next to the program, else on PATH), the sound input ("auto": the
+ * default microphone, "none", or "FORMAT:DEVICE" as ffmpeg's -f FORMAT -i DEVICE) and the frame
+ * rate (default 10). The window (with the mouse pointer drawn) and the sound go to
+ * <log>/screen_record.mp4 (H.264 + AAC) until the log stops. */
+void ppi_set_screen_record(const char *ffmpeg, const char *audio, double fps);
 /* Accumulated processing times: the panel shows the mean per PRI of every
  * block [us]. detectionName / trackingName label the CFAR and tracking rows
  * (e.g. "CFAR 2-D", "Track 3D CV"; NULL keeps the previous; the panel shortens

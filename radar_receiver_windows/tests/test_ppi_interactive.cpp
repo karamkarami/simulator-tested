@@ -15,6 +15,11 @@
  */
 #include "../src/ppi_qt.cpp"
 
+#include <QElapsedTimer>
+#include <QEventLoop>
+#include <QThread>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -702,7 +707,7 @@ int main(int argc, char **argv)
         LoggerStats st;
         std::memset(&st, 0, sizeof st);
         st.pris = 12;  st.files = 48;  st.bytes = 3000000;  st.seconds = 65.0;
-        ppi_post_log_status(1, "/tmp/logs_test/run1", &st, nullptr);
+        ppi_post_log_status(1, "/tmp/logs_test/run1", LOG_DDC, &st, nullptr);
         win.refresh();
         check(pw.logging() && win.logStatus().contains("logging to /tmp/logs_test/run1") && win.logStatus().contains("48 files") &&
               !win.logBlockBox(0)->isEnabled(), "the state of the log; the blocks are locked while it runs");
@@ -723,11 +728,59 @@ int main(int argc, char **argv)
         win.logButton()->click();                         /* stop */
         check(ppi_take_log_request(&start, folder2, sizeof folder2, name, sizeof name, &mask) == 1 && start == 0,
               "Stop logging: the request");
-        ppi_post_log_status(0, "/tmp/logs_test/run1", &st, nullptr);
+        ppi_post_log_status(0, "/tmp/logs_test/run1", 0, &st, nullptr);
         win.refresh();
         check(!pw.logging() && win.logButton()->text() == "Start logging" && win.logStatus().contains("log ended") &&
               win.logBlockBox(0)->isEnabled(), "log ended: the button and the blocks back, no REC mark");
         if (!folder.empty()) win.grab().save(QString::fromStdString(folder + "/ppi_controls.png"));
+
+        /* screen record: the window (with the mouse pointer) and the sound to <log>/screen_record.mp4 (ffmpeg;
+         * the sound here from ffmpeg's test source instead of a microphone) */
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg");
+        if (ffmpeg.isEmpty()) {
+            std::printf("  (no ffmpeg on PATH: the screen recording is not tested)\n");
+        } else {
+            ppi_set_screen_record(nullptr, "lavfi:sine=frequency=440", 10);
+            const QString dir = QDir::tempPath() + "/ppi_screen_test";
+            QDir(dir).removeRecursively();
+            QDir().mkpath(dir);
+            for (int i = 0; i < 5; i++) win.logBlockBox(i)->setChecked(false);
+            win.screenRecordBox()->setChecked(true);
+            win.microphoneBox()->setChecked(true);
+            win.logButton()->click();
+            check(ppi_take_log_request(&start, folder2, sizeof folder2, name, sizeof name, &mask) == 1 && start == 1 &&
+                  mask == LOG_SCREEN, "Start logging with only the screen record");
+            ppi_post_log_status(1, dir.toUtf8().constData(), LOG_SCREEN, &st, nullptr);
+            win.refresh();
+            const bool rec = win.recording();
+            QElapsedTimer el;
+            el.start();
+            while (el.elapsed() < 2500) { QCoreApplication::processEvents(QEventLoop::AllEvents, 20); QThread::msleep(5); }
+            win.refresh();
+            const bool shown = win.logStatus().contains("screen: recording");
+            win.logButton()->click();                     /* stop: the video ends at once */
+            ppi_take_log_request(&start, folder2, sizeof folder2, name, sizeof name, &mask);
+            ppi_post_log_status(0, dir.toUtf8().constData(), 0, &st, nullptr);
+            win.refresh();
+            QProcess probe;
+            probe.start(ffmpeg.left(ffmpeg.size() - 6) + "ffprobe",
+                        { "-v", "error", "-show_entries", "stream=codec_type,width,height,duration", "-of", "csv=p=0",
+                          dir + "/screen_record.mp4" });
+            probe.waitForFinished(10000);
+            const QString info = QString::fromLatin1(probe.readAllStandardOutput()).trimmed();
+            const QStringList lines = info.split('\n');
+            double vDur = 0, aDur = 0;
+            for (const QString &l : lines) {
+                const QStringList f = l.split(',');
+                if (f.size() >= 4 && f[0] == "video") vDur = f[3].toDouble();
+                if (f.size() >= 2 && f[0] == "audio") aDur = f.last().toDouble();
+            }
+            check(rec && shown && !win.recording() && win.logStatus().contains("screen recording saved") &&
+                  vDur > 1.5 && vDur < 4.0 && std::fabs(aDur - vDur) < 0.3,
+                  QStringLiteral("screen_record.mp4: video %1 s, sound %2 s (%3)").arg(vDur).arg(aDur)
+                      .arg(info.simplified()).toStdString().c_str());
+            win.screenRecordBox()->setChecked(false);
+        }
         win.tabs()->setCurrentIndex(0);
     }
 

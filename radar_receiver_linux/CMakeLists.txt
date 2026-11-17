@@ -65,6 +65,7 @@ add_library(radar_core STATIC
     src/input_thread.c
     src/video.c
     src/logger.c
+    src/params_mat.c
     tools/mat_write.c
 )
 target_include_directories(radar_core PUBLIC src)

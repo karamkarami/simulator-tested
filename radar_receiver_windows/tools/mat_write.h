@@ -33,6 +33,19 @@ void mat_write_double(MatWriter *w, const char *name, const double *data, size_t
 void mat_write_char(MatWriter *w, const char *name, const char *text);
 /* Writes the file and frees the writer; returns 0 on success. */
 int  mat_write_close(MatWriter *w);
+
+/* Nested structs (radar_parameters.mat): a 1x1 struct is built field by field (the values are
+ * copied), a struct field takes another struct (ownership passes to the parent), then
+ * mat_write_tree writes it as variable 'name' and frees it. Field names: at most 63 characters. */
+typedef struct MatStruct MatStruct;
+MatStruct *mat_struct_new(void);
+void mat_struct_double(MatStruct *s, const char *field, const double *v, size_t rows, size_t cols);
+void mat_struct_scalar(MatStruct *s, const char *field, double v);
+void mat_struct_single(MatStruct *s, const char *field, const float *re, const float *im, const size_t *dims, int nd);
+void mat_struct_char(MatStruct *s, const char *field, const char *text);
+void mat_struct_struct(MatStruct *s, const char *field, MatStruct *child);
+void mat_struct_free(MatStruct *s);
+void mat_write_tree(MatWriter *w, const char *name, MatStruct *s);
 /* 1 if built with zlib. */
 int  mat_write_has_zlib(void);
 
