@@ -746,7 +746,6 @@ int main(int argc, char **argv)
             QDir().mkpath(dir);
             for (int i = 0; i < 5; i++) win.logBlockBox(i)->setChecked(false);
             win.screenRecordBox()->setChecked(true);
-            win.microphoneBox()->setChecked(true);
             win.logButton()->click();
             check(ppi_take_log_request(&start, folder2, sizeof folder2, name, sizeof name, &mask) == 1 && start == 1 &&
                   mask == LOG_SCREEN, "Start logging with only the screen record");

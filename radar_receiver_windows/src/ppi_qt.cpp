@@ -2932,7 +2932,6 @@ public:
     QLineEdit *logNameEdit() { return logName_; }
     QCheckBox *logBlockBox(int i) { return logBlock_[i]; }
     QCheckBox *screenRecordBox() { return screenBox_; }
-    QCheckBox *microphoneBox() { return micBox_; }
     bool recording() const { return recorder_.active(); }
     QPushButton *logButton() { return logButton_; }
     /* the Radar Settings (tests): the dropdown of an item (BOARD_MODE, BOARD_CODE, ...), the status */
@@ -3204,25 +3203,19 @@ private:
         });
         /* the blocks */
         QVBoxLayout *c = new QVBoxLayout();
-        static const char *const names[5] = { "DDC output (replayable DDC files)", "DBF output (beams)",
-                                               "Pulse compression output (MF)", "Doppler output (range-velocity maps)",
-                                               "Detection output (CFAR detections, plots)" };
+        static const char *const names[5] = { "DDC output", "DBF output", "Pulse compression output", "Doppler output",
+                                               "Detection output" };
         const int mask = shared().log.mask ? shared().log.mask : LOG_DDC | LOG_DETECTION;
         for (int i = 0; i < 5; i++) {
             logBlock_[i] = new QCheckBox(QString::fromLatin1(names[i]), box);
             logBlock_[i]->setChecked(mask & (1 << i));
             c->addWidget(logBlock_[i]);
         }
-        /* the video of this window with the sound of the microphone (ffmpeg) */
-        screenBox_ = new QCheckBox(QStringLiteral("Screen record (this window, mouse pointer: screen_record.mp4)"), box);
+        /* the video of this window (screen_record.mp4, with the mouse pointer) and the sound of the microphone when
+         * there is one, else without sound (ffmpeg) */
+        screenBox_ = new QCheckBox(QStringLiteral("Screen record"), box);
         screenBox_->setChecked(mask & LOG_SCREEN);
         c->addWidget(screenBox_);
-        micBox_ = new QCheckBox(QStringLiteral("with the sound of the microphone"), box);
-        micBox_->setChecked(g_recAudio != "none");
-        micBox_->setEnabled(screenBox_->isChecked());
-        micBox_->setStyleSheet(QStringLiteral("margin-left: 22px;"));
-        c->addWidget(micBox_);
-        QObject::connect(screenBox_, &QCheckBox::toggled, [this](bool on) { micBox_->setEnabled(on && !logOn_); });
         row->addLayout(c, 2);
         /* start / stop and the state */
         QVBoxLayout *s = new QVBoxLayout();
@@ -3249,7 +3242,7 @@ private:
             "and plots); <n> is the pulse number. A thread of its own writes the files; while the log runs the PPI shows "
             "REC in its corner and the timing panel the time of the logging. When the disk cannot keep up, PRIs are "
             "dropped from the log (counted below). Screen record: this window with the mouse pointer and the sound of the "
-            "microphone, encoded by ffmpeg (installed, or next to the program) to screen_record.mp4 of the log; it ends "
+            "microphone (without sound when there is no microphone), encoded by ffmpeg (installed, or next to the program) to screen_record.mp4 of the log; it ends "
             "with Stop logging."), page);
         note->setObjectName(QStringLiteral("note"));
         note->setWordWrap(true);
@@ -3475,7 +3468,7 @@ private:
             QString msg;
             const QString file = QString::fromStdString(dir) + QStringLiteral("/screen_record.mp4");
             recordError_.clear();
-            if (!recorder_.start(window(), file, micBox_->isChecked(), &msg)) recordError_ = msg;
+            if (!recorder_.start(window(), file, true, &msg)) recordError_ = msg;   /* sound: the microphone if any */
         }
         if (!active) {
             stopRecording();
@@ -3489,7 +3482,6 @@ private:
         logButton_->setStyleSheet(on ? QStringLiteral("background: #6a1010; color: white;") : QString());
         for (int i = 0; i < 5; i++) logBlock_[i]->setEnabled(!on);
         screenBox_->setEnabled(!on);
-        micBox_->setEnabled(!on && screenBox_->isChecked());
         logFolder_->setEnabled(!on);
         logName_->setEnabled(!on);
         QString text;
@@ -3551,7 +3543,7 @@ private:
     QWidget               *panel_ = nullptr;
     QLineEdit             *logFolder_, *logName_;
     QCheckBox             *logBlock_[5];
-    QCheckBox             *screenBox_ = nullptr, *micBox_ = nullptr;
+    QCheckBox             *screenBox_ = nullptr;
     ScreenRecorder         recorder_;
     bool                   recordTried_ = false, logOn_ = false;
     QString                recordError_, recordFile_, logText_;

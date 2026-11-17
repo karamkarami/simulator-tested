@@ -548,8 +548,8 @@ PPI) and the panel with the settings and the block times.
 tabs. For now it has the **Logging** box: *Folder* (with *Browse ...*; default
 `./logs`, or `--log-dir`) and *Log name* (empty: `log_<date>_<time>`), next to
 them the blocks to log (*DDC output*, *DBF output*, *Pulse compression
-output (MF)*, *Doppler output (range-velocity maps)*, *Detection output*)
-and *Screen record* (with *with the sound of the microphone*), and next to them *Start logging* / *Stop logging* with the state of the log
+output*, *Doppler output*, *Detection output*)
+and *Screen record* (with the sound of the microphone when there is one, else without sound), and next to them *Start logging* / *Stop logging* with the state of the log
 (its folder, PRIs, files and MB written, the queue, PRIs dropped, file
 errors, and the screen recording: its time, size, frame rate and sound input,
 then the file saved or an error). While the log runs the blocks and the folder cannot be changed, the
@@ -697,8 +697,8 @@ cover it; menus and dialogs are windows of their own and are not in the
 video) at 10 frames per second (`--record-fps`), at most 1920 pixels wide,
 and writes the frames to ffmpeg, which encodes them in its own process
 (`-preset ultrafast`). The frame rate is constant: a frame that comes late
-is repeated, so the video keeps the time of the sound. The sound: with
-*with the sound of the microphone* (default), `--record-audio auto` takes
+is repeated, so the video keeps the time of the sound. The sound (no checkbox: always when a
+microphone delivers sound): `--record-audio auto` (default) takes
 the default input: on Linux PulseAudio's default source (else ALSA
 `default`), on Windows the first DirectShow audio device (a headset in the
 3.5 mm jack is usually *Microphone (Realtek ...)*: choose it as the default
