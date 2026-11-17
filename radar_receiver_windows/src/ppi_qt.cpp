@@ -3258,7 +3258,7 @@ private:
         g->setHorizontalSpacing(10);
         auto combo = [&](const QString &label, int row, int col, int item) {
             QLabel *l = new QLabel(label, box);
-            if (col > 0) l->setContentsMargins(28, 0, 0, 0);   /* a gap after the field on its left */
+            if (col > 0) l->setContentsMargins(48, 0, 0, 0);   /* a gap after the field on its left */
             g->addWidget(l, row, 2 * col);
             QComboBox *c = new QComboBox(box);
             c->setMinimumWidth(110);
@@ -3281,7 +3281,7 @@ private:
         bOp_ = combo(QStringLiteral("Operation Mode"), 3, 0, BOARD_OPMODE);
         for (int i = 0; i < 2; i++) {                    /* F1 (short pulse), F2 (long pulse) [MHz] */
             QLabel *fl = new QLabel(i ? QStringLiteral("F2") : QStringLiteral("F1"), box);
-            fl->setContentsMargins(28, 0, 0, 0);
+            fl->setContentsMargins(48, 0, 0, 0);
             g->addWidget(fl, 3, 2 + 2 * i);
             QHBoxLayout *h = new QHBoxLayout();
             bF_[i] = new QSpinBox(box);
@@ -3332,17 +3332,6 @@ private:
         bStatus_->setWordWrap(true);
         bStatus_->setTextInteractionFlags(Qt::TextSelectableByMouse);
         v->addWidget(bStatus_);
-        QLabel *info = new QLabel(QStringLiteral(
-            "Board %1:%2 (answers on UDP port %3). Every setting is written to the board and read back; the receiver "
-            "uses a new radar mode, phase code, stagger pattern, RPM, F1 or F2 when the board confirms it (RPM: %4). "
-            "The confirmed settings of every mode are kept until the program ends; a mode chosen again gets them sent "
-            "again. Export / Import: the settings of all modes in a MAT-file.")
-                                      .arg(QString::fromLatin1(bi->host)).arg(bi->port).arg(bi->replyPort)
-                                      .arg(bi->sendRpm ? QStringLiteral("also sent to the board, address 0x32")
-                                                       : QStringLiteral("only the receiver")), box);
-        info->setObjectName(QStringLiteral("note"));
-        info->setWordWrap(true);
-        v->addWidget(info);
         return box;
     }
 
