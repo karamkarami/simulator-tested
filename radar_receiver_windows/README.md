@@ -656,7 +656,12 @@ output (`nfft` velocity bins, rows already scaled for a flat noise floor;
 the cells beyond `cfg.mti.maxRange_m` divided by `nufftBypassGain`), P =
 |.|^2. The MTI notch is around the bin `zeroBin` (none when zero velocity is
 not on the grid). It costs nfft x rowLen complex multiply-adds per cell and
-CPI update (see the timing panel).
+CPI update (see the timing panel): with the default staggered PRF (48 elements,
+21 beams, 128 bins x 114 outputs) `radar_bench` measured 24.5 ms per update
+for the Doppler block against 1.9 ms with the de-interleaved rows (2 threads
+of a 4-vCPU VM), and the CFAR 5.0 ms against 1.2 ms (4 times the Doppler
+bins). For real time raise `cfg.proc.updateEvery`, use fewer bins
+(`cfg.proc.nufft.nPoints`) or more threads.
 
 **Channels**: the receiver processes the first `nChUsed` channels of every
 PRI (`cfg.rx.nChannelsUsed`; older files: all), with the DBF matrix of those
