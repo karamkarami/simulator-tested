@@ -3287,6 +3287,8 @@ private:
             bF_[i] = new QSpinBox(box);
             bF_[i]->setRange(bi->fcMin_MHz, bi->fcMax_MHz);
             bF_[i]->setSuffix(QStringLiteral(" MHz"));
+            bF_[i]->setKeyboardTracking(false);
+            bF_[i]->setCorrectionMode(QAbstractSpinBox::CorrectToNearestValue);   /* out-of-range text -> nearest limit */
             bF_[i]->setToolTip(i ? QStringLiteral("carrier of the long pulse (sent as F2 - %1 MHz)").arg(bi->fcMin_MHz)
                                  : QStringLiteral("carrier of the short pulse (sent as F1 - %1 MHz)").arg(bi->fcMin_MHz));
             h->addWidget(bF_[i]);
@@ -3294,7 +3296,12 @@ private:
             h->addWidget(bFApply_[i]);
             g->addLayout(h, 3, 3 + 2 * i);
             QObject::connect(bFApply_[i], &QPushButton::clicked, [this, i]() {
-                board_control_request(g_board, BOARD_REQ_SET, i ? BOARD_F2 : BOARD_F1, bF_[i]->value(), nullptr);
+                bF_[i]->interpretText();                          /* take what is typed, clamped to the range */
+                const int v = bF_[i]->value();
+                if (v < bF_[i]->minimum() || v > bF_[i]->maximum() ||
+                    board_control_request(g_board, BOARD_REQ_SET, i ? BOARD_F2 : BOARD_F1, v, nullptr) == -2)
+                    bStatus_->setText(QStringLiteral("F%1 must be between %2 and %3 MHz")
+                                      .arg(i + 1).arg(bF_[i]->minimum()).arg(bF_[i]->maximum()));
             });
         }
         for (int col = 0; col < 8; col++) g->setColumnStretch(col, 0);   /* each label next to its field */

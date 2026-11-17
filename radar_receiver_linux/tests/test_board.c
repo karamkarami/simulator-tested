@@ -170,6 +170,8 @@ int main(int argc, char **argv)
     board_control_request(bc, BOARD_REQ_SET, BOARD_F2, 175, NULL);
     wait_idle(bc, &st);
     CHECK(st.cur.f2_MHz == 175 && board_sim_register(g_sim, 0x03) == 25);
+    CHECK(board_control_request(bc, BOARD_REQ_SET, BOARD_F1, 1000, NULL) == -2);   /* above fcMax: refused */
+    CHECK(board_control_request(bc, BOARD_REQ_SET, BOARD_F2, 10, NULL) == -2);     /* below fcMin: refused */
     CHECK(board_control_take_config(bc, &next, &mode, NULL) && fabs(next.pulse[PULSE_LONG].fc_Hz - 175e6) < 1);
     radar_config_free(&next);
 

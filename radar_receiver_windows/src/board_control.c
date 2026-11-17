@@ -541,6 +541,8 @@ const BoardInfo *board_control_info(const BoardControl *bc)
 int board_control_request(BoardControl *bc, int kind, int item, double value, const char *path)
 {
     if (!bc) return -1;
+    if (kind == BOARD_REQ_SET && (item == BOARD_F1 || item == BOARD_F2) &&
+        (value < bc->bi.fcMin_MHz || value > bc->bi.fcMax_MHz)) return -2;   /* outside [fcMin, fcMax] */
     mutex_lock(&bc->mu);
     if (bc->qCount == QUEUE) { mutex_unlock(&bc->mu); return -1; }
     Request *q = &bc->q[(bc->qHead + bc->qCount) % QUEUE];
