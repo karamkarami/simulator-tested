@@ -769,6 +769,9 @@ int  board_settings_valid(const BoardInfo *bi, int mode, const ModeSettings *s, 
 /* The receiver configuration of the mode with the settings s (radar_config.m with cfg.modes.active,
  * the code, stagger pair, rotation speed and carriers): 0, or -1 with the message in err. */
 int  board_build_config(const BoardInfo *bi, int mode, const ModeSettings *s, RadarConfig *cfg, char *err, size_t errLen);
+/* The MATLAB statements of these settings (after radar_config.m and bi->sets): at most max (8) in
+ * st[]; returns their number (0: the mode is not available). */
+int  board_config_statements(const BoardInfo *bi, int mode, const ModeSettings *s, char st[][160], int max);
 /* The settings of a loaded configuration (mode cfg->radarMode): code, stagger, rpm and carriers
  * from cfg, STC and gain the defaults of the mode. */
 void board_settings_of_config(const BoardInfo *bi, const RadarConfig *cfg, ModeSettings *s);

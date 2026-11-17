@@ -229,22 +229,30 @@ int board_settings_valid(const BoardInfo *bi, int mode, const ModeSettings *s, c
     return 1;
 }
 
+int board_config_statements(const BoardInfo *bi, int mode, const ModeSettings *s, char st[][160], int max)
+{
+    const ModeInfo *m = board_mode_info(bi, mode);
+    if (!m || max < 8) return 0;
+    int n = 0;
+    snprintf(st[n++], 160, "cfg.modes.active = %d; cfg = apply_radar_mode(cfg);", mode);
+    for (int i = 0; i < N_PULSES; i++)
+        if (m->phaseCode[i] && s->code > 0) snprintf(st[n++], 160, "cfg.wave.%s.codeIndex = %d;", g_pulseName[i], s->code);
+    if (m->staggered && s->stagger > 0) snprintf(st[n++], 160, "cfg.prf.staggerSet = %d;", s->stagger);
+    snprintf(st[n++], 160, "cfg.ant.rpm = %.17g;", s->rpm);
+    /* a carrier of the mode file that is not a whole MHz stays as it is unless it was changed */
+    const int f[2] = { s->f1_MHz, s->f2_MHz }, f0[2] = { m->defaults.f1_MHz, m->defaults.f2_MHz };
+    for (int i = 0; i < N_PULSES; i++)
+        if (m->enable[i] && f[i] > 0 && f[i] != f0[i]) snprintf(st[n++], 160, "cfg.wave.%s.fc_Hz = %de6;", g_pulseName[i], f[i]);
+    return n;
+}
+
 int board_build_config(const BoardInfo *bi, int mode, const ModeSettings *s, RadarConfig *cfg, char *err, size_t errLen)
 {
     const ModeInfo *m = board_mode_info(bi, mode);
     if (!m) { snprintf(err, errLen, "radar mode %d is not available", mode); return -1; }
     char st[8][160];
     const char *extra[8];
-    int n = 0;
-    snprintf(st[n++], sizeof st[0], "cfg.modes.active = %d; cfg = apply_radar_mode(cfg);", mode);
-    for (int i = 0; i < N_PULSES; i++)
-        if (m->phaseCode[i] && s->code > 0) snprintf(st[n++], sizeof st[0], "cfg.wave.%s.codeIndex = %d;", g_pulseName[i], s->code);
-    if (m->staggered && s->stagger > 0) snprintf(st[n++], sizeof st[0], "cfg.prf.staggerSet = %d;", s->stagger);
-    snprintf(st[n++], sizeof st[0], "cfg.ant.rpm = %.17g;", s->rpm);
-    /* a carrier of the mode file that is not a whole MHz stays as it is unless it was changed */
-    const int f[2] = { s->f1_MHz, s->f2_MHz }, f0[2] = { m->defaults.f1_MHz, m->defaults.f2_MHz };
-    for (int i = 0; i < N_PULSES; i++)
-        if (m->enable[i] && f[i] > 0 && f[i] != f0[i]) snprintf(st[n++], sizeof st[0], "cfg.wave.%s.fc_Hz = %de6;", g_pulseName[i], f[i]);
+    const int n = board_config_statements(bi, mode, s, st, 8);
     for (int i = 0; i < n; i++) extra[i] = st[i];
 
     const char *sets[32];

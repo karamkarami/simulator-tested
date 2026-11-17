@@ -214,6 +214,24 @@ if(NOT WIN32)
     target_link_libraries(radar_generate_ddc PRIVATE m)
 endif()
 
+# The simulator of radar_generate_ddc in real time: every PRI goes to the receiver over UDP at its
+# PRI time (RDDC or VBDR), the board commands of the receiver change its mode and settings: a run
+# configuration "radar_live_sim" in CLion (until Ctrl+C; see --help and README "radar_live_sim").
+add_executable(radar_live_sim tools/generate_ddc.c)
+target_include_directories(radar_live_sim PRIVATE tools src)
+target_compile_definitions(radar_live_sim PRIVATE RADAR_LIVE_SIM RADAR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+if(NOT WIN32)
+    target_compile_definitions(radar_live_sim PRIVATE _POSIX_C_SOURCE=200809L)
+endif()
+target_link_libraries(radar_live_sim PRIVATE radar_board radar_ddc_files)
+if(ZLIB_FOUND)
+    target_compile_definitions(radar_live_sim PRIVATE RADAR_HAVE_ZLIB)
+    target_link_libraries(radar_live_sim PRIVATE ZLIB::ZLIB)
+endif()
+if(RADAR_OPENMP AND OpenMP_C_FOUND)
+    target_link_libraries(radar_live_sim PRIVATE OpenMP::OpenMP_C)
+endif()
+
 # Processing time per block on synthetic PRIs (no network, display or console):
 # radar_bench --config FILE [--threads N] [--thresholds DB,DB,...]
 add_executable(radar_bench tools/bench_processor.c)
@@ -370,6 +388,11 @@ if(RADAR_BUILD_TESTS)
     add_executable(test_board tests/test_board.c)
     target_link_libraries(test_board PRIVATE radar_board)
     add_test(NAME board COMMAND test_board ${CMAKE_CURRENT_SOURCE_DIR}/../radar_config.m)
+    # radar_live_sim: a short run (fidelity fast, one element, no board) and a VBDR run of the full simulation
+    add_test(NAME live_sim_fast COMMAND radar_live_sim --quiet --no-board --fidelity fast --max-pulses 300 --port 50471
+             --set "cfg.ant.nElements = 1;" --set "cfg.clutter.enable = false;")
+    add_test(NAME live_sim_vbdr COMMAND radar_live_sim --quiet --no-board --format vbdr --max-pulses 20 --speed 0.1 --port 50472
+             --set "cfg.sim.sectors_deg = [42 43];" --set "cfg.rx.nChannelsUsed = 4;")
     add_executable(test_udp_input tests/test_udp_input.c)
     target_link_libraries(test_udp_input PRIVATE radar_core)
     add_test(NAME udp_input COMMAND test_udp_input)

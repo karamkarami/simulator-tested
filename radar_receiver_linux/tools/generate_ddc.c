@@ -1585,6 +1585,39 @@ static void clutter_signal(const Clutter *C, const Radar *s, Work *wk, double az
     }
 }
 
+/* DDC of the ADC data wk->adc into wk->I, wk->Q (ddc.m): mixer, two filter stages (valid
+ * convolution, decimation), shift, rounding, saturation. */
+static void run_ddc(const Radar *s, Work *wk)
+{
+    const int nAdc = s->nAdc, nCh = s->nCh;
+    const int L1 = s->L1, L2 = s->L2, D1 = s->D1, D2 = s->D2;
+    const int K1 = (nAdc - L1) / D1 + 1, K2 = s->nDdc;
+    const double sc1 = ldexp(1.0, -s->shift1), sc2 = ldexp(1.0, -s->shift2);
+    for (int ch = 0; ch < nCh; ch++) {
+        const int16_t *ad = wk->adc + (size_t)ch * nAdc;
+        for (int k = 0; k < nAdc; k++) { wk->xI[k] = ad[k] * s->cosNco[k]; wk->xQ[k] = ad[k] * s->msinNco[k]; }
+        for (int line = 0; line < 2; line++) {
+            const double *xin = line ? wk->xQ : wk->xI;
+            double *y1 = wk->y1;
+            for (int m = 0; m < K1; m++) {
+                double acc = 0;
+                const double *xp = xin + (size_t)m * D1 + L1 - 1;
+                for (int j = 0; j < L1; j++) acc += s->h1[j] * xp[-j];
+                double v = acc * sc1;
+                if (s->fixedPoint) { v = round(v); v = v > 32767 ? 32767 : v < -32768 ? -32768 : v; }
+                y1[m] = v;
+            }
+            int16_t *out = (line ? wk->Q : wk->I) + (size_t)ch * K2;
+            for (int m = 0; m < K2; m++) {
+                double acc = 0;
+                const double *xp = y1 + (size_t)m * D2 + L2 - 1;
+                for (int j = 0; j < L2; j++) acc += s->h2[j] * xp[-j];
+                out[m] = sat16(round(acc * sc2));
+            }
+        }
+    }
+}
+
 typedef struct { int pulse, scan, staggerIdx; double t, az, pri; } Pri;
 
 /* Received signal, ADC, DDC of one PRI (generate_rx_signal.m, adc_sample.m, ddc.m); returns the
@@ -1701,36 +1734,11 @@ static double simulate_pri(const Radar *s, const Clutter *C, const Target *tg, i
             if (s->rxSample[k] && (q >= s->fullScale - 1 || q <= -s->fullScale)) clipped++;
         }
     }
-    /* DDC: mixer, two filter stages (valid convolution, decimation), shift, rounding, saturation */
-    const int L1 = s->L1, L2 = s->L2, D1 = s->D1, D2 = s->D2;
-    const int K1 = (nAdc - L1) / D1 + 1, K2 = s->nDdc;
-    const double sc1 = ldexp(1.0, -s->shift1), sc2 = ldexp(1.0, -s->shift2);
-    for (int ch = 0; ch < nCh; ch++) {
-        const int16_t *ad = wk->adc + (size_t)ch * nAdc;
-        for (int k = 0; k < nAdc; k++) { wk->xI[k] = ad[k] * s->cosNco[k]; wk->xQ[k] = ad[k] * s->msinNco[k]; }
-        for (int line = 0; line < 2; line++) {
-            const double *xin = line ? wk->xQ : wk->xI;
-            double *y1 = wk->y1;
-            for (int m = 0; m < K1; m++) {
-                double acc = 0;
-                const double *xp = xin + (size_t)m * D1 + L1 - 1;
-                for (int j = 0; j < L1; j++) acc += s->h1[j] * xp[-j];
-                double v = acc * sc1;
-                if (s->fixedPoint) { v = round(v); v = v > 32767 ? 32767 : v < -32768 ? -32768 : v; }
-                y1[m] = v;
-            }
-            int16_t *out = (line ? wk->Q : wk->I) + (size_t)ch * K2;
-            for (int m = 0; m < K2; m++) {
-                double acc = 0;
-                const double *xp = y1 + (size_t)m * D2 + L2 - 1;
-                for (int j = 0; j < L2; j++) acc += s->h2[j] * xp[-j];
-                out[m] = sat16(round(acc * sc2));
-            }
-        }
-    }
+    run_ddc(s, wk);
     return s->nRx ? (double)clipped / ((double)s->nRx * nCh) : 0.0;
 }
 
+#ifndef RADAR_LIVE_SIM
 /* ------------------------------------------------------------------------ */
 /* Files                                                                    */
 /* ------------------------------------------------------------------------ */
@@ -2019,3 +2027,6 @@ int main(int argc, char **argv)
     mvalue_free(cfg);
     return r;
 }
+#else
+#include "live_sim.c"   /* radar_live_sim: the real-time simulator */
+#endif
