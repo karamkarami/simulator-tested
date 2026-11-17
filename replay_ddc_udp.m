@@ -8,6 +8,12 @@ function stats = replay_ddc_udp(folder, varargin)
 %   and/or changes options:
 %     'host', 'port', 'payloadBytes'  destination and DDC bytes per datagram
 %                       (default: cfg.udp of radar_config.m)
+%     'format'   cfg.udp.format  'rddc' or 'vbdr' (the stream of the VBDR board: the first 4
+%                       channels, cfg.udp.vbdr.payloadBytes of the active mode per packet;
+%                       the replay then also answers the board commands on cfg.board.port,
+%                       printed on the console; README "VBDR stream and board control")
+%     'vbdrPayloadBytes'  bytes per VBDR packet (default: cfg.udp.vbdr.payloadBytes)
+%     'board'    true   VBDR: answer the board commands
 %     'speed'    1      replay speed (2 = twice as fast, 0.5 = half as fast)
 %     'spread'   0      the datagrams of a PRI are sent evenly over this fraction
 %                       of the PRI (0 = all at the PRI start, as the simulator does;
@@ -60,6 +66,7 @@ addpath(root, fullfile(root, 'src'));
 cfg = radar_config();
 if nargin < 1 || isempty(folder), folder = cfg.io.ddcFolder; end
 opt = struct('host', cfg.udp.host, 'port', cfg.udp.port, 'payloadBytes', cfg.udp.payloadBytes, ...
+             'format', cfg.udp.format, 'vbdrPayloadBytes', cfg.udp.vbdr.payloadBytes, 'board', true, ...
              'speed', 1, 'spread', 0, 'keepGaps', true, 'catchUp', false, 'preloadMB', 2048, 'verbose', true);
 for i = 1:2:numel(varargin)
     if ~isfield(opt, varargin{i}), error('replay_ddc_udp: unknown option ''%s''', varargin{i}); end
@@ -76,8 +83,20 @@ names = cellfun(@(n) fullfile(folder, n), names, 'UniformOutput', false);
 fileMB = cumsum([files(order).bytes]) / 2^20;
 nPri = numel(names);
 
-u = udp_sender_open(struct('host', opt.host, 'port', opt.port, 'payloadBytes', opt.payloadBytes));
+opt.format = lower(opt.format);
+if ~any(strcmp(opt.format, {'rddc', 'vbdr'})), error('replay_ddc_udp: ''format'' must be ''rddc'' or ''vbdr'''); end
+vbdr = [];
+if strcmp(opt.format, 'vbdr')
+    vbdr = struct('format', 'vbdr', 'payloadBytes', opt.vbdrPayloadBytes, 'nPackets', []);
+end
+u = udp_sender_open(struct('host', opt.host, 'port', opt.port, 'payloadBytes', opt.payloadBytes, ...
+                           'format', opt.format), vbdr);
 closer = onCleanup(@() udp_sender_close(u));         % also on Ctrl+C or error
+board = [];                                          % VBDR: answer the board commands
+if ~isempty(vbdr) && opt.board
+    board = board_sim_open(cfg, setup_radar(cfg), opt.verbose);
+    closeBoard = onCleanup(@() board_sim_close(board)); %#ok<NASGU>
+end
 
 % Read and split the first PRIs before the clock starts
 pri = cell(1, nPri);
@@ -85,7 +104,7 @@ nReady = max(1, sum(fileMB <= opt.preloadMB));
 prepTime = 0;                                        % (pessimistic) time to prepare one PRI [s]
 for k = 1:nReady
     t1 = tic;
-    pri{k} = prepare_pri(names{k}, opt.payloadBytes);
+    pri{k} = prepare_pri(names{k}, opt.payloadBytes, vbdr);
     prepTime = max(prepTime, toc(t1));
 end
 if opt.verbose
@@ -104,7 +123,7 @@ tNextPrint = 5;
 prev = [];
 for k = 1:nPri
     if k > nReady                                    % not prepared in time: read it now
-        pri{k} = prepare_pri(names{k}, opt.payloadBytes);
+        pri{k} = prepare_pri(names{k}, opt.payloadBytes, vbdr);
         nReady = k;
         nRead = nRead + 1;
     end
@@ -128,9 +147,12 @@ for k = 1:nPri
         % use the time until tSend to read the next files
         while nReady < nPri && tSend - toc(clk) > prepTime + 1e-3
             t1 = toc(clk);
-            pri{nReady+1} = prepare_pri(names{nReady+1}, opt.payloadBytes);
+            pri{nReady+1} = prepare_pri(names{nReady+1}, opt.payloadBytes, vbdr);
             nReady = nReady + 1;
             prepTime = max(0.95*prepTime, toc(clk) - t1);
+        end
+        if ~isempty(board) && tSend - toc(clk) > 2e-3
+            board = board_sim_poll(board);           % commands of the receiver (idle time only)
         end
         wait_until(clk, tSend, spin_s);
         if j == 1
@@ -173,10 +195,10 @@ if opt.verbose
 end
 end
 
-function p = prepare_pri(fileName, payloadBytes)
+function p = prepare_pri(fileName, payloadBytes, vbdr)
 % Read one DDC file and split it into the datagrams of the live stream.
 s = load(fileName);
-p.packets     = udp_make_packets(s.hdr, s.I, s.Q, payloadBytes);
+p.packets     = udp_make_packets(s.hdr, s.I, s.Q, payloadBytes, vbdr);
 p.time_s      = s.hdr.time_s;
 p.pri_s       = s.hdr.pri_s;
 p.pulseNumber = s.hdr.pulseNumber;

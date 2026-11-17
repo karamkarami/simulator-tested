@@ -35,6 +35,7 @@ for pulse = {'short', 'long'}
 end
 
 tests(end+1, :) = {'UDP streaming of the DDC output', @test_udp_stream};
+tests(end+1, :) = {'VBDR stream and board commands', @test_vbdr};
 tests(end+1, :) = {'DDC recording and replay over UDP with the PRI timing', @test_ddc_replay};
 tests(end+1, :) = {'DDC file generation with parfor (generate_ddc_files)', @test_generate_ddc};
 tests(end+1, :) = {'Phase codes: matched and mismatch filters (and the C core test)', @test_phase_code};

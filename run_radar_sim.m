@@ -85,8 +85,13 @@ if ~exist(cfg.io.outFolder, 'dir')
 end
 udp = [];
 if cfg.udp.enable
-    udp = udp_sender_open(cfg.udp);
+    udp = udp_sender_open(cfg.udp, sys.vbdr);
     closeUdp = onCleanup(@() udp_sender_close(udp));   %#ok<NASGU> closes it at the end, also after an error
+end
+board = [];                                             % VBDR: the simulator answers the board commands
+if cfg.udp.enable && strcmp(sys.vbdr.format, 'vbdr')
+    board = board_sim_open(cfg, sys, cfg.console.enable);
+    closeBoard = onCleanup(@() board_sim_close(board)); %#ok<NASGU>
 end
 ppi = [];
 detLog = [];
@@ -212,7 +217,8 @@ for k = 1:sched.nPulses
         save_ddc_file(cfg.io.ddcFolder, cfg.io.matFormat, hdr, I, Q);
     end
     if ~isempty(udp)
-        udp_send_pulse(udp, hdr, I, Q);
+        udp = udp_send_pulse(udp, hdr, I, Q);
+        board = board_sim_poll(board);                  % commands of the receiver (printed, answered)
     end
     if strcmp(want.raw, 'video')                        % video of the PPI (display time)
         tb = tic;

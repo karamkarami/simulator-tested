@@ -6,6 +6,7 @@ hdr.scanNumber     = sched.scan(k);
 hdr.time_s         = sched.time_s(k);
 hdr.antennaAz_deg  = sched.az_deg(k);
 hdr.pri_s          = sched.pri_s(k);
+hdr.prevPri_s      = sched.pri_s(max(k-1, 1));      % the PRI before (VBDR stream: Previous PRT)
 hdr.staggerIndex   = sched.staggerIdx(k);         % stagger position; with the scan-to-scan PRF the
 if isfield(sys, 'scan2scan') && sys.scan2scan       % number of the PRF of the scan (1-based, cfg.files.scan2scan):
     hdr.staggerIndex = sched.prfIdx(k);             % the C receiver selects its slow-time settings with it

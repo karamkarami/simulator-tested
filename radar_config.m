@@ -39,6 +39,9 @@ cfg.files.dbf     = fullfile(root, 'inputs', 'dbf_matrix.mat');      % elevation
 
 %% Radar site and antenna
 cfg.fc            = 170e6; % center frequency [Hz] (VHF; wavelength 1.76 m)
+cfg.fcMin_Hz      = 150e6; % carrier range of the VBDR board [Hz]: the commands F1 (short pulse) and F2
+cfg.fcMax_Hz      = 200e6; % (long pulse) set the carrier fcMin_Hz + 0 ... 255 MHz in steps of 1 MHz;
+                           % with cfg.udp.format = 'vbdr' the carriers of the modes must be whole MHz in this range
 cfg.ant.nElements = 48;   % receive elements in elevation (1 = single antenna, beamforming disabled)
 cfg.rx.nChannelsUsed = [];  % channels of the DDC output the receiver processes: the first nChannelsUsed
                             % of the cfg.ant.nElements in every PRI ([] = all; 1 = only the first element,
@@ -181,6 +184,9 @@ cfg.clutter.elevation_deg    = 0;     % elevation of the returns of flat terrain
 %% Simulation length
 cfg.sim.nScans      = 1;      % number of antenna revolutions
 cfg.sim.sectors_deg = [];     % [] = full 360 deg; else rows [azStart azEnd]: only these sectors are simulated
+cfg.sim.liveFidelity = 'full'; % radar_live_sim (real-time simulator): 'full' = as radar_generate_ddc (ADC at
+                               % 120 MHz and the fixed-point DDC), 'fast' = the signal at the DDC rate (no ADC
+                               % and DDC filters: much less computation for real time with many elements)
 cfg.sim.seed        = 1;      % random seed
 cfg.sim.swerling    = 1;      % target RCS model: 1 = Swerling 1 (new RCS every scan), 0 = constant
 
@@ -228,10 +234,31 @@ cfg.io.dopplerFolder = fullfile(root, 'output', 'doppler_pulses');  % with a CPI
 cfg.io.matFormat = '-v6';                                   % '-v6' fast/uncompressed, '-v7' compressed
 
 cfg.udp.enable       = false;        % stream the DDC output of every PRI over Ethernet/UDP
-cfg.udp.host         = '127.0.0.1';
-cfg.udp.port         = 50000;
-cfg.udp.payloadBytes = 1400;         % DDC data bytes per datagram (int16 I/Q; + 64-byte header fits a 1500-byte
+cfg.udp.format       = 'rddc';       % packet format of the DDC stream: 'rddc' (64-byte header in every datagram,
+                                     % all elements; README "Raw data, DDC files and UDP format") or 'vbdr' (the
+                                     % VBDR board: one stream of N packets with a 28-byte label per PRI, the 4
+                                     % channels CH1 (main) and CH2 ... CH4 (J1 ... J3); payload and N per mode:
+                                     % cfg.udp.vbdr of the mode file; README "VBDR stream and board control")
+cfg.udp.host         = '127.0.0.1';  % receiver PC (destination of the DDC stream)
+cfg.udp.port         = 50000;        % its data port
+cfg.udp.payloadBytes = 1400;         % 'rddc': DDC data bytes per datagram (int16 I/Q; + 64-byte header fits a 1500-byte
                                      % Ethernet MTU; use up to 65400 with jumbo frames / localhost)
+
+%% Board control (VBDR board): ASCII commands over UDP, e.g. "CNTL W 0x02 0x1C" (write) and
+% "CNTL R 0x02 0x00" (read); the board answers "CNTL W 0x02 0x1C Returned Value = 0x00000000" and
+% "CNTL R 0x02 0x00 Returned Value = 0x0000001C" to the receiver PC. The PPI (tab Controls, Radar
+% Settings) sends every setting and reads it back; the simulator (run_radar_sim, replay_ddc_udp,
+% radar_stream_send, radar_live_sim) answers like the board. Addresses: README.
+cfg.board.host      = '127.0.0.1';   % board (real board: 192.168.100.17)
+cfg.board.port      = 5000;          % its command port
+cfg.board.pcHost    = '127.0.0.1';   % receiver PC the board answers to (real board: 192.168.100.18)
+cfg.board.replyPort = 5100;          % port of the answers on the receiver PC
+cfg.board.timeout_s = 0.5;           % wait this long for an answer ...
+cfg.board.retries   = 1;             % ... and send a command this many times more without one
+cfg.board.sendRpm   = false;         % true: the rotation speed of the PPI also goes to the board (address
+                                     % 0x32; only the simulator knows it), false: only the receiver uses it
+cfg.board.nOperationModes = 4;       % options of the Operation Mode (address 0x28): 1 ... nOperationModes
+cfg.board.operationMode   = 1;       % Operation Mode at the start (one value for all radar modes)
 
 %% Console output
 % Printing every plot can take longer than the processing when a low CFAR

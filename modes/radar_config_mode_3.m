@@ -79,6 +79,26 @@ cfg.prf.staggerSet           = 1;         % staggered PRF: pair in use (one of a
 cfg.ant.availableRpm = [6 12];          % rotation speeds this mode may use [rev/min]
 cfg.ant.rpm          = 6;               % rotation speed in use [rev/min] (one of availableRpm; [] = the first)
 
+%% VBDR stream of this mode (cfg.udp.format = 'vbdr' in radar_config.m)
+% Every PRI is one stream of nPackets UDP packets: packets 1 ... nPackets/2 carry CH1 & CH2
+% (CH1 = main channel, the one the receiver processes; CH2 = J1), packets nPackets/2+1 ...
+% nPackets carry CH3 & CH4 (J2, J3). Every packet = 28-byte label (stream number, packet number,
+% packets per stream, "Loss=<n>") + up to payloadBytes bytes of its half of the stream; a half =
+% 32 uint16 system parameters (64 bytes) + nDdc x (I, Q of its two channels, int16) = 64 + 8*nDdc
+% bytes. The last packet of each half is shorter (no padding). README "VBDR stream".
+cfg.udp.vbdr.payloadBytes = 1400;       % bytes of the half-stream per packet (after the 28-byte label)
+cfg.udp.vbdr.nPackets     = 22;         % packets per stream = 2*ceil((64 + 8*nDdc)/payloadBytes), checked
+                                        % against the DDC record of the mode ([] = computed)
+
+%% Board settings of this mode (VBDR board; PPI tab Controls: Radar Settings)
+% Options of the STC and gain registers of the four channels Main, J1, J2, J3 (addresses
+% 0x29 ... 0x2C and 0x2D ... 0x30): the PPI offers the values 1 ... stcOptions(i) (gainOptions(i))
+% and starts with stc(i) (gain(i)). The receiver only sends them (no change of its processing).
+cfg.board.stcOptions  = [4 4 4 4];      % options of STC Main, J1, J2, J3
+cfg.board.stc         = [1 1 1 1];      % their values at the start (1 ... stcOptions)
+cfg.board.gainOptions = [4 4 4 4];      % options of Gain Main, J1, J2, J3
+cfg.board.gain        = [1 1 1 1];      % their values at the start (1 ... gainOptions)
+
 %% Input files of this mode (each mode may have its own files)
 cfg.files.stagger   = fullfile(root, 'inputs', 'stagger_prf.mat');    % staggered PRIs + MTI weights (cfg.prf.mode = 'staggered')
 cfg.files.scan2scan = fullfile(root, 'inputs', 'scan2scan_prf.mat');  % PRFs of the scans (cfg.prf.mode = 'scan2scan')

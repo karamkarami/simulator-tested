@@ -616,6 +616,9 @@ if 2*(c.guardDoppler + c.trainDoppler) + 1 > nfftMin
           2*(c.guardDoppler + c.trainDoppler) + 1, nfftMin);
 end
 
+%% VBDR stream and board settings (cfg.udp.format, cfg.udp.vbdr, cfg.board, cfg.fcMin_Hz / fcMax_Hz)
+sys.vbdr = vbdr_setup(cfg, sys.nDdc, sys.nChUsed);
+
 %% Tracking
 sys.track = track_setup(cfg, sys);
 end

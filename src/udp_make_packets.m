@@ -1,7 +1,7 @@
-function packets = udp_make_packets(hdr, I, Q, payloadBytes)
+function packets = udp_make_packets(hdr, I, Q, payloadBytes, vbdr, loss)
 %UDP_MAKE_PACKETS  Split the DDC output of one PRI into UDP datagrams.
 %   packets = UDP_MAKE_PACKETS(hdr, I, Q, payloadBytes) returns a cell array
-%   of uint8 row vectors, one per datagram: a 64-byte header + up to
+%   of uint8 row vectors, one per datagram, in the format 'rddc': a 64-byte header + up to
 %   payloadBytes bytes of the signed 16-bit DDC output I, Q [nSamples x
 %   nChannels] of the PRI described by hdr (see
 %   pulse_header.m). Header (little-endian):
@@ -16,6 +16,15 @@ function packets = udp_make_packets(hdr, I, Q, payloadBytes)
 %     bytes 40-47  single  DDC sample rate [Hz], time of the first DDC sample in the PRI [s]
 %     bytes 48-63  uint32  short pulse first/last DDC sample, long pulse first/last DDC sample (1-based)
 %   Payload: int16 pairs (I, Q), channel after channel (column-major order).
+%
+%   packets = UDP_MAKE_PACKETS(hdr, I, Q, [], vbdr, loss) gives the stream of the VBDR board
+%   (vbdr = sys.vbdr of setup_radar.m with format 'vbdr', or a struct with payloadBytes and
+%   nPackets; loss = packets lost by the sender so far, default 0): see udp_make_vbdr.m.
+if nargin >= 5 && ~isempty(vbdr) && (~isfield(vbdr, 'format') || strcmp(vbdr.format, 'vbdr'))
+    if nargin < 6 || isempty(loss), loss = 0; end
+    packets = udp_make_vbdr(hdr, I, Q, vbdr, loss);
+    return
+end
 iq = [reshape(int16(I), 1, []); reshape(int16(Q), 1, [])];
 bytes = typecast(iq(:).', 'uint8');
 perPacket = 4*floor(payloadBytes/4);                 % whole complex samples
