@@ -60,7 +60,7 @@ end
 %% 3) checks of setup_radar
 cfg = radar_config();
 cfg.udp.format = 'vbdr';
-cfg.rx.nChannelsUsed = 4;                          % (48 elements: the input files stay as they are)
+cfg.rx.nChannelsUsedDbf = 1:4;                     % (48 elements: the input files stay as they are)
 cfg.clutter.enable = false;
 sys = setup_radar(cfg);
 ok = check(sys.vbdr.nPackets == 22 && sys.vbdr.f1 == 20 && sys.vbdr.f2 == 20 && isequal(sys.vbdr.stcOptions, [4 4 4 4]), ...
@@ -77,14 +77,16 @@ try
 catch err
     ok = check(false, ['rddc: any carrier: ' err.message]) && ok;
 end
-c = cfg;  c.rx.nChannelsUsed = 8;
-ok = expect_error(c, '4 channels', 'vbdr with 8 channels processed is refused') && ok;
-c.rx.nChannelsUsed = 1;
+c = cfg;  c.rx.nChannelsUsedDbf = 1:8;
+ok = expect_error(c, '4 channels', 'vbdr with 8 DBF elements is refused') && ok;
+c.rx.nChannelsUsedDbf = [1 2];  c.rx.nChannelsUsedSlc = 5;  c.slc.enable = true;
+ok = expect_error(c, '4 channels', 'vbdr with the SLC element 5 is refused') && ok;
+c.rx.nChannelsUsedDbf = 1;  c.rx.nChannelsUsedSlc = [2 3 4];
 try
-    setup_radar(c);
-    ok = check(true, 'vbdr with 48 elements, 1 processed') && ok;
+    s = setup_radar(c);
+    ok = check(~s.dbf.enabled && s.slc.nAux == 3, 'vbdr with 48 elements: main CH1, SLC with CH2 ... CH4 (J1 ... J3)') && ok;
 catch err
-    ok = check(false, ['vbdr with 48 elements, 1 processed: ' err.message]) && ok;
+    ok = check(false, ['vbdr with 48 elements, main CH1, SLC CH2 ... CH4: ' err.message]) && ok;
 end
 ok = expect_error(setfield_path(cfg, 'board.stc', [1 5 1 1]), 'cfg.board.stc', 'an STC value above its options is refused') && ok;
 ok = expect_error(setfield_path(cfg, 'board.operationMode', 9), 'operationMode', 'an operation mode above the options is refused') && ok;

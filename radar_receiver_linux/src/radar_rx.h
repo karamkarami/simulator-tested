@@ -38,6 +38,7 @@ enum { WAVE_LFM = 0, WAVE_PHASE_CODE = 1 };
 enum { COMPRESSION_MATCHED = 0, COMPRESSION_MISMATCH = 1 };
 enum { SNR_NOISE_MEDIAN = 0, SNR_NOISE_CFAR = 1 };   /* noise floor of the SNR of the reports */
 enum { MTI_CANCELLER = 0, MTI_FIR = 1 };
+enum { SLC_QRD_SMI = 0, SLC_QRD_RLS = 1, SLC_NLMS = 2 };   /* sidelobe canceller weights (cfg.slc.algorithm) */
 enum { UDP_FORMAT_RDDC = 0, UDP_FORMAT_VBDR = 1 };
 typedef struct BoardControl BoardControl;   /* board_control.c */   /* packet format of the DDC stream (cfg.udp.format) */             /* clutter filter (cfg.mti.type; information) */
 const char *cfar_method_name(int method);   /* "2-D", "1-D range", "1-D Doppler" */
@@ -71,6 +72,8 @@ typedef struct {
     int     compression;   /* COMPRESSION_MATCHED or COMPRESSION_MISMATCH (information)  */
     int     nChips;        /* phase code: chips (0 for LFM)                           */
     int     mfShift;       /* samples by which the mismatch filter peaks earlier (0; < 0: later) */
+    int     slcTrainFirst; /* SLC training samples: DDC samples slcTrainFirst ... + slcTrainCount - 1 */
+    int     slcTrainCount; /* (0-based, inside the receive interval; 0 without the SLC)                */
     int     mtiCells;      /* range cells 0 ... mtiCells-1 get the clutter filter (range_m <=
                               mtiMaxRange_m); the others pass it unfiltered (newest pulse) */
     int     nPulse;        /* the transmitted pulse at the DDC rate (for the tests)    */
@@ -92,11 +95,20 @@ typedef struct {
 typedef struct {
     /* antenna and beamforming */
     int     nCh;           /* receive elements: channels of the DDC output (cfg.ant.nElements) */
-    int     nChUsed;       /* channels processed: the first nChUsed of every PRI (cfg.rx.nChannelsUsed;
-                              optional in the file: nCh). A PRI needs at least nChUsed channels */
+    int     nChUsed;       /* DBF elements (cfg.rx.nChannelsUsedDbf; optional in the file: nCh)      */
+    int    *chDbf;         /* [nChUsed] their channel numbers, 0-based (optional: 0 ... nChUsed-1)    */
+    int     chNeeded;      /* channels a PRI needs: 1 + the largest channel number used (DBF, SLC)    */
     int     nBeams;        /* elevation beams (1 when DBF is disabled)                */
     int     dbfEnabled;    /* 0 with a single element                                 */
-    float  *wRe, *wIm;     /* DBF matrix, row-major [nBeams x nChUsed]: beam b = sum_ch w[b*nChUsed+ch]*x[ch] */
+    float  *wRe, *wIm;     /* DBF matrix, row-major [nBeams x nChUsed]: beam b = sum_k w[b*nChUsed+k]*x[chDbf[k]] */
+    /* sidelobe canceller after the DBF (cfg.slc; optional in the file: off): every beam minus the
+     * auxiliary elements with adaptive weights, y_b = beam_b - w_b^H x_aux, the weights from the
+     * training samples of every PRI (PulseConfig slcTrainFirst / slcTrainCount) */
+    int     slcEnabled;
+    int     nAux;          /* auxiliary elements (cfg.rx.nChannelsUsedSlc)                            */
+    int    *chSlc;         /* [nAux] their channel numbers, 0-based                                    */
+    int     slcMethod;     /* SLC_QRD_SMI, SLC_QRD_RLS or SLC_NLMS (cfg.slc.algorithm)                */
+    double  slcSmiLoading_dB, slcRlsLambda, slcRlsDelta_dB, slcNlmsMu, slcNlmsEps;
     double *beamU;         /* [nBeams] sine of the beam angle from broadside (NaN without DBF) */
     double  tilt_deg;
     double  height_m;
@@ -402,24 +414,26 @@ typedef struct {
 } RdMap;
 
 /* Profile of the selected beam (processor_set_profile): PROFILE_DBF the
- * beamformer output |x|^2 of both receive intervals, PROFILE_MF the pulse
+ * beamformer output |x|^2 of both receive intervals, PROFILE_SLC the same after the
+ * sidelobe canceller (only with cfg->slcEnabled), PROFILE_MF the pulse
  * compression output |y|^2 of both sub-pulses, joined like the video (short
  * pulse up to the first long-pulse range cell, then the long pulse). */
-enum { PROFILE_NONE = 0, PROFILE_DBF = 1, PROFILE_MF = 2 };
+enum { PROFILE_NONE = 0, PROFILE_DBF = 1, PROFILE_MF = 2, PROFILE_SLC = 3 };
 
 /* Block outputs for logging (processor_set_log): the bits of the mask. LOG_DDC and LOG_DETECTION
  * are written by the application (the PRI as received, the detections callback). */
-enum { LOG_DDC = 1, LOG_DBF = 2, LOG_MF = 4, LOG_DOPPLER = 8, LOG_DETECTION = 16 };
+enum { LOG_DDC = 1, LOG_DBF = 2, LOG_MF = 4, LOG_DOPPLER = 8, LOG_DETECTION = 16, LOG_SLC = 64 };
 /* LOG_SCREEN: the PPI records its window (with the microphone) to <log>/screen_record.mp4 (ppi_qt.cpp);
  * not a block of the processing (a log with only this bit holds radar_parameters.mat and the video) */
-enum { LOG_SCREEN = 32, LOG_BLOCKS = LOG_DDC | LOG_DBF | LOG_MF | LOG_DOPPLER | LOG_DETECTION };
+enum { LOG_SCREEN = 32, LOG_BLOCKS = LOG_DDC | LOG_DBF | LOG_SLC | LOG_MF | LOG_DOPPLER | LOG_DETECTION };
 
 typedef struct {
-    int          kind;         /* LOG_DBF, LOG_MF or LOG_DOPPLER                              */
+    int          kind;         /* LOG_DBF, LOG_SLC, LOG_MF or LOG_DOPPLER                     */
     int          pulse;        /* PULSE_SHORT or PULSE_LONG                                   */
     int          nBeams, nRange, nfft;
     /* LOG_DBF:     beamformer output [nBeams][nSamples] (complex): the pulse compression input,
      *              DDC samples first ... first+nSamples-1 (0-based; zero outside the receive window)
+     * LOG_SLC:     the same after the sidelobe canceller (only with cfg->slcEnabled)
      * LOG_MF:      pulse compression output [nBeams][nRange] (complex)
      * LOG_DOPPLER: range-Doppler power after the noise-gain equalisation [nfft][nBeams][nRange]
      *              (im = NULL), Doppler axis dopFreq_Hz */
@@ -449,6 +463,7 @@ typedef struct {
 
 typedef struct {
     double dbf_ms, mf_ms, mti_ms, doppler_ms, cfar_ms, extract_ms, track_ms, total_ms;
+    double slc_ms;       /* sidelobe canceller (weights and subtraction)            */
     double interp_ms;    /* peak interpolation of the reports (Doppler, elevation) */
     /* time of the application in its output callbacks (main.c adds it; the
      * processor leaves it 0): console output (printf of plots, tracks and
@@ -472,13 +487,13 @@ void processor_flush(Processor *p, const ProcessorCallbacks *cb);   /* close all
  * are skipped. Used by the input loop when it falls behind the stream. */
 void processor_set_slow_time(Processor *p, int enabled);
 /* Profile of one beam (0-based) for the display, every PRI: kind PROFILE_DBF,
- * PROFILE_MF or PROFILE_NONE (default: nothing is computed). */
+ * PROFILE_SLC (only with the SLC), PROFILE_MF or PROFILE_NONE (default: nothing is computed). */
 void processor_set_profile(Processor *p, int kind, int beam);
 /* Range-Doppler map of one beam (0-based) for the display: enabled = 0
  * (default) computes nothing; else it is handed to the callback after the
  * CPI updates of a PRI, at most every minPeriod_s seconds. */
 void processor_set_rdmap(Processor *p, int enabled, int beam, double minPeriod_s);
-/* Block outputs handed to the block callback (logging): mask of LOG_DBF, LOG_MF, LOG_DOPPLER
+/* Block outputs handed to the block callback (logging): mask of LOG_DBF, LOG_SLC, LOG_MF, LOG_DOPPLER
  * (0 = none, the default). */
 void processor_set_log(Processor *p, int mask);
 /* CFAR threshold factor (of the configured detector) used from the next
@@ -551,7 +566,7 @@ void logger_when_idle(Logger *L, void (*fn)(void *), void *arg);   /* final: the
 /* Raw video of the PPI (video.c)                                            */
 /* ------------------------------------------------------------------------ */
 
-/* The DDC output of a PRI averaged non-coherently over the elements used (mean of
+/* The DDC output of a PRI averaged non-coherently over the DBF elements (mean of
  * I^2 + Q^2), the receive intervals of the short pulse (up to the first range
  * cell of the long pulse) and of the long pulse joined, in range bins of
  * c / (2 fsOut) from 0 to maxRange_m (as ppi_video_add.m). */
@@ -563,7 +578,8 @@ typedef struct {
     int    *bin;          /* [nSamples] its range bin                              */
     float  *binInv;       /* [nBins] 1 / (samples x channels) of the bin, 0 = none */
     float  *acc;          /* work buffer [nSamples]                                */
-    int     nCh;          /* channels averaged: the first nChUsed                  */
+    int     nCh;          /* channels averaged: the DBF elements                   */
+    int    *ch;           /* [nCh] their channel numbers (0-based)                  */
 } VideoLayout;
 int  video_layout_init(VideoLayout *v, const RadarConfig *cfg, double maxRange_m);   /* 0 on success */
 void video_row(const VideoLayout *v, const PriData *pri, float *row);              /* row[nBins] */
@@ -620,8 +636,11 @@ int  ppi_take_cfar_request(double *threshold_dB);
 /* Display mode at the start of ppi_run (call before it): plots after the plot
  * extractor (default), CFAR detections before it, both, or the raw video. */
 enum { PPI_SHOW_PLOTS = 0, PPI_SHOW_DETECTIONS = 1, PPI_SHOW_BOTH = 2, PPI_SHOW_VIDEO = 3, PPI_SHOW_DBF = 4,
-       PPI_SHOW_MF = 5 };
+       PPI_SHOW_MF = 5, PPI_SHOW_SLC = 6 };
 void ppi_set_display_mode(int mode);
+/* The raw outputs the panel offers (call before ppi_run): the DBF output only with the DBF, the
+ * sidelobe canceller output only with the SLC (a start mode that is not offered shows the plots). */
+void ppi_set_raw_outputs(int dbf, int slc);
 /* Beams after the DBF for the beam selector of the panel (call before ppi_run):
  * their number and elevations (NaN without DBF); the beam (0-based) and the
  * tab (0 PPI, 1 range-Doppler map with a small PPI) and the plot below the
@@ -631,8 +650,8 @@ void ppi_set_beams(int nBeams, const double *beamEl_deg);
 void ppi_set_beam(int beam);
 void ppi_set_tab(int tab);
 void ppi_set_rd_plot(int plot);
-/* Display modes PPI_SHOW_DBF / PPI_SHOW_MF: ppi_profile_wanted() returns
- * PROFILE_DBF / PROFILE_MF (else PROFILE_NONE) and the selected beam; the worker
+/* Display modes PPI_SHOW_DBF / PPI_SHOW_SLC / PPI_SHOW_MF: ppi_profile_wanted() returns
+ * PROFILE_DBF / PROFILE_SLC / PROFILE_MF (else PROFILE_NONE) and the selected beam; the worker
  * then hands the profile of every PRI to ppi_post_profile(). The range-Doppler
  * tab: ppi_rdmap_wanted() is always 1 (with the selected beam), whichever tab is shown, the
  * worker hands the maps to ppi_post_rdmap() (which copies them). */

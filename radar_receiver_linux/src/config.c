@@ -194,6 +194,46 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             if (!rs.failed && (cfg->nChUsed < 1 || cfg->nChUsed > cfg->nCh))
                 set_error(&rs, "invalid number of channels used (nChUsed %d of %d)", cfg->nChUsed, cfg->nCh);
         }
+        cfg->chDbf = malloc(sizeof(int) * (size_t)(cfg->nChUsed > 0 ? cfg->nChUsed : 1));
+        cfg->chNeeded = cfg->nChUsed;
+        if (!cfg->chDbf) set_error(&rs, "out of memory");
+        if (!rs.failed) {                              /* optional: the first nChUsed elements */
+            const Record *r = find_optional(&rs, "chDbf");
+            if (r && (int)(r->rows * r->cols) != cfg->nChUsed)
+                set_error(&rs, "chDbf has %d values, expected nChUsed = %d", (int)(r->rows * r->cols), cfg->nChUsed);
+            for (int k = 0; k < cfg->nChUsed && !rs.failed; k++) {
+                cfg->chDbf[k] = r ? (int)lround(r->data[k]) : k;
+                if (cfg->chDbf[k] < 0 || cfg->chDbf[k] >= cfg->nCh)
+                    set_error(&rs, "invalid DBF element %d (of %d)", cfg->chDbf[k] + 1, cfg->nCh);
+                else if (cfg->chDbf[k] + 1 > cfg->chNeeded) cfg->chNeeded = cfg->chDbf[k] + 1;
+            }
+        }
+        {                                              /* sidelobe canceller (optional: off) */
+            const Record *r = find_optional(&rs, "slcEnabled");
+            cfg->slcEnabled = r && r->rows * r->cols >= 1 && r->data[0] != 0;
+        }
+        if (cfg->slcEnabled && !rs.failed) {
+            double *v = get_doubles(&rs, "chSlc", 0, &cfg->nAux);
+            cfg->chSlc = malloc(sizeof(int) * (size_t)(cfg->nAux > 0 ? cfg->nAux : 1));
+            if (!rs.failed && (!v || !cfg->chSlc || cfg->nAux < 1)) set_error(&rs, "the SLC has no auxiliary elements (chSlc)");
+            for (int k = 0; k < cfg->nAux && !rs.failed; k++) {
+                cfg->chSlc[k] = (int)lround(v[k]);
+                if (cfg->chSlc[k] < 0 || cfg->chSlc[k] >= cfg->nCh)
+                    set_error(&rs, "invalid SLC element %d (of %d)", cfg->chSlc[k] + 1, cfg->nCh);
+                else if (cfg->chSlc[k] + 1 > cfg->chNeeded) cfg->chNeeded = cfg->chSlc[k] + 1;
+            }
+            free(v);
+            cfg->slcMethod        = get_int(&rs, "slcMethod");
+            cfg->slcSmiLoading_dB = get_scalar(&rs, "slcSmiLoading_dB");
+            cfg->slcRlsLambda     = get_scalar(&rs, "slcRlsLambda");
+            cfg->slcRlsDelta_dB   = get_scalar(&rs, "slcRlsDelta_dB");
+            cfg->slcNlmsMu        = get_scalar(&rs, "slcNlmsMu");
+            cfg->slcNlmsEps       = get_scalar(&rs, "slcNlmsEps");
+            if (!rs.failed && (cfg->slcMethod < SLC_QRD_SMI || cfg->slcMethod > SLC_NLMS ||
+                               !(cfg->slcRlsLambda > 0 && cfg->slcRlsLambda <= 1) || !(cfg->slcNlmsMu > 0 && cfg->slcNlmsMu < 2) ||
+                               !(cfg->slcNlmsEps >= 0)))
+                set_error(&rs, "invalid sidelobe canceller settings");
+        }
         cfg->nBeams          = get_int(&rs, "nBeams");
         cfg->dbfEnabled      = get_int(&rs, "dbfEnabled");
         if (cfg->dbfEnabled)
@@ -255,6 +295,13 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
                 set_error(&rs, "invalid pulse compression of the %s pulse", names[p]);
             snprintf(key, sizeof key, "%s_rxFirst", names[p]);  pc->rxFirst = get_int(&rs, key);
             snprintf(key, sizeof key, "%s_rxCount", names[p]);  pc->rxCount = get_int(&rs, key);
+            if (cfg->slcEnabled) {                        /* SLC training samples inside the receive interval */
+                snprintf(key, sizeof key, "%s_slcTrainFirst", names[p]);  pc->slcTrainFirst = get_int(&rs, key);
+                snprintf(key, sizeof key, "%s_slcTrainCount", names[p]);  pc->slcTrainCount = get_int(&rs, key);
+                if (!rs.failed && (pc->slcTrainCount < 1 || pc->slcTrainFirst < pc->rxFirst ||
+                                   pc->slcTrainFirst + pc->slcTrainCount > pc->rxFirst + pc->rxCount))
+                    set_error(&rs, "the SLC training samples of the %s pulse are not in its receive interval", names[p]);
+            }
             if (!rs.failed && (pc->ddcCount != pc->nRange + pc->nTaps - 1 || pc->rxCount < 1 ||
                                pc->rxFirst < 0 || pc->rxFirst + pc->rxCount > cfg->nDdc ||
                                pc->ddcFirst + pc->ddcCount <= pc->rxFirst ||
@@ -625,7 +672,7 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
 
 void radar_config_free(RadarConfig *cfg)
 {
-    free(cfg->wRe);  free(cfg->wIm);  free(cfg->beamU);
+    free(cfg->wRe);  free(cfg->wIm);  free(cfg->beamU);  free(cfg->chDbf);  free(cfg->chSlc);
     for (int p = 0; p < N_PULSES; p++) {
         PulseConfig *pc = &cfg->pulse[p];
         free(pc->tapsRe);  free(pc->tapsIm);  free(pc->range_m);  free(pc->delay_s);

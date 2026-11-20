@@ -41,13 +41,21 @@ sys.ant.rate_dps = sys.ant.rpm * 360 / 60;                    % rotation rate [d
 sys.ant.azBeamwidth_deg = beamwidth_3dB(ant.az_deg, ant.azGain_dB);
 sys.ant.azSpan_deg = 3 * sys.ant.azBeamwidth_deg;             % echoes outside +-azSpan are ignored
 sys.nCh = cfg.ant.nElements;
-% channels of the DDC output the processing uses: the first cfg.rx.nChannelsUsed ([] or missing: all)
-sys.nChUsed = sys.nCh;
-if isfield(cfg.rx, 'nChannelsUsed') && ~isempty(cfg.rx.nChannelsUsed), sys.nChUsed = cfg.rx.nChannelsUsed; end
-if ~isscalar(sys.nChUsed) || ~isreal(sys.nChUsed) || sys.nChUsed ~= round(sys.nChUsed) || sys.nChUsed < 1 || ...
-        sys.nChUsed > sys.nCh
-    error('cfg.rx.nChannelsUsed must be a whole number 1 ... cfg.ant.nElements = %d (or [] = all).', sys.nCh);
+% elements of the DDC output the processing uses: the DBF elements (cfg.rx.nChannelsUsedDbf, [] = all)
+% and the auxiliary elements of the sidelobe canceller (cfg.rx.nChannelsUsedSlc)
+if isfield(cfg.rx, 'nChannelsUsed')
+    error(['cfg.rx.nChannelsUsed was replaced by cfg.rx.nChannelsUsedDbf (the numbers of the DBF ', ...
+           'elements, e.g. 1:4 for the first 4) and cfg.rx.nChannelsUsedSlc (the auxiliary elements of the SLC).']);
 end
+sys.chDbf = channel_list(cfg.rx, 'nChannelsUsedDbf', sys.nCh, 1:sys.nCh);
+sys.chSlc = channel_list(cfg.rx, 'nChannelsUsedSlc', sys.nCh, zeros(1, 0));
+if any(ismember(sys.chSlc, sys.chDbf))
+    error(['cfg.rx.nChannelsUsedSlc and cfg.rx.nChannelsUsedDbf have the element(s) %s in common: an ', ...
+           'auxiliary element of the SLC must not be one of the DBF ([] = all elements are DBF elements).'], ...
+          mat2str(intersect(sys.chSlc, sys.chDbf)));
+end
+sys.nChUsed = numel(sys.chDbf);                               % DBF elements
+sys.slc = slc_setup(cfg, sys.chSlc);
 
 % Received power per element = radarConst * rcs / R^4 * (pattern factors)
 sys.radarConst = cfg.tx.peakPower_W * 10^(ant.txGain_dBi/10) * 10^(ant.rxChannelGain_dBi/10) ...
@@ -469,10 +477,10 @@ for i = 1:2
     sys.wave.(names{i}) = wv;
 end
 
-%% Digital beamforming (disabled with a single receive element, or with one channel used)
-% With cfg.rx.nChannelsUsed < cfg.ant.nElements the DBF uses only the first nChannelsUsed elements:
-% the first nChannelsUsed columns of the DBF matrix, every beam scaled to unit noise gain again (a
-% matrix of your own may also have nChannelsUsed columns: then it is used as it is).
+%% Digital beamforming (disabled with a single receive element, or with one DBF element)
+% The DBF combines the elements cfg.rx.nChannelsUsedDbf: the columns of the DBF matrix of these
+% elements, every beam scaled to unit noise gain again (a matrix of your own may also have one
+% column per listed element: then it is used as it is).
 sys.dbf.enabled = sys.nChUsed > 1;
 if sys.dbf.enabled
     dbfF = load_input(cfg, 'dbf', struct('fc', cfg.fc, 'nElements', sys.nCh, 'tilt_deg', cfg.ant.tilt_deg, ...
@@ -481,8 +489,8 @@ if sys.dbf.enabled
         error('The DBF matrix has %d columns but cfg.ant.nElements = %d.', size(dbfF.W, 2), sys.nCh);
     end
     sys.dbf.W = dbfF.W;
-    if size(sys.dbf.W, 2) ~= sys.nChUsed                      % the sub-array of the first elements
-        sys.dbf.W = sys.dbf.W(:, 1:sys.nChUsed);
+    if size(sys.dbf.W, 2) == sys.nCh && ~isequal(sys.chDbf, 1:sys.nCh)   % the sub-array of these elements
+        sys.dbf.W = sys.dbf.W(:, sys.chDbf);
         sys.dbf.W = sys.dbf.W ./ sqrt(sum(abs(sys.dbf.W).^2, 2));
     end
     sys.dbf.beamEl_deg = dbfF.beamEl_deg(:);
@@ -502,6 +510,31 @@ for i = 1:2
     wv.beamEl_deg = sys.ant.tilt_deg + asind(wv.beamU);
     sys.wave.(names{i}) = wv;
 end
+
+%% Sidelobe canceller: training samples of every sub-pulse (DDC samples of its receive window)
+% The last cfg.slc.trainCells samples of the receive window rxIdx, or those whose range (the range
+% of an echo starting at the sample, as the range axis) lies in cfg.slc.trainRange_m.<pulse>.
+for i = 1:2
+    wv = sys.wave.(names{i});
+    wv.slcTrainIdx = zeros(1, 0);
+    if sys.slc.enable && wv.enable
+        rRx = c * (sys.tDdc(wv.rxIdx).' - 0.5/sys.fsOut - wv.tTx_s) / 2;     % range of every rx sample
+        iv = sys.slc.trainRange_m.(names{i});
+        if isempty(iv)
+            wv.slcTrainIdx = wv.rxIdx(max(1, end - sys.slc.trainCells + 1):end);
+        else
+            wv.slcTrainIdx = wv.rxIdx(rRx >= iv(1) & rRx <= iv(2));
+            if isempty(wv.slcTrainIdx)
+                error(['cfg.slc.trainRange_m.%s = %s has no sample of the %s-pulse receive window ', ...
+                       '(%.2f ... %.2f km).'], names{i}, mat2str(iv), names{i}, rRx(1)/1e3, rRx(end)/1e3);
+            end
+        end
+    end
+    sys.wave.(names{i}) = wv;
+end
+
+%% Noise jammers (cfg.jammer): power at every element, direction
+sys.jammer = jammer_setup(cfg, sys);
 
 %% Ground clutter: reflectivity from the CNR, elevation groups of the terrain
 % cfg.clutter.cnr_dB is the CNR of land at cfg.clutter.cnrRange_m at the
@@ -617,7 +650,7 @@ if 2*(c.guardDoppler + c.trainDoppler) + 1 > nfftMin
 end
 
 %% VBDR stream and board settings (cfg.udp.format, cfg.udp.vbdr, cfg.board, cfg.fcMin_Hz / fcMax_Hz)
-sys.vbdr = vbdr_setup(cfg, sys.nDdc, sys.nChUsed);
+sys.vbdr = vbdr_setup(cfg, sys.nDdc, [sys.chDbf, sys.chSlc]);
 
 %% Tracking
 sys.track = track_setup(cfg, sys);
@@ -1204,5 +1237,126 @@ data = load(file);
 if isfield(data, 'madeFor') && ~isequal(data.madeFor, madeFor)
     make_input_files(cfg, which);
     data = load(file);
+end
+end
+
+function ch = channel_list(rx, f, nCh, default)
+% Element numbers of cfg.rx.(f): a row of distinct whole numbers 1 ... nCh ([] or missing: default).
+ch = default;
+if isfield(rx, f) && ~isempty(rx.(f)), ch = rx.(f); end
+if ~isnumeric(ch) || ~isreal(ch) || ~isvector(ch) && ~isempty(ch) || any(ch ~= round(ch)) || ...
+        any(ch < 1) || any(ch > nCh) || numel(unique(ch)) ~= numel(ch)
+    error(['cfg.rx.%s must list distinct element numbers 1 ... cfg.ant.nElements = %d (is %s).'], ...
+          f, nCh, mat2str(ch));
+end
+ch = double(ch(:).');
+end
+
+function slc = slc_setup(cfg, chSlc)
+% Settings of the sidelobe canceller (cfg.slc), checked.
+s = struct();
+if isfield(cfg, 'slc'), s = cfg.slc; end
+slc.enable = isfield(s, 'enable') && ~isempty(s.enable) && logical(s.enable(1));
+slc.ch = chSlc;
+slc.nAux = numel(chSlc);
+slc.algorithm = 'qrd-smi';
+if isfield(s, 'algorithm') && ~isempty(s.algorithm), slc.algorithm = lower(s.algorithm); end
+algos = {'qrd-smi', 'qrd-rls', 'nlms'};
+if ~ischar(slc.algorithm) || ~any(strcmp(slc.algorithm, algos))
+    error('cfg.slc.algorithm must be ''qrd-smi'', ''qrd-rls'' or ''nlms''.');
+end
+slc.method = find(strcmp(slc.algorithm, algos)) - 1;          % 0 SMI, 1 RLS, 2 NLMS (C receiver)
+slc.trainCells = num(s, 'trainCells', 128);
+if ~isscalar(slc.trainCells) || slc.trainCells ~= round(slc.trainCells) || slc.trainCells < 1
+    error('cfg.slc.trainCells must be a whole number >= 1.');
+end
+slc.trainRange_m = struct('short', [], 'long', []);
+nm = {'short', 'long'};
+for i = 1:2
+    if isfield(s, 'trainRange_m') && isfield(s.trainRange_m, nm{i}) && ~isempty(s.trainRange_m.(nm{i}))
+        iv = double(s.trainRange_m.(nm{i}));
+        if numel(iv) ~= 2 || ~isreal(iv) || any(~isfinite(iv)) || iv(2) <= iv(1) || iv(1) < 0
+            error('cfg.slc.trainRange_m.%s must be [r1 r2] with 0 <= r1 < r2 [m] (or []).', nm{i});
+        end
+        slc.trainRange_m.(nm{i}) = iv(:).';
+    end
+end
+slc.smiLoading_dB = num(s, 'smiLoading_dB', -30);
+slc.rlsLambda = num(s, 'rlsLambda', 0.999);
+slc.rlsDelta_dB = num(s, 'rlsDelta_dB', -20);
+slc.nlmsMu = num(s, 'nlmsMu', 0.1);
+slc.nlmsEps = num(s, 'nlmsEps', 1);
+if ~isscalar(slc.smiLoading_dB) || ~isfinite(slc.smiLoading_dB)
+    error('cfg.slc.smiLoading_dB must be a finite number [dB].');
+end
+if ~isscalar(slc.rlsLambda) || ~(slc.rlsLambda > 0 && slc.rlsLambda <= 1)
+    error('cfg.slc.rlsLambda must be in (0, 1].');
+end
+if ~isscalar(slc.rlsDelta_dB) || ~isfinite(slc.rlsDelta_dB)
+    error('cfg.slc.rlsDelta_dB must be a finite number [dB].');
+end
+if ~isscalar(slc.nlmsMu) || ~(slc.nlmsMu > 0 && slc.nlmsMu < 2)
+    error('cfg.slc.nlmsMu must be in (0, 2).');
+end
+if ~isscalar(slc.nlmsEps) || ~(slc.nlmsEps >= 0) || ~isfinite(slc.nlmsEps)
+    error('cfg.slc.nlmsEps must be a number >= 0.');
+end
+if slc.enable && slc.nAux == 0
+    error(['cfg.slc.enable = true needs the auxiliary elements cfg.rx.nChannelsUsedSlc (element ', ...
+           'numbers that are not in cfg.rx.nChannelsUsedDbf).']);
+end
+end
+
+function x = num(s, f, default)
+x = default;
+if isfield(s, f) && ~isempty(s.(f)), x = double(s.(f)); end
+end
+
+function J = jammer_setup(cfg, sys)
+% Noise jammers of cfg.jammer: one entry per jammer with its amplitude per element (azimuth
+% pattern of the element still to apply: it depends on the antenna azimuth), direction and band.
+J = struct('n', 0);
+if ~isfield(cfg, 'jammer') || ~isfield(cfg.jammer, 'enable') || isempty(cfg.jammer.enable) || ~cfg.jammer.enable
+    return
+end
+j = cfg.jammer;
+f = {'erp_W', 'bandwidth_Hz', 'az_deg', 'el_deg', 'range_m'};
+n = numel(j.erp_W);
+fc = cfg.fc;
+if isfield(j, 'fc_Hz') && ~isempty(j.fc_Hz), fc = j.fc_Hz; end
+if isscalar(fc), fc = repmat(fc, 1, n); end
+for k = 1:numel(f)
+    v = j.(f{k});
+    if ~isnumeric(v) || numel(v) ~= n || any(~isfinite(v(:)))
+        error('cfg.jammer.%s must have one finite value per jammer (%d, as cfg.jammer.erp_W).', f{k}, n);
+    end
+end
+if numel(fc) ~= n || any(~(fc > sys.fIF))
+    error('cfg.jammer.fc_Hz must have one frequency [Hz] per jammer (or [] = cfg.fc).');
+end
+if any(j.erp_W(:) < 0) || any(j.bandwidth_Hz(:) <= 0) || any(j.range_m(:) <= 0)
+    error('cfg.jammer: erp_W >= 0, bandwidth_Hz > 0 and range_m > 0.');
+end
+if any(abs(j.el_deg(:)) > 90), error('cfg.jammer.el_deg must be in [-90, 90] deg.'); end
+c = cfg.const.c;
+J.n = n;
+J.fc_Hz = fc(:).';
+J.bandwidth_Hz = double(j.bandwidth_Hz(:).');
+J.az_deg = double(j.az_deg(:).');
+J.el_deg = double(j.el_deg(:).');
+J.range_m = double(j.range_m(:).');
+J.lambda_m = c ./ J.fc_Hz;
+% power at an element at the maximum of its patterns: ERP * Grx * lambda^2 / ((4 pi R)^2 L) (the
+% azimuth pattern of the element and its elevation pattern at the direction relative to the antenna
+% are applied in every PRI: generate_rx_signal.m)
+J.power_W = double(j.erp_W(:).') * 10^(sys.ant.rxChannelGain_dBi/10) .* J.lambda_m.^2 ...
+          ./ ((4*pi*J.range_m).^2 * 10^(cfg.rx.losses_dB/10));
+% (information) over the noise of an element in the DDC band, antenna toward the jammer (elevation
+% element pattern at its elevation)
+J.jnr_dB = zeros(1, n);
+for k = 1:n
+    [~, u] = steering_vector(sys, 0, J.el_deg(k), J.lambda_m(k));
+    g = pattern_gain(sys.ant.elRel_deg, sys.ant.elElemGain_dB, asind(u));
+    J.jnr_dB(k) = 10*log10(J.power_W(k) * g * min(1, sys.fsOut / J.bandwidth_Hz(k)) / (sys.N0 * sys.fsOut));
 end
 end

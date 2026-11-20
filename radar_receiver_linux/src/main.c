@@ -19,10 +19,11 @@
  *     --ppi-snapshot FILE    save the PPI as PNG at the end and close it
  *     --ppi-show MODE        PPI shows 'plots' (default, after the plot extractor),
  *                            'detections' (CFAR detections before it), 'both' or
- *                            'video' (DDC output averaged over the elements), 'dbf'
- *                            (DBF output of the selected beam) or 'mf' (pulse
- *                            compression output of the selected beam)
- *     --ppi-beam N           beam shown by dbf / mf and the range-Doppler tab (1 ... beams, default 1)
+ *                            'video' (DDC output averaged over the DBF elements), 'dbf'
+ *                            (DBF output of the selected beam; only with the DBF), 'slc'
+ *                            (sidelobe canceller output of the selected beam; only with
+ *                            the SLC) or 'mf' (pulse compression output of the selected beam)
+ *     --ppi-beam N           beam shown by dbf / slc / mf and the range-Doppler tab (1 ... beams, default 1)
  *     --ppi-tab TAB          tab at the start: 'ppi' (default) or 'rd' (range-Doppler map + small PPI)
  *     --ppi-rd-rate HZ       range-Doppler maps per second of the tab (default cfg.display.rdRate_Hz)
  *     --ppi-rd-plot P        plot below the range-Doppler map: 'spectrum' (default) or 'range' (profile)
@@ -221,8 +222,8 @@ static int parse_options(int argc, char **argv, Options *o)
         return -1;
     }
     if (strcmp(o->ppiShow, "plots") && strcmp(o->ppiShow, "detections") && strcmp(o->ppiShow, "both") &&
-        strcmp(o->ppiShow, "video") && strcmp(o->ppiShow, "dbf") && strcmp(o->ppiShow, "mf")) {
-        fprintf(stderr, "--ppi-show must be 'plots', 'detections', 'both', 'video', 'dbf' or 'mf'\n");
+        strcmp(o->ppiShow, "video") && strcmp(o->ppiShow, "dbf") && strcmp(o->ppiShow, "slc") && strcmp(o->ppiShow, "mf")) {
+        fprintf(stderr, "--ppi-show must be 'plots', 'detections', 'both', 'video', 'dbf', 'slc' or 'mf'\n");
         return -1;
     }
     if (strcmp(o->ppiTab, "ppi") && strcmp(o->ppiTab, "rd")) {
@@ -242,19 +243,19 @@ static int parse_options(int argc, char **argv, Options *o)
         return -1;
     }
     o->logMask = LOG_DDC | LOG_DETECTION;
-    if (o->logBlocks) {                                  /* ddc,dbf,mf,doppler,detection */
-        static const struct { const char *name; int bit; } blocks[6] = {
-            { "ddc", LOG_DDC }, { "dbf", LOG_DBF }, { "mf", LOG_MF }, { "doppler", LOG_DOPPLER }, { "detection", LOG_DETECTION },
-            { "screen", LOG_SCREEN } };
+    if (o->logBlocks) {                                  /* ddc,dbf,slc,mf,doppler,detection */
+        static const struct { const char *name; int bit; } blocks[7] = {
+            { "ddc", LOG_DDC }, { "dbf", LOG_DBF }, { "slc", LOG_SLC }, { "mf", LOG_MF }, { "doppler", LOG_DOPPLER },
+            { "detection", LOG_DETECTION }, { "screen", LOG_SCREEN } };
         o->logMask = 0;
         const char *s = o->logBlocks;
         while (*s) {
             size_t n = strcspn(s, ",");
             int found = 0;
-            for (int i = 0; i < 6; i++)
+            for (int i = 0; i < 7; i++)
                 if (n == strlen(blocks[i].name) && !strncmp(s, blocks[i].name, n)) { o->logMask |= blocks[i].bit; found = 1; }
             if (!found && n > 0) {
-                fprintf(stderr, "--log-blocks: unknown block '%.*s' (ddc, dbf, mf, doppler, detection, screen)\n", (int)n, s);
+                fprintf(stderr, "--log-blocks: unknown block '%.*s' (ddc, dbf, slc, mf, doppler, detection, screen)\n", (int)n, s);
                 return -1;
             }
             s += n + (s[n] == ',');
@@ -307,6 +308,23 @@ static void rd_axis(const RadarConfig *cfg, double *v0, double *v1)
 /* ------------------------------------------------------------------------ */
 
 static const char *pulse_name(int pulse) { return pulse == PULSE_SHORT ? "short" : "long"; }
+
+/* 0-based channel numbers as 1-based element numbers, runs shortened: "1-4, 7" */
+static void element_list(const int *ch, int n, char *buf, size_t len)
+{
+    size_t used = 0;
+    buf[0] = 0;
+    for (int i = 0; i < n && used < len; ) {
+        int j = i;
+        while (j + 1 < n && ch[j + 1] == ch[j] + 1) j++;
+        int w = j > i ? snprintf(buf + used, len - used, "%s%d-%d", i ? ", " : "", ch[i] + 1, ch[j] + 1)
+                      : snprintf(buf + used, len - used, "%s%d", i ? ", " : "", ch[i] + 1);
+        if (w < 0) break;
+        used += (size_t)w;
+        i = j + 1;
+    }
+    if (n == 0) snprintf(buf, len, "none");
+}
 
 static double ms_since(double t0) { return (now_seconds() - t0) * 1e3; }
 
@@ -539,9 +557,9 @@ static void print_timing(const App *app, const Processor *proc, const UdpInput *
     fprintf(stderr, "\nPRIs processed: %llu (%llu CPI updates) in %.1f s; datagrams %llu, foreign %llu, "
             "incomplete PRIs %llu\n", (unsigned long long)t.pris, (unsigned long long)t.updates, wall_s,
             (unsigned long long)u.datagrams, (unsigned long long)u.foreign, (unsigned long long)u.prisIncomplete);
-    fprintf(stderr, "Processing time per PRI: %.3f ms (DBF %.3f, MF %.3f, MTI %.3f, Doppler %.3f, "
+    fprintf(stderr, "Processing time per PRI: %.3f ms (DBF %.3f, SLC %.3f, MF %.3f, MTI %.3f, Doppler %.3f, "
             "CFAR+pruning %.3f, peak interpolation %.3f, extraction %.3f, tracking %.3f)\n", t.total_ms / n,
-            t.dbf_ms / n, t.mf_ms / n, t.mti_ms / n, t.doppler_ms / n, t.cfar_ms / n, t.interp_ms / n,
+            t.dbf_ms / n, t.slc_ms / n, t.mf_ms / n, t.mti_ms / n, t.doppler_ms / n, t.cfar_ms / n, t.interp_ms / n,
             t.extract_ms / n, t.track_ms / n);
     fprintf(stderr, "Output per PRI: console %.3f ms, display (PPI calls) %.3f ms, logging (copies) %.3f ms\n", t.console_ms / n,
             t.display_ms / n, t.log_ms / n);
@@ -639,9 +657,9 @@ static Processor *change_config(App *app, Processor *proc, RadarConfig *next, in
                                 int threads)
 {
     apply_options(app, next);
-    if (next->udpFormat == UDP_FORMAT_VBDR && next->nChUsed > 4) {
-        fprintf(stderr, "Radar Settings: mode %d processes %d channels, the VBDR stream carries 4: not used\n", mode,
-                next->nChUsed);
+    if (next->udpFormat == UDP_FORMAT_VBDR && next->chNeeded > 4) {
+        fprintf(stderr, "Radar Settings: mode %d uses the element %d, the VBDR stream carries 4: not used\n", mode,
+                next->chNeeded);
         radar_config_free(next);
         return proc;
     }
@@ -835,7 +853,7 @@ static int worker(void *arg)
         }
 #endif
 #ifdef RADAR_WITH_QT
-        if (app->opt.ppi && ppi_video_wanted() && pri->nCh >= app->cfg.nChUsed && pri->nSamples >= app->cfg.nDdc) {
+        if (app->opt.ppi && ppi_video_wanted() && pri->nCh >= app->cfg.chNeeded && pri->nSamples >= app->cfg.nDdc) {
             const double tVideo = now_seconds();             /* the video of the PPI (display time) */
             if (!videoRow && video_layout_init(&video, &app->cfg, app->cfg.maxRange_m) == 0)
                 videoRow = malloc(sizeof(float) * (size_t)video.nBins);
@@ -946,9 +964,9 @@ int main(int argc, char **argv)
         return 1;
     }
     if (app.opt.format) app.cfg.udpFormat = !strcmp(app.opt.format, "vbdr") ? UDP_FORMAT_VBDR : UDP_FORMAT_RDDC;
-    if (app.cfg.udpFormat == UDP_FORMAT_VBDR && app.cfg.nChUsed > 4) {
-        fprintf(stderr, "configuration: the VBDR stream carries 4 channels, the configuration processes %d "
-                "(cfg.rx.nChannelsUsed <= 4)\n", app.cfg.nChUsed);
+    if (app.cfg.udpFormat == UDP_FORMAT_VBDR && app.cfg.chNeeded > 4) {
+        fprintf(stderr, "configuration: the VBDR stream carries 4 channels, the configuration uses the element %d "
+                "(cfg.rx.nChannelsUsedDbf / nChannelsUsedSlc: elements 1 ... 4)\n", app.cfg.chNeeded);
         return 1;
     }
     apply_options(&app, &app.cfg);
@@ -958,6 +976,17 @@ int main(int argc, char **argv)
             app.cfg.nChUsed, app.cfg.nBeams, app.cfg.nDdc, app.cfg.pulse[0].nRange, app.cfg.pulse[1].nRange,
             app.cfg.cpiLength, app.cfg.dopplerMethod == DOPPLER_NUFFT ? "NUFFT" : "FFT", app.cfg.nfft, app.cfg.nRows,
             app.cfg.updateEvery, app.cfg.minHits);
+    {
+        char list[256];
+        element_list(app.cfg.chDbf, app.cfg.nChUsed, list, sizeof list);
+        fprintf(stderr, "DBF elements %s", list);
+        if (app.cfg.slcEnabled) {
+            element_list(app.cfg.chSlc, app.cfg.nAux, list, sizeof list);
+            static const char *algo[3] = { "QRD-SMI", "QRD-RLS", "NLMS" };
+            fprintf(stderr, "; sidelobe canceller %s with the auxiliary elements %s", algo[app.cfg.slcMethod], list);
+        }
+        fprintf(stderr, "\n");
+    }
     fprintf(stderr, "DDC stream: %s format, UDP port %d\n", app.cfg.udpFormat == UDP_FORMAT_VBDR ? "VBDR" : "RDDC",
             app.opt.port);
     fprintf(stderr, "Radar mode %d; DDC record %s: %d samples, the first at %.3f us", app.cfg.radarMode,
@@ -1029,7 +1058,9 @@ int main(int argc, char **argv)
                              : !strcmp(app.opt.ppiShow, "both") ? PPI_SHOW_BOTH
                              : !strcmp(app.opt.ppiShow, "video") ? PPI_SHOW_VIDEO
                              : !strcmp(app.opt.ppiShow, "dbf") ? PPI_SHOW_DBF
+                             : !strcmp(app.opt.ppiShow, "slc") ? PPI_SHOW_SLC
                              : !strcmp(app.opt.ppiShow, "mf") ? PPI_SHOW_MF : PPI_SHOW_PLOTS);
+        ppi_set_raw_outputs(app.cfg.dbfEnabled, app.cfg.slcEnabled);
         {
             double el[256];
             const int nB = app.cfg.nBeams < 256 ? app.cfg.nBeams : 256;

@@ -9,6 +9,7 @@ function x = generate_rx_signal(sys, targets, t_s, azAnt_deg, clutterIf)
 %        sub-pulses on the 30 MHz IF (LO of each sub-pulse) with the element phases
 %     2. ground clutter (clutterIf from clutter_signal.m, [] = none: one
 %        column per elevation group, steering vectors sys.clutterSteer)
+%     2b. noise jammers (sys.jammer, cfg.jammer), also in the azimuth sidelobes
 %     3. transmitter leakage while a pulse is transmitted (isolation)
 %     4. the STC attenuator in front of the receiver (sys.rx.stcGain, stc_gain.m)
 %     5. thermal noise of the receiver (k*T0*F over fs/2), after the STC
@@ -73,6 +74,12 @@ if ~isempty(clutterIf)
     end
 end
 
+%% 2b) Noise jammers (sys.jammer, cfg.jammer): continuous noise of bandwidth_Hz around fc_Hz,
+% received by every element through its patterns, with the phase of its direction
+if isfield(sys, 'jammer') && sys.jammer.n > 0
+    x = x + jammer_signal(sys, azAnt_deg);
+end
+
 %% 3) Transmitter leakage into every receive channel while a pulse is transmitted
 if sys.cfg.rx.addLeakage
     for p = 1:2
@@ -97,4 +104,33 @@ end
 
 %% 6) Receiver path gain
 x = x * sys.rx.voltGain;
+end
+
+function x = jammer_signal(sys, azAnt_deg)
+% IF signal of the jammers at the receiver input [nAdc x nElements] (single): complex Gaussian noise
+% of unit power, flat over |f| <= bandwidth/2, on the IF fc_Hz - fLO(t) (the receiver LO of every
+% ADC sample: it follows the sub-pulses), amplitude sqrt(2 P G) with the element patterns.
+J = sys.jammer;
+N = sys.nAdc;
+fs = sys.fs;
+x = zeros(N, sys.nCh, 'single');
+for k = 1:J.n
+    azRel = wrap180(J.az_deg(k) - azAnt_deg);
+    [v, u] = steering_vector(sys, azRel, J.el_deg(k), J.lambda_m(k));
+    g = pattern_gain(sys.ant.az_deg, sys.ant.azGain_dB, azRel) ...
+      * pattern_gain(sys.ant.elRel_deg, sys.ant.elElemGain_dB, asind(u));
+    amp = sqrt(2 * J.power_W(k) * g);
+    if amp == 0, continue; end
+    n = (randn(N, 1) + 1j*randn(N, 1)) / sqrt(2);
+    if J.bandwidth_Hz(k) < fs                                 % band limit: FFT mask
+        f = [0:ceil(N/2)-1, -floor(N/2):-1]' * (fs / N);
+        in = abs(f) <= J.bandwidth_Hz(k) / 2;
+        Xf = fft(n);
+        Xf(~in) = 0;
+        n = ifft(Xf) * sqrt(N / max(1, nnz(in)));
+    end
+    ph = 2*pi * cumsum([0; (J.fc_Hz(k) - sys.rx.fLO_Hz(1:end-1))]) / fs;   % IF phase
+    s = amp * n .* exp(1j * ph);
+    x = x + real(single(s) * single(v).');
+end
 end

@@ -12,7 +12,7 @@ function out = ppi_callbacks(action, fig, varargin)
 %     'pin', [x y]                pin (or remove) the data tip of the nearest object
 %     'key', evt                  + - arrows r c d space
 %     'option', name, value       showMode ('plots', 'detections', 'both', 'video',
-%                                 'dbf' or 'mf'), beam (1 ... beams),
+%                                 'dbf', 'slc' or 'mf': S.opt.modes), beam (1 ... beams),
 %                                 showShort, showLong, showTruth, showRings,
 %                                 showLabels, showAntenna, showTracks,
 %                                 minSnr_dB, history
@@ -170,7 +170,7 @@ switch action
     case 'option'
         S.opt.(varargin{1}) = varargin{2};
         if strcmp(varargin{1}, 'showMode')
-            set(S.h.ui.showMode, 'Value', find(strcmp(varargin{2}, {'plots', 'detections', 'both', 'video', 'dbf', 'mf'})));
+            set(S.h.ui.showMode, 'Value', find(strcmp(varargin{2}, S.opt.modes)));
         elseif strcmp(varargin{1}, 'beam')
             set(S.h.ui.beam, 'Value', varargin{2});
             S.data.rd = [];                                 % the map of the new beam comes with the next update
@@ -282,7 +282,7 @@ else
 end
 
 % Plots that pass the filters (shown unless only the detections are selected)
-showVideo = any(strcmp(o.showMode, {'video', 'dbf', 'mf'}));   % raw data instead of plots and detections
+showVideo = any(strcmp(o.showMode, {'video', 'dbf', 'slc', 'mf'}));   % raw data instead of plots and detections
 showPlots = ~strcmp(o.showMode, 'detections') && ~showVideo;
 showDets  = ~strcmp(o.showMode, 'plots') && ~showVideo;
 S = draw_video(S, showVideo);
@@ -371,14 +371,14 @@ set(h.title, 'String', sprintf('Scan %d   t = %.2f s   az = %5.1f deg   %szoom x
 end
 
 function S = draw_video(S, on)
-% Raw data (video, DBF out, MF out): the map as an image (transparent where there is no data), and
+% Raw data (video, DBF out, SLC out, MF out): the map as an image (transparent where there is no data), and
 % its colour scale. The map must hold the data of the selected mode (and beam).
 h = S.h;
 vis = {'off', 'on'};
 set([h.video h.videoBar h.videoBarImg h.videoBarLabel], 'Visible', vis{1 + on});
 if ~on || ~isfield(S.data, 'video') || isempty(S.data.video), return; end
 V = S.data.video;
-names = struct('video', 'video', 'dbf', 'DBF out', 'mf', 'MF out');
+names = struct('video', 'video', 'dbf', 'DBF out', 'slc', 'SLC out', 'mf', 'MF out');
 if strcmp(S.opt.showMode, 'video')
     set(h.videoBarLabel, 'String', 'video [dB above noise]');
 else
@@ -958,8 +958,8 @@ switch evt.Key
     case {'r', 'home'}, S = set_limits(S, S.home(1:2), S.home(3:4));
     case 'c',           S = clear_pins(S);
     case 'd'                                                % next display mode
-        modes = {'plots', 'detections', 'both', 'video', 'dbf', 'mf'};
-        S.opt.showMode = modes{mod(find(strcmp(S.opt.showMode, modes)), 6) + 1};
+        modes = S.opt.modes;
+        S.opt.showMode = modes{mod(find(strcmp(S.opt.showMode, modes)), numel(modes)) + 1};
         set(S.h.ui.showMode, 'Value', find(strcmp(S.opt.showMode, modes)));
         S = redraw(S);
     case 'space'

@@ -2,7 +2,8 @@
  * processor.c - receiver processing chain of one PRI, for the short and the
  * long sub-pulse separately (same algorithms as the MATLAB simulator):
  *
- *   DDC output (int16 I/Q, the first nChUsed channels) -> DBF -> matched filter
+ *   DDC output (int16 I/Q, the DBF elements chDbf) -> DBF -> sidelobe canceller (the auxiliary
+ *   elements chSlc, cfg.slc; optional) -> matched filter
  *   -> CPI buffer -> MTI -> Doppler (window, FFT, non-coherent integration of
  *   rows, noise-gain equalisation; or, staggered PRF with the NUFFT, the
  *   non-uniform DFT of the whole CPI) -> 2-D CFAR (CA, GO, SO, OS, CE) ->
@@ -65,7 +66,16 @@
 typedef struct {
     int nR, nCells, nSlots, nMtiOut;
     float *segRe, *segIm;       /* DDC samples of this sub-pulse [ch][n]          */
-    float *beamRe, *beamIm;     /* beamformer output [beam][n]                    */
+    float *beamRe, *beamIm;     /* beamformer output [beam][n] (after the SLC: its output) */
+    /* sidelobe canceller (cfg->slcEnabled) */
+    float  *auxRe, *auxIm;      /* auxiliary elements [aux][n] (zero outside the receive interval) */
+    double *trMRe, *trMIm;      /* training samples of the main channels [beam][K] (DBF output)   */
+    double *trARe, *trAIm;      /* training samples of the auxiliary elements [aux][K]           */
+    double *slcRRe, *slcRIm;    /* QRD: upper triangular R [aux][aux] (QRD-RLS: kept over the PRIs) */
+    double *slcZRe, *slcZIm;    /* QRD: z [aux][beam]                                           */
+    double *slcWRe, *slcWIm;    /* weights W [aux][beam]: y_b = x_b - sum_a conj(W[a][b]) aux_a   */
+    double *slcX, *slcD;        /* Givens work: a row [2*aux], the beams [2*beam]                 */
+    int     slcStarted;         /* QRD-RLS / NLMS: state from an earlier PRI                    */
     float *cpiRe, *cpiIm;       /* matched filter outputs of the newest nMtiTaps
                                    pulses (all the MTI needs) [mfSlot][cell]      */
     float *mtiRe, *mtiIm;       /* MTI outputs [cell block][slot][CELL_BLOCK]     */
@@ -295,6 +305,16 @@ Processor *processor_create(const RadarConfig *cfg, int nThreads)
         size_t map = (size_t)maxNfft * s->nCells;
         s->segRe = xcalloc(seg, sizeof(float));   s->segIm = xcalloc(seg, sizeof(float));
         s->beamRe = xcalloc(beams, sizeof(float)); s->beamIm = xcalloc(beams, sizeof(float));
+        if (cfg->slcEnabled) {
+            const size_t nA = (size_t)cfg->nAux, nB = (size_t)cfg->nBeams, K = (size_t)pc->slcTrainCount;
+            s->auxRe = xcalloc(nA * pc->ddcCount, sizeof(float)); s->auxIm = xcalloc(nA * pc->ddcCount, sizeof(float));
+            s->trMRe = xcalloc(nB * K, sizeof(double)); s->trMIm = xcalloc(nB * K, sizeof(double));
+            s->trARe = xcalloc(nA * K, sizeof(double)); s->trAIm = xcalloc(nA * K, sizeof(double));
+            s->slcRRe = xcalloc(nA * nA, sizeof(double)); s->slcRIm = xcalloc(nA * nA, sizeof(double));
+            s->slcZRe = xcalloc(nA * nB, sizeof(double)); s->slcZIm = xcalloc(nA * nB, sizeof(double));
+            s->slcWRe = xcalloc(nA * nB, sizeof(double)); s->slcWIm = xcalloc(nA * nB, sizeof(double));
+            s->slcX = xcalloc(2 * nA, sizeof(double)); s->slcD = xcalloc(2 * nB, sizeof(double));
+        }
         s->cpiRe = xcalloc(cpi, sizeof(float));   s->cpiIm = xcalloc(cpi, sizeof(float));
         s->mtiRe = xcalloc(mti, sizeof(float));   s->mtiIm = xcalloc(mti, sizeof(float));
         s->staggerIdx = xcalloc(maxCpi, sizeof(uint16_t));
@@ -345,6 +365,9 @@ void processor_destroy(Processor *p)
     for (int i = 0; i < N_PULSES; i++) {
         PulseState *s = &p->ps[i];
         free(s->segRe); free(s->segIm); free(s->beamRe); free(s->beamIm);
+        free(s->auxRe); free(s->auxIm); free(s->trMRe); free(s->trMIm); free(s->trARe); free(s->trAIm);
+        free(s->slcRRe); free(s->slcRIm); free(s->slcZRe); free(s->slcZIm); free(s->slcWRe); free(s->slcWIm);
+        free(s->slcX); free(s->slcD);
         free(s->cpiRe); free(s->cpiIm); free(s->mtiRe); free(s->mtiIm);
         free(s->staggerIdx); free(s->mtiStag); free(s->az); free(s->time);
         free(s->P); free(s->det); free(s->cntInv); free(s->thrScale); free(s->noise); free(s->lastMedian);
@@ -375,7 +398,7 @@ void processor_set_slow_time(Processor *p, int enabled)
 
 void processor_set_log(Processor *p, int mask)
 {
-    p->logMask = mask & (LOG_DBF | LOG_MF | LOG_DOPPLER);
+    p->logMask = mask & (LOG_DBF | LOG_SLC | LOG_MF | LOG_DOPPLER);
 }
 
 void processor_set_cfar_alpha(Processor *p, double alpha)
@@ -402,18 +425,17 @@ int processor_threads(const Processor *p)
 /* Fast time: DBF and matched filter                                        */
 /* ------------------------------------------------------------------------ */
 
-/* DDC samples of the sub-pulse, as float [ch][n]; the samples outside its
- * receive interval (transmission, other sub-pulse, end of the record) are zero. */
-static void load_segment(const RadarConfig *cfg, const PulseConfig *pc, const PriData *pri, PulseState *s)
+/* DDC samples of the sub-pulse of the channels ch[0 ... nCh-1], as float [k][n]; the samples outside
+ * its receive interval (transmission, other sub-pulse, end of the record) are zero. */
+static void load_channels(const PulseConfig *pc, const PriData *pri, const int *ch, int nCh, float *outRe, float *outIm)
 {
     const int n = pc->ddcCount;
     const int k0 = pc->rxFirst > pc->ddcFirst ? pc->rxFirst - pc->ddcFirst : 0;      /* first inside   */
     const int rxEnd = pc->rxFirst + pc->rxCount - pc->ddcFirst;
     const int k1 = rxEnd < n ? rxEnd : n;                                            /* first after it */
-    const int nChUsed = cfg->nChUsed > 0 ? cfg->nChUsed : cfg->nCh;                  /* the first channels */
-    for (int ch = 0; ch < nChUsed; ch++) {
-        const int16_t *src = pri->iq + 2 * ((size_t)ch * pri->nSamples + pc->ddcFirst + k0);   /* sample k0 */
-        float *re = s->segRe + (size_t)ch * n, *im = s->segIm + (size_t)ch * n;
+    for (int c = 0; c < nCh; c++) {
+        const int16_t *src = pri->iq + 2 * ((size_t)ch[c] * pri->nSamples + pc->ddcFirst + k0);   /* sample k0 */
+        float *re = outRe + (size_t)c * n, *im = outIm + (size_t)c * n;
         memset(re, 0, sizeof(float) * k0);
         memset(im, 0, sizeof(float) * k0);
         for (int k = k0; k < k1; k++) {
@@ -423,6 +445,11 @@ static void load_segment(const RadarConfig *cfg, const PulseConfig *pc, const Pr
         memset(re + k1, 0, sizeof(float) * (n - k1));
         memset(im + k1, 0, sizeof(float) * (n - k1));
     }
+}
+
+static void load_segment(const RadarConfig *cfg, const PulseConfig *pc, const PriData *pri, PulseState *s)
+{
+    load_channels(pc, pri, cfg->chDbf, cfg->nChUsed > 0 ? cfg->nChUsed : cfg->nCh, s->segRe, s->segIm);
 }
 
 /* beam b = sum over channels of W[b][ch] * x[ch]  (or the single channel).
@@ -470,6 +497,178 @@ static void beamform(const RadarConfig *cfg, const PulseConfig *pc, PulseState *
                 a0r[k] += w0r * r - w0i * i;  a0i[k] += w0r * i + w0i * r;
                 a1r[k] += w1r * r - w1i * i;  a1i[k] += w1r * i + w1i * r;
                 a2r[k] += w2r * r - w2i * i;  a2i[k] += w2r * i + w2i * r;
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Sidelobe canceller (sidelobe_canceller.m)                                */
+/* ------------------------------------------------------------------------ */
+
+/* Givens rotations of the row [x d] (x = a^H [nA], d = m^H [nB], interleaved re/im) into the upper
+ * triangular [R z] (R(i,i) real >= 0): QR decomposition of the training samples one row at a time. */
+static void qrd_row(double *Rr, double *Ri, double *Zr, double *Zi, double *x, double *d, int nA, int nB)
+{
+    for (int i = 0; i < nA; i++) {
+        const double rho = Rr[i * nA + i], xr = x[2 * i], xi = x[2 * i + 1];
+        const double nu = sqrt(rho * rho + xr * xr + xi * xi);
+        if (nu == 0.0) continue;
+        const double c = rho / nu, sr = xr / nu, si = xi / nu;        /* s = x_i / nu */
+        for (int j = i + 1; j < nA; j++) {
+            const double rr = Rr[i * nA + j], ri = Ri[i * nA + j], ar = x[2 * j], ai = x[2 * j + 1];
+            Rr[i * nA + j] = c * rr + (sr * ar + si * ai);            /* c R + conj(s) x */
+            Ri[i * nA + j] = c * ri + (sr * ai - si * ar);
+            x[2 * j]     = -(sr * rr - si * ri) + c * ar;              /* -s R + c x */
+            x[2 * j + 1] = -(sr * ri + si * rr) + c * ai;
+        }
+        for (int b = 0; b < nB; b++) {
+            const double zr = Zr[i * nB + b], zi = Zi[i * nB + b], dr = d[2 * b], di = d[2 * b + 1];
+            Zr[i * nB + b] = c * zr + (sr * dr + si * di);
+            Zi[i * nB + b] = c * zi + (sr * di - si * dr);
+            d[2 * b]     = -(sr * zr - si * zi) + c * dr;
+            d[2 * b + 1] = -(sr * zi + si * zr) + c * di;
+        }
+        Rr[i * nA + i] = nu;
+        Ri[i * nA + i] = 0.0;
+        x[2 * i] = x[2 * i + 1] = 0.0;
+    }
+}
+
+/* W = R \ z by back substitution (a zero diagonal gives a zero weight row). */
+static void tri_solve(const double *Rr, const double *Ri, const double *Zr, const double *Zi, double *Wr, double *Wi,
+                      int nA, int nB)
+{
+    for (int i = nA - 1; i >= 0; i--) {
+        const double rii = Rr[i * nA + i];
+        for (int b = 0; b < nB; b++) {
+            double ar = Zr[i * nB + b], ai = Zi[i * nB + b];
+            for (int j = i + 1; j < nA; j++) {
+                const double rr = Rr[i * nA + j], ri = Ri[i * nA + j], wr = Wr[j * nB + b], wi = Wi[j * nB + b];
+                ar -= rr * wr - ri * wi;
+                ai -= rr * wi + ri * wr;
+            }
+            Wr[i * nB + b] = rii != 0.0 ? ar / rii : 0.0;
+            Wi[i * nB + b] = rii != 0.0 ? ai / rii : 0.0;
+        }
+    }
+}
+
+/* The weights of the sub-pulse from the training samples of this PRI (QRD-SMI; QRD-RLS and NLMS
+ * go on from the state of the earlier PRIs), then every beam minus the weighted auxiliary
+ * elements, in place in beamRe / beamIm. */
+static void sidelobe_canceller(const RadarConfig *cfg, const PulseConfig *pc, const PriData *pri, PulseState *s,
+                               int nThreads)
+{
+    const int nA = cfg->nAux, nB = cfg->nBeams, K = pc->slcTrainCount, n = pc->ddcCount;
+    const int nD = cfg->nChUsed > 0 ? cfg->nChUsed : cfg->nCh;
+    (void)nThreads;
+    /* training samples: the auxiliary elements and the DBF output of the main channels */
+    double P = 0.0;
+    for (int a = 0; a < nA; a++) {
+        const int16_t *x = pri->iq + 2 * ((size_t)cfg->chSlc[a] * pri->nSamples + pc->slcTrainFirst);
+        for (int k = 0; k < K; k++) {
+            const double re = x[2 * k], im = x[2 * k + 1];
+            s->trARe[(size_t)a * K + k] = re;
+            s->trAIm[(size_t)a * K + k] = im;
+            P += re * re + im * im;
+        }
+    }
+    P /= (double)nA * K;                                    /* mean power of an auxiliary element */
+    const int j0 = pc->slcTrainFirst - pc->ddcFirst;      /* the training samples in the segment */
+    if (j0 >= 0 && j0 + K <= n) {                           /* ... the DBF output has them already */
+        for (int b = 0; b < nB; b++)
+            for (int k = 0; k < K; k++) {
+                s->trMRe[(size_t)b * K + k] = s->beamRe[(size_t)b * n + j0 + k];
+                s->trMIm[(size_t)b * K + k] = s->beamIm[(size_t)b * n + j0 + k];
+            }
+    } else {                                                /* (short pulse: segment cut at the handover) */
+        memset(s->trMRe, 0, sizeof(double) * (size_t)nB * K);
+        memset(s->trMIm, 0, sizeof(double) * (size_t)nB * K);
+        for (int c = 0; c < nD; c++) {
+            const int16_t *x = pri->iq + 2 * ((size_t)cfg->chDbf[c] * pri->nSamples + pc->slcTrainFirst);
+            for (int b = 0; b < nB; b++) {
+                const double wr = cfg->dbfEnabled ? cfg->wRe[b * nD + c] : 1.0, wi = cfg->dbfEnabled ? cfg->wIm[b * nD + c] : 0.0;
+                double *mr = s->trMRe + (size_t)b * K, *mi = s->trMIm + (size_t)b * K;
+                for (int k = 0; k < K; k++) {
+                    const double re = x[2 * k], im = x[2 * k + 1];
+                    mr[k] += wr * re - wi * im;
+                    mi[k] += wr * im + wi * re;
+                }
+            }
+        }
+    }
+    double *x = s->slcX, *d = s->slcD;
+    if (cfg->slcMethod == SLC_NLMS) {
+        if (!s->slcStarted) {
+            memset(s->slcWRe, 0, sizeof(double) * (size_t)nA * nB);
+            memset(s->slcWIm, 0, sizeof(double) * (size_t)nA * nB);
+        }
+        for (int k = 0; k < K; k++) {
+            double norm = cfg->slcNlmsEps;
+            for (int a = 0; a < nA; a++) norm += s->trARe[(size_t)a * K + k] * s->trARe[(size_t)a * K + k] +
+                                                 s->trAIm[(size_t)a * K + k] * s->trAIm[(size_t)a * K + k];
+            const double g = norm > 0 ? cfg->slcNlmsMu / norm : 0.0;
+            for (int b = 0; b < nB; b++) {                  /* e_b = m_b - sum_a conj(W_ab) a_a */
+                double er = s->trMRe[(size_t)b * K + k], ei = s->trMIm[(size_t)b * K + k];
+                for (int a = 0; a < nA; a++) {
+                    const double wr = s->slcWRe[a * nB + b], wi = s->slcWIm[a * nB + b];
+                    const double ar = s->trARe[(size_t)a * K + k], ai = s->trAIm[(size_t)a * K + k];
+                    er -= wr * ar + wi * ai;
+                    ei -= wr * ai - wi * ar;
+                }
+                d[2 * b] = er;
+                d[2 * b + 1] = ei;
+            }
+            for (int a = 0; a < nA; a++) {                  /* W_ab += g a_a conj(e_b) */
+                const double ar = s->trARe[(size_t)a * K + k], ai = s->trAIm[(size_t)a * K + k];
+                for (int b = 0; b < nB; b++) {
+                    s->slcWRe[a * nB + b] += g * (ar * d[2 * b] + ai * d[2 * b + 1]);
+                    s->slcWIm[a * nB + b] += g * (ai * d[2 * b] - ar * d[2 * b + 1]);
+                }
+            }
+        }
+    } else {
+        const int rls = cfg->slcMethod == SLC_QRD_RLS;
+        if (!rls || !s->slcStarted) {                       /* R = sqrt(loading P K) I, z = 0 */
+            const double r0 = sqrt(pow(10.0, (rls ? cfg->slcRlsDelta_dB : cfg->slcSmiLoading_dB) / 10.0) * P * K);
+            memset(s->slcRRe, 0, sizeof(double) * (size_t)nA * nA);
+            memset(s->slcRIm, 0, sizeof(double) * (size_t)nA * nA);
+            memset(s->slcZRe, 0, sizeof(double) * (size_t)nA * nB);
+            memset(s->slcZIm, 0, sizeof(double) * (size_t)nA * nB);
+            for (int a = 0; a < nA; a++) s->slcRRe[a * nA + a] = r0;
+        }
+        const double sl = rls ? sqrt(cfg->slcRlsLambda) : 1.0;
+        for (int k = 0; k < K; k++) {
+            if (sl != 1.0) {
+                for (int i = 0; i < nA * nA; i++) { s->slcRRe[i] *= sl; s->slcRIm[i] *= sl; }
+                for (int i = 0; i < nA * nB; i++) { s->slcZRe[i] *= sl; s->slcZIm[i] *= sl; }
+            }
+            for (int a = 0; a < nA; a++) {                  /* the row a^H */
+                x[2 * a] = s->trARe[(size_t)a * K + k];
+                x[2 * a + 1] = -s->trAIm[(size_t)a * K + k];
+            }
+            for (int b = 0; b < nB; b++) {                  /* m^H */
+                d[2 * b] = s->trMRe[(size_t)b * K + k];
+                d[2 * b + 1] = -s->trMIm[(size_t)b * K + k];
+            }
+            qrd_row(s->slcRRe, s->slcRIm, s->slcZRe, s->slcZIm, x, d, nA, nB);
+        }
+        tri_solve(s->slcRRe, s->slcRIm, s->slcZRe, s->slcZIm, s->slcWRe, s->slcWIm, nA, nB);
+    }
+    s->slcStarted = 1;
+    /* y_b = x_b - sum_a conj(W_ab) aux_a over the whole segment */
+    load_channels(pc, pri, cfg->chSlc, nA, s->auxRe, s->auxIm);
+    #pragma omp parallel for schedule(static) num_threads(team_size(nThreads, nB)) if(nB > 1)
+    for (int b = 0; b < nB; b++) {
+        float *restrict yr = s->beamRe + (size_t)b * n, *restrict yi = s->beamIm + (size_t)b * n;
+        for (int a = 0; a < nA; a++) {
+            const float wr = (float)s->slcWRe[a * nB + b], wi = (float)-s->slcWIm[a * nB + b];   /* conj(W) */
+            const float *restrict ar = s->auxRe + (size_t)a * n, *restrict ai = s->auxIm + (size_t)a * n;
+            IVDEP
+            for (int k = 0; k < n; k++) {
+                yr[k] -= wr * ar[k] - wi * ai[k];
+                yi[k] -= wr * ai[k] + wi * ar[k];
             }
         }
     }
@@ -1301,7 +1500,8 @@ static void taps_alloc(Processor *p)
 void processor_set_profile(Processor *p, int kind, int beam)
 {
     if (beam < 0 || beam >= p->cfg->nBeams) beam = 0;
-    p->profileKind = kind == PROFILE_DBF || kind == PROFILE_MF ? kind : PROFILE_NONE;
+    p->profileKind = kind == PROFILE_DBF || kind == PROFILE_MF || (kind == PROFILE_SLC && p->cfg->slcEnabled) ? kind
+                   : PROFILE_NONE;
     p->profileBeam = beam;
     if (p->profileKind) taps_alloc(p);
 }
@@ -1327,7 +1527,7 @@ static int tap_bin(const Processor *p, double r)
     return b >= 0 && b < p->nBins ? b : -1;
 }
 
-/* Adds |x|^2 of the selected beam after DBF (pulse compression input inside the
+/* Adds |x|^2 of the selected beam after DBF or after the SLC (pulse compression input inside the
  * receive interval) or after the pulse compression to the profile. */
 static void profile_add(Processor *p, int pulse, const PulseState *s)
 {
@@ -1335,7 +1535,7 @@ static void profile_add(Processor *p, int pulse, const PulseState *s)
     const PulseConfig *pc = &cfg->pulse[pulse];
     const double handover = cfg->handover_m;
     const int b = p->profileBeam;
-    if (p->profileKind == PROFILE_DBF) {
+    if (p->profileKind == PROFILE_DBF || p->profileKind == PROFILE_SLC) {   /* (the SLC: the same samples) */
         const int n = pc->ddcCount;
         const float *xr = s->beamRe + (size_t)b * n, *xi = s->beamIm + (size_t)b * n;
         for (int k = 0; k < pc->rxCount; k++) {
@@ -1486,11 +1686,12 @@ static void run_tracker(Processor *p, double t_s, int flush, const ProcessorCall
  * The record may be longer than the configured one (e.g. the DDC output of
  * the whole PRI): only the receive windows of the sub-pulses are taken out
  * of it, at their samples from the PRI start. It may also have more channels
- * than the nChUsed processed (cfg.rx.nChannelsUsed: the first ones are used). */
+ * than those used (cfg.rx.nChannelsUsedDbf, nChannelsUsedSlc): it needs the
+ * channels up to the largest element number used. */
 static int pri_matches_config(const RadarConfig *cfg, const PriData *pri)
 {
-    const int nChUsed = cfg->nChUsed > 0 ? cfg->nChUsed : cfg->nCh;     /* the channels processed */
-    if (pri->nCh < nChUsed || pri->nSamples < cfg->nDdc || !pri->iq) return 0;
+    const int need = cfg->chNeeded > 0 ? cfg->chNeeded : cfg->nCh;
+    if (pri->nCh < need || pri->nSamples < cfg->nDdc || !pri->iq) return 0;
     const uint32_t *idx[N_PULSES] = { pri->shortIdx, pri->longIdx };
     for (int i = 0; i < N_PULSES; i++) {
         const PulseConfig *pc = &cfg->pulse[i];
@@ -1597,6 +1798,18 @@ void processor_process(Processor *p, const PriData *pri, const ProcessorCallback
             t0 = now_seconds();
         }
         if (profileKind == PROFILE_DBF) profile_add(p, i, s);   /* (the display's time, not the block's) */
+        if (cfg->slcEnabled) {                                  /* sidelobe canceller (in place) */
+            t0 = now_seconds();
+            sidelobe_canceller(cfg, pc, pri, s, p->nThreads);
+            p->timing.slc_ms += elapsed_ms(&t0);
+            if ((p->logMask & LOG_SLC) && cb && cb->block) {
+                const BlockOutput o = { LOG_SLC, i, cfg->nBeams, pc->nRange, cfg->nfft, pc->ddcCount, pc->ddcFirst,
+                                        s->beamRe, s->beamIm, pri->pulseNumber };
+                cb->block(cb->user, &o);
+                t0 = now_seconds();
+            }
+            if (profileKind == PROFILE_SLC) profile_add(p, i, s);
+        }
         const int slot = (s->last + 1) % s->nSlots;
         s->mfLast = (s->mfLast + 1) % cfg->nMtiTaps;
         matched_filter(cfg, pc, s, s->mfLast, p->nThreads);

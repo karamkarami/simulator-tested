@@ -34,13 +34,24 @@ sys = setup_radar(cfg);
 
 r = {};                                              % {name, value} pairs
 r{end+1} = {'nCh', sys.nCh};
-r{end+1} = {'nChUsed', sys.nChUsed};                  % channels processed: the first nChUsed (cfg.rx.nChannelsUsed)
+r{end+1} = {'nChUsed', sys.nChUsed};                  % DBF elements (cfg.rx.nChannelsUsedDbf) ...
+r{end+1} = {'chDbf', sys.chDbf - 1};                  % ... their numbers, 0-based (the columns of W)
 r{end+1} = {'nBeams', sys.nBeams};
 r{end+1} = {'dbfEnabled', double(sys.dbf.enabled)};
 if sys.dbf.enabled
     r{end+1} = {'W', sys.dbf.W};
 end
 r{end+1} = {'beamU', sys.dbf.beamU};
+r{end+1} = {'slcEnabled', double(sys.slc.enable)};   % sidelobe canceller (cfg.slc) after the DBF
+if sys.slc.enable
+    r{end+1} = {'chSlc', sys.slc.ch - 1};             % auxiliary elements, 0-based (cfg.rx.nChannelsUsedSlc)
+    r{end+1} = {'slcMethod', sys.slc.method};         % 0 QRD-SMI, 1 QRD-RLS, 2 NLMS
+    r{end+1} = {'slcSmiLoading_dB', sys.slc.smiLoading_dB};
+    r{end+1} = {'slcRlsLambda', sys.slc.rlsLambda};
+    r{end+1} = {'slcRlsDelta_dB', sys.slc.rlsDelta_dB};
+    r{end+1} = {'slcNlmsMu', sys.slc.nlmsMu};
+    r{end+1} = {'slcNlmsEps', sys.slc.nlmsEps};
+end
 r{end+1} = {'tilt_deg', sys.ant.tilt_deg};
 r{end+1} = {'height_m', sys.ant.height_m};
 r{end+1} = {'rate_dps', sys.ant.rate_dps};
@@ -61,6 +72,10 @@ for i = 1:2
     r{end+1} = {[names{i} '_rxCount'], numel(wv.rxIdx)};
     r{end+1} = {[names{i} '_ddcFirst'], wv.ddcIdx(1) - 1};      % pulse compression input, 0-based (its
     r{end+1} = {[names{i} '_ddcCount'], numel(wv.ddcIdx)};      % samples outside the interval are zero)
+    if sys.slc.enable                                         % SLC training samples, 0-based (contiguous)
+        r{end+1} = {[names{i} '_slcTrainFirst'], wv.slcTrainIdx(1) - 1};
+        r{end+1} = {[names{i} '_slcTrainCount'], numel(wv.slcTrainIdx)};
+    end
     r{end+1} = {[names{i} '_nTaps'], numel(wv.mfTaps)};
     r{end+1} = {[names{i} '_nRange'], wv.nRange};
     r{end+1} = {[names{i} '_taps'], complex(wv.mfTaps)};

@@ -201,7 +201,7 @@ struct CfarState {
 };
 
 struct VideoRow {                 /* the raw data of one PRI (ppi_post_video, ppi_post_profile) */
-    int                kind = 0;      /* 0 video, PROFILE_DBF, PROFILE_MF */
+    int                kind = 0;      /* 0 video, PROFILE_DBF, PROFILE_SLC, PROFILE_MF */
     int                beam = 0;      /* DBF / MF: the beam (0-based)     */
     int                nAvg = 1;      /* complex samples averaged per bin (video: the elements) */
     double             az_deg = 0.0, time_s = 0.0, dR_m = 0.0;
@@ -242,7 +242,7 @@ QRgb video_colour(int i)
 }
 
 std::atomic<int> g_videoWanted(0);   /* the PPI shows the video: the worker computes it */
-std::atomic<int> g_profileKind(0);   /* PROFILE_DBF / PROFILE_MF while the PPI shows that output */
+std::atomic<int> g_profileKind(0);   /* PROFILE_DBF / PROFILE_SLC / PROFILE_MF while the PPI shows that output */
 std::atomic<int> g_beam(0);          /* the beam of the DBF / MF output and the range-Doppler map */
 std::vector<double> &beam_elevations()   /* the beams of the beam selector (ppi_set_beams) */
 {
@@ -457,14 +457,47 @@ QPointF event_pos(const QWheelEvent *e)
 /* ------------------------------------------------------------------------ */
 
 enum class History { UntilSwept, TwoScans, All };
-/* after / before the plot extractor, both, raw video, DBF output and pulse compression
- * output of the selected beam (the order of the panel's box and of PPI_SHOW_...) */
-enum class DisplayMode { Plots, Detections, Both, Video, DbfOut, MfOut };
+/* after / before the plot extractor, both, raw video, DBF output, pulse compression output and
+ * sidelobe canceller output of the selected beam (the values of PPI_SHOW_...) */
+enum class DisplayMode { Plots, Detections, Both, Video, DbfOut, MfOut, SlcOut };
 
-/* The kind of raw data a display mode shows: 0 video, PROFILE_DBF, PROFILE_MF; -1 none. */
+/* The DBF output only with the DBF, the SLC output only with the sidelobe canceller
+ * (ppi_set_raw_outputs) */
+static std::atomic<bool> g_dbfOut(true), g_slcOut(false);
+
+/* The display modes the panel offers, in its order. */
+static std::vector<DisplayMode> available_modes()
+{
+    std::vector<DisplayMode> m = { DisplayMode::Plots, DisplayMode::Detections, DisplayMode::Both, DisplayMode::Video };
+    if (g_dbfOut.load()) m.push_back(DisplayMode::DbfOut);
+    if (g_slcOut.load()) m.push_back(DisplayMode::SlcOut);
+    m.push_back(DisplayMode::MfOut);
+    return m;
+}
+
+static const char *mode_name(DisplayMode m, bool shortName)
+{
+    switch (m) {
+    case DisplayMode::Plots:      return shortName ? "Plots (after extractor)" : "Plots (after the plot extractor)";
+    case DisplayMode::Detections: return shortName ? "Detections (before extractor)" : "CFAR detections (before the extractor)";
+    case DisplayMode::Both:       return "Plots and detections";
+    case DisplayMode::Video:      return shortName ? "Video (DDC, elements avg.)" : "Video (DDC output, elements averaged)";
+    case DisplayMode::DbfOut:     return "DBF out (selected beam)";
+    case DisplayMode::SlcOut:     return shortName ? "SLC out (selected beam)" : "SLC out (sidelobe canceller, selected beam)";
+    default:                      return shortName ? "MF out (selected beam)" : "MF out (pulse compression, selected beam)";
+    }
+}
+
+/* The kind of raw data a display mode shows: 0 video, PROFILE_DBF, PROFILE_SLC, PROFILE_MF; -1 none. */
 int raw_kind(DisplayMode m)
 {
-    return m == DisplayMode::Video ? 0 : m == DisplayMode::DbfOut ? PROFILE_DBF : m == DisplayMode::MfOut ? PROFILE_MF : -1;
+    return m == DisplayMode::Video ? 0 : m == DisplayMode::DbfOut ? PROFILE_DBF : m == DisplayMode::MfOut ? PROFILE_MF
+         : m == DisplayMode::SlcOut ? PROFILE_SLC : -1;
+}
+
+static const char *raw_name(DisplayMode m)
+{
+    return m == DisplayMode::DbfOut ? "DBF out" : m == DisplayMode::SlcOut ? "SLC out" : "MF out";
 }
 
 QString beam_text(int beam)
@@ -931,12 +964,13 @@ void PpiWidget::keyPressEvent(QKeyEvent *event)
     case Qt::Key_R: case Qt::Key_Home: resetView(); break;
     case Qt::Key_C:     pinned_.clear(); update(); break;
     case Qt::Key_T:     setShowTracks(!showTracks_); break;
-    case Qt::Key_D:     setDisplayMode(mode_ == DisplayMode::Plots ? DisplayMode::Detections
-                                       : mode_ == DisplayMode::Detections ? DisplayMode::Both
-                                       : mode_ == DisplayMode::Both ? DisplayMode::Video
-                                       : mode_ == DisplayMode::Video ? DisplayMode::DbfOut
-                                       : mode_ == DisplayMode::DbfOut ? DisplayMode::MfOut : DisplayMode::Plots);
-                        break;
+    case Qt::Key_D: {                                    /* the next of the available modes */
+        const std::vector<DisplayMode> m = available_modes();
+        size_t i = 0;
+        while (i < m.size() && m[i] != mode_) i++;
+        setDisplayMode(m[(i + 1) % m.size()]);
+        break;
+    }
     case Qt::Key_Space: setPaused(!paused_); break;
     case Qt::Key_S: {
         saveSnapshotDialog();
@@ -957,19 +991,11 @@ void PpiWidget::contextMenuEvent(QContextMenuEvent *event)
     };
     QMenu *modeMenu = menu.addMenu(QStringLiteral("Show (D)"));
     QActionGroup *modeGroup = new QActionGroup(modeMenu);
-    const std::pair<const char *, DisplayMode> modeItems[] = {
-        { "Plots (after the plot extractor)", DisplayMode::Plots },
-        { "CFAR detections (before the extractor)", DisplayMode::Detections },
-        { "Plots and detections", DisplayMode::Both },
-        { "Video (DDC output, elements averaged)", DisplayMode::Video },
-        { "DBF out (selected beam)", DisplayMode::DbfOut },
-        { "MF out (pulse compression, selected beam)", DisplayMode::MfOut } };
-    for (const auto &item : modeItems) {
-        QAction *a = modeMenu->addAction(QString::fromLatin1(item.first));
+    for (const DisplayMode m : available_modes()) {
+        QAction *a = modeMenu->addAction(QString::fromLatin1(mode_name(m, false)));
         a->setCheckable(true);
-        a->setChecked(mode_ == item.second);
+        a->setChecked(mode_ == m);
         modeGroup->addAction(a);
-        const DisplayMode m = item.second;
         QObject::connect(a, &QAction::triggered, [this, m]() { setDisplayMode(m); });
     }
     toggle(QStringLiteral("Short pulse"), showShort_, [this](bool on) { setShowShort(on); });
@@ -1500,7 +1526,7 @@ void PpiWidget::drawStatus(QPainter &p) const
                     .arg(deg_text(antenna_.az_deg, 1));
         if (raw_kind(mode_) >= 0) {
             const QString what = mode_ == DisplayMode::Video ? QStringLiteral("Video")
-                               : QStringLiteral("%1 %2").arg(mode_ == DisplayMode::DbfOut ? "DBF out" : "MF out").arg(beam_text(g_beam.load()));
+                               : QStringLiteral("%1 %2").arg(raw_name(mode_)).arg(beam_text(g_beam.load()));
             line1 += std::isfinite(videoNoise_dB_) ? QStringLiteral("    %1 (noise %2 dB)").arg(what).arg(videoNoise_dB_, 0, 'f', 1)
                                                    : QStringLiteral("    %1 (no data yet)").arg(what);
         } else if (mode_ != DisplayMode::Detections)
@@ -1543,8 +1569,7 @@ void PpiWidget::drawLegend(QPainter &p) const
     std::vector<std::pair<Kind, QString>> rows;
     if (raw_kind(mode_) >= 0) {
         rows.emplace_back(Help, mode_ == DisplayMode::Video ? QStringLiteral("Video [dB above noise], elements averaged")
-                                : mode_ == DisplayMode::DbfOut ? QStringLiteral("DBF out [dB above noise], %1").arg(beam_text(g_beam.load()))
-                                : QStringLiteral("MF out [dB above noise], %1").arg(beam_text(g_beam.load())));
+                                : QStringLiteral("%1 [dB above noise], %2").arg(raw_name(mode_)).arg(beam_text(g_beam.load())));
         rows.emplace_back(VideoK, QString());
         rows.emplace_back(Help, QString());              /* (room for the scale labels) */
     } else if (mode_ != DisplayMode::Detections) {
@@ -2803,16 +2828,17 @@ public:
 
         title(QStringLiteral("Display"));
         mode_ = new QComboBox(panel);
-        mode_->addItem(QStringLiteral("Plots (after extractor)"));
-        mode_->addItem(QStringLiteral("Detections (before extractor)"));
-        mode_->addItem(QStringLiteral("Plots and detections"));
-        mode_->addItem(QStringLiteral("Video (DDC, elements avg.)"));
-        mode_->addItem(QStringLiteral("DBF out (selected beam)"));
-        mode_->addItem(QStringLiteral("MF out (selected beam)"));
+        for (const DisplayMode m : available_modes())   /* DBF out, SLC out only when they exist */
+            mode_->addItem(QString::fromLatin1(mode_name(m, true)), (int)m);
         v->addWidget(mode_);
         QObject::connect(mode_, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
-                         [this](int i) { ppi_->setDisplayMode((DisplayMode)i); ppi_->setFocus(); });
-        QLabel *beamLabel = new QLabel(QStringLiteral("Beam after DBF (DBF out, MF out, range-Doppler)"), panel);
+                         [this](int i) {
+                             if (i < 0) return;
+                             ppi_->setDisplayMode((DisplayMode)mode_->itemData(i).toInt());
+                             ppi_->setFocus();
+                         });
+        QLabel *beamLabel = new QLabel(g_slcOut.load() ? QStringLiteral("Beam after DBF (DBF out, SLC out, MF out, range-Doppler)")
+                                                       : QStringLiteral("Beam after DBF (DBF out, MF out, range-Doppler)"), panel);
         beamLabel->setWordWrap(true);
         v->addWidget(beamLabel);
         beam_ = new QComboBox(panel);
@@ -3050,9 +3076,10 @@ public:
             }
             if (fresh) rd_->setFrame(f);
         }
-        if (mode_->currentIndex() != (int)ppi_->displayMode()) {   /* changed with D or the context menu */
+        const int want = mode_->findData((int)ppi_->displayMode());
+        if (want >= 0 && mode_->currentIndex() != want) {   /* changed with D or the context menu */
             const bool b = mode_->blockSignals(true);
-            mode_->setCurrentIndex((int)ppi_->displayMode());
+            mode_->setCurrentIndex(want);
             mode_->blockSignals(b);
         }
         CfarState c;
@@ -3106,7 +3133,7 @@ public:
          * to the PPI (all within the PRI: Total); the drawing runs in the GUI
          * thread, in parallel with the processing, so it is not part of Total.
          * Labels of at most 15 characters, so the value column stays visible. */
-        const std::pair<QString, double> rows[] = {
+        std::vector<std::pair<QString, double>> rows = {
             { QStringLiteral("DBF"), t.dbf_ms - o.dbf_ms }, { QStringLiteral("Matched filter"), t.mf_ms - o.mf_ms },
             { QStringLiteral("MTI (clutter)"), t.mti_ms - o.mti_ms },
             { QStringLiteral("Doppler FFT+NCI"), t.doppler_ms - o.doppler_ms },
@@ -3116,6 +3143,7 @@ public:
             { QStringLiteral("Logging (copy)"), t.log_ms - o.log_ms },
             { QStringLiteral("Console output"), t.console_ms - o.console_ms },
             { QStringLiteral("Display (post)"), t.display_ms - o.display_ms } };
+        if (g_slcOut.load()) rows.insert(rows.begin() + 1, { QStringLiteral("SLC"), t.slc_ms - o.slc_ms });
         QStringList lines;
         double sum = 0.0;
         for (const auto &r : rows) {
@@ -3210,6 +3238,11 @@ private:
             logBlock_[i] = new QCheckBox(QString::fromLatin1(names[i]), box);
             logBlock_[i]->setChecked(mask & (1 << i));
             c->addWidget(logBlock_[i]);
+            if (i == 1 && g_slcOut.load()) {             /* the SLC output (only with the SLC), after the DBF */
+                logSlc_ = new QCheckBox(QStringLiteral("SLC output"), box);
+                logSlc_->setChecked(mask & LOG_SLC);
+                c->addWidget(logSlc_);
+            }
         }
         /* the video of this window (screen_record.mp4, with the mouse pointer) and the sound of the microphone when
          * there is one, else without sound (ffmpeg) */
@@ -3419,6 +3452,7 @@ private:
         }
         int mask = 0;
         for (int i = 0; i < 5; i++) if (logBlock_[i]->isChecked()) mask |= 1 << i;
+        if (logSlc_ && logSlc_->isChecked()) mask |= LOG_SLC;
         if (screenBox_->isChecked()) mask |= LOG_SCREEN;
         const QString folder = logFolder_->text().trimmed();
         if (folder.isEmpty()) { logStatus_->setText(QStringLiteral("choose the folder of the logs first")); return; }
@@ -3471,6 +3505,7 @@ private:
         logButton_->setText(on ? QStringLiteral("Stop logging") : QStringLiteral("Start logging"));
         logButton_->setStyleSheet(on ? QStringLiteral("background: #6a1010; color: white;") : QString());
         for (int i = 0; i < 5; i++) logBlock_[i]->setEnabled(!on);
+        if (logSlc_) logSlc_->setEnabled(!on);
         screenBox_->setEnabled(!on);
         logFolder_->setEnabled(!on);
         logName_->setEnabled(!on);
@@ -3533,6 +3568,7 @@ private:
     QWidget               *panel_ = nullptr;
     QLineEdit             *logFolder_, *logName_;
     QCheckBox             *logBlock_[5];
+    QCheckBox             *logSlc_ = nullptr;   /* SLC output (only with the sidelobe canceller) */
     QCheckBox             *screenBox_ = nullptr;
     ScreenRecorder         recorder_;
     bool                   recordTried_ = false, logOn_ = false;
@@ -3833,7 +3869,13 @@ extern "C" void ppi_post_log_status(int active, const char *dir, int mask, const
 
 extern "C" void ppi_set_display_mode(int mode)
 {
-    if (mode >= PPI_SHOW_PLOTS && mode <= PPI_SHOW_MF) g_startMode.store(mode);
+    if (mode >= PPI_SHOW_PLOTS && mode <= PPI_SHOW_SLC) g_startMode.store(mode);
+}
+
+extern "C" void ppi_set_raw_outputs(int dbf, int slc)
+{
+    g_dbfOut.store(dbf != 0);
+    g_slcOut.store(slc != 0);
 }
 
 /* The program icon (src/radar_icon.png in the Qt resources, src/ppi.qrc; the Windows
@@ -3938,8 +3980,17 @@ extern "C" int ppi_run(int argc, char **argv, double maxRange_m, int (*worker)(v
     QApplication::setWindowIcon(ppi_icon());                   /* window, taskbar, dock */
     window.setWindowIcon(ppi_icon());
     window.resize(1030, 800);
-    window.modeBox()->setCurrentIndex(g_startMode.load());   /* DisplayMode has the same order */
-    widget.setDisplayMode((DisplayMode)g_startMode.load());    /* (also when the index did not change) */
+    {
+        int start = g_startMode.load(), idx = window.modeBox()->findData(start);
+        if (idx < 0) {                                         /* DBF / SLC out without the DBF / SLC */
+            std::fprintf(stderr, "PPI: %s is not available (%s switched off): the plots are shown\n",
+                         mode_name((DisplayMode)start, true), start == PPI_SHOW_SLC ? "sidelobe canceller" : "DBF");
+            start = PPI_SHOW_PLOTS;
+            idx = window.modeBox()->findData(start);
+        }
+        window.modeBox()->setCurrentIndex(idx);
+        widget.setDisplayMode((DisplayMode)start);             /* (also when the index did not change) */
+    }
     window.beamBox()->setCurrentIndex(g_beam.load());
     window.showTab(g_startTab.load());
     window.lowerBox()->setCurrentIndex(g_startRdPlot.load());

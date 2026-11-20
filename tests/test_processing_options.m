@@ -14,8 +14,11 @@ function ok = test_processing_options()
 %      +250 m/s (beyond the +-112 m/s span of the de-interleaved rows) peaks in its own
 %      velocity bin, with the de-interleaving it is folded, and zero velocity is the notch
 %      bin (none when the grid does not hold it)
-%   4) cfg.rx.nChannelsUsed: 4 of 48 channels: a DBF matrix of 4 columns, unit noise gain
-%      per beam; 1: DBF off (one beam); 0 or 49 stop with a message
+%   4) cfg.rx.nChannelsUsedDbf: elements 1:4 of 48: a DBF matrix of 4 columns, unit noise
+%      gain per beam; elements [3 10 17 40]: the columns of these elements; one element: DBF
+%      off (one beam); 0, 49 or a repeated number stop with a message; the old
+%      cfg.rx.nChannelsUsed stops with a message; cfg.rx.nChannelsUsedSlc: an element of
+%      both lists, SLC without auxiliary elements stop with a message
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'), fullfile(root, 'tests'));
 ok = true;
@@ -110,20 +113,38 @@ s2 = setup_radar(c2);
 ok = check(s2.dop.zeroBin == 0 && s2.dop.nfft == 95 && abs(max(s2.dop.v_mps) - 400) < 1e-9, ...
            'NUFFT: a grid without zero velocity has no notch (95 points, 20 ... 400 m/s)') && ok;
 
-%% 4) channels used
+%% 4) elements used (DBF and SLC)
 c = radar_config();
-c.rx.nChannelsUsed = 4;
+full = setup_radar(c);
+c.rx.nChannelsUsedDbf = 1:4;
 s = setup_radar(c);
 ok = check(s.dbf.enabled && isequal(size(s.dbf.W), [s.nBeams 4]) && max(abs(sum(abs(s.dbf.W).^2, 2) - 1)) < 1e-12 && ...
-           s.nCh == 48, 'nChannelsUsed = 4: DBF of the first 4 elements, unit noise gain') && ok;
-c.rx.nChannelsUsed = 1;
+           s.nCh == 48, 'nChannelsUsedDbf = 1:4: DBF of the first 4 elements, unit noise gain') && ok;
+el = [3 10 17 40];
+c.rx.nChannelsUsedDbf = el;
 s = setup_radar(c);
-ok = check(~s.dbf.enabled && s.nBeams == 1, 'nChannelsUsed = 1: no DBF, one beam') && ok;
-for bad = [0 49]
-    c.rx.nChannelsUsed = bad;
-    ok = check(contains_text(error_of(@() setup_radar(c)), 'nChannelsUsed'), sprintf('nChannelsUsed = %d refused', bad)) && ok;
+Wr = full.dbf.W(:, el);  Wr = Wr ./ sqrt(sum(abs(Wr).^2, 2));
+ok = check(max(abs(s.dbf.W(:) - Wr(:))) < 1e-12 && isequal(s.chDbf, el), ...
+           'nChannelsUsedDbf = [3 10 17 40]: the columns of these elements, unit noise gain') && ok;
+c.rx.nChannelsUsedDbf = 5;
+s = setup_radar(c);
+ok = check(~s.dbf.enabled && s.nBeams == 1 && isequal(s.chDbf, 5), 'nChannelsUsedDbf = 5: no DBF, one beam (element 5)') && ok;
+for bad = {0, 49, [2 2 3], 1.5}
+    c.rx.nChannelsUsedDbf = bad{1};
+    ok = check(contains_text(error_of(@() setup_radar(c)), 'nChannelsUsedDbf'), ...
+               sprintf('nChannelsUsedDbf = %s refused', mat2str(bad{1}))) && ok;
 end
-fprintf('Processing options (windows, NUFFT, channels used): %s\n', ternary(ok, 'PASS', 'FAIL'));
+c = radar_config();  c.rx.nChannelsUsed = 4;
+ok = check(contains_text(error_of(@() setup_radar(c)), 'was replaced'), 'the old cfg.rx.nChannelsUsed refused') && ok;
+c = radar_config();  c.rx.nChannelsUsedSlc = [1 2];
+ok = check(contains_text(error_of(@() setup_radar(c)), 'in common'), 'SLC elements also in the DBF (all) refused') && ok;
+c.rx.nChannelsUsedDbf = 3:48;  c.slc.enable = true;
+s = setup_radar(c);
+ok = check(s.slc.enable && isequal(s.slc.ch, [1 2]) && s.dbf.enabled && size(s.dbf.W, 2) == 46, ...
+           'DBF 3:48, SLC [1 2]') && ok;
+c.rx.nChannelsUsedSlc = [];
+ok = check(contains_text(error_of(@() setup_radar(c)), 'needs the auxiliary'), 'SLC on without auxiliary elements refused') && ok;
+fprintf('Processing options (windows, NUFFT, elements used): %s\n', ternary(ok, 'PASS', 'FAIL'));
 end
 
 function msg = error_of(f)

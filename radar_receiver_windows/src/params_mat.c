@@ -3,8 +3,10 @@
  * setting of the processing chain in use at that moment, as one MATLAB struct 'params':
  *
  *   params.info        start time, configuration file, log blocks, last PRI before the start
- *   params.antenna     channels (all / processed), beams, DBF matrix W [nBeams x nChUsed]
+ *   params.antenna     channels (all / DBF elements chDbf), beams, DBF matrix W [nBeams x nChUsed]
  *                      (complex), beam directions, tilt, height, rotation, ranges
+ *   params.slc         sidelobe canceller: on/off, auxiliary elements, algorithm and its settings,
+ *                      training samples of each sub-pulse
  *   params.ddc         DDC record: samples, rate, first sample
  *   params.short, params.long   each sub-pulse: carrier, waveform, receive interval, pulse
  *                      compression filter (complex taps), range axis, CFAR cells tested, ...
@@ -133,6 +135,13 @@ int radar_parameters_write(const char *path, const RadarConfig *cfg, const Runti
     s = mat_struct_new();                                /* antenna and DBF */
     SC(s, "nCh", cfg->nCh);
     SC(s, "nChUsed", cfg->nChUsed);
+    {                                                    /* element numbers (1-based) */
+        double *v = malloc(sizeof(double) * (size_t)(cfg->nChUsed > 0 ? cfg->nChUsed : 1));
+        if (!v) abort();
+        for (int k = 0; k < cfg->nChUsed; k++) v[k] = (cfg->chDbf ? cfg->chDbf[k] : k) + 1;
+        mat_struct_double(s, "chDbf", v, 1, (size_t)cfg->nChUsed);
+        free(v);
+    }
     SC(s, "nBeams", cfg->nBeams);
     SC(s, "dbfEnabled", cfg->dbfEnabled);
     if (cfg->wRe) {                                      /* [nBeams x nChUsed] */
@@ -163,6 +172,31 @@ int radar_parameters_write(const char *path, const RadarConfig *cfg, const Runti
     SC(s, "maxRange_m", cfg->maxRange_m);
     SC(s, "handover_m", cfg->handover_m);
     mat_struct_struct(P, "antenna", s);
+
+    s = mat_struct_new();                                /* sidelobe canceller */
+    SC(s, "enabled", cfg->slcEnabled);
+    if (cfg->slcEnabled) {
+        static const char *algo[3] = { "qrd-smi", "qrd-rls", "nlms" };
+        double *v = malloc(sizeof(double) * (size_t)(cfg->nAux > 0 ? cfg->nAux : 1));
+        if (!v) abort();
+        for (int k = 0; k < cfg->nAux; k++) v[k] = cfg->chSlc[k] + 1;
+        mat_struct_double(s, "chSlc", v, 1, (size_t)cfg->nAux);
+        free(v);
+        mat_struct_char(s, "algorithm", algo[cfg->slcMethod]);
+        SC(s, "smiLoading_dB", cfg->slcSmiLoading_dB);
+        SC(s, "rlsLambda", cfg->slcRlsLambda);
+        SC(s, "rlsDelta_dB", cfg->slcRlsDelta_dB);
+        SC(s, "nlmsMu", cfg->slcNlmsMu);
+        SC(s, "nlmsEps", cfg->slcNlmsEps);
+        for (int p = 0; p < N_PULSES; p++) {             /* training samples: 1-based DDC samples */
+            char nm[40];
+            snprintf(nm, sizeof nm, "%sTrainFirstSample", p ? "long" : "short");
+            SC(s, nm, cfg->pulse[p].enable ? cfg->pulse[p].slcTrainFirst + 1 : NAN);
+            snprintf(nm, sizeof nm, "%sTrainCount", p ? "long" : "short");
+            SC(s, nm, cfg->pulse[p].enable ? cfg->pulse[p].slcTrainCount : 0);
+        }
+    }
+    mat_struct_struct(P, "slc", s);
 
     s = mat_struct_new();                                /* DDC */
     SC(s, "nDdc", cfg->nDdc);

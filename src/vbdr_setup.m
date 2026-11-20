@@ -1,6 +1,6 @@
-function v = vbdr_setup(cfg, nDdc, nChUsed)
+function v = vbdr_setup(cfg, nDdc, chUsed)
 %VBDR_SETUP  Layout of the VBDR stream of the mode and the board settings, with their checks.
-%   v = VBDR_SETUP(cfg, nDdc, nChUsed) (setup_radar.m: sys.vbdr) for the DDC record of nDdc
+%   v = VBDR_SETUP(cfg, nDdc, chUsed) (setup_radar.m: sys.vbdr) for the DDC record of nDdc
 %   samples per PRI. Fields:
 %     format        'rddc' or 'vbdr' (cfg.udp.format)
 %     payloadBytes  bytes of the half-stream per packet (cfg.udp.vbdr.payloadBytes)
@@ -92,10 +92,10 @@ if ~isscalar(v.operationMode) || v.operationMode ~= round(v.operationMode) || v.
     error('cfg.board.operationMode must be a whole number 1 ... cfg.board.nOperationModes = %d.', v.nOperationModes);
 end
 
-if isVbdr && nChUsed > 4
-    error(['cfg.udp.format = ''vbdr'' carries 4 channels (CH1 main, CH2 ... CH4 = J1 ... J3): the receiver ', ...
-           'can process at most 4 (cfg.rx.nChannelsUsed = %d; set cfg.rx.nChannelsUsed or cfg.ant.nElements ', ...
-           '<= 4).'], nChUsed);
+if isVbdr && any(chUsed > 4)
+    error(['cfg.udp.format = ''vbdr'' carries 4 channels (CH1 main, CH2 ... CH4 = J1 ... J3): the element ', ...
+           'numbers of cfg.rx.nChannelsUsedDbf and cfg.rx.nChannelsUsedSlc must be 1 ... 4 (they use %s; ', ...
+           '[] = all cfg.ant.nElements elements of the DBF).'], mat2str(chUsed));
 end
 end
 

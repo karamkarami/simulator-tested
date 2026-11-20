@@ -26,8 +26,9 @@ function ppi = ppi_init(sys)
 %   arc about one beamwidth long), both, or the raw video (the DDC output of
 %   the elements averaged non-coherently, the receive intervals of both
 %   sub-pulses joined, colour = power above the noise; ppi_video_init.m),
-%   the DBF output or the pulse compression output of the beam chosen in
-%   'Beam' (DBF out, MF out; the same colours);
+%   the DBF output (only with the DBF), the SLC output (only with the
+%   sidelobe canceller) or the pulse compression output of the beam chosen in
+%   'Beam' (DBF out, SLC out, MF out; the same colours);
 %   shows or hides the short/long-pulse
 %   data, the true targets, range rings, plot labels and the antenna; filters
 %   by SNR and age; shows or hides the tracks (hollow triangles: confirmed
@@ -186,15 +187,21 @@ uicontrol(fig, 'Style', 'text', 'String', 'Display', 'Units', 'normalized', 'Pos
           'BackgroundColor', 'k', 'ForegroundColor', 'w', 'FontWeight', 'bold', 'HorizontalAlignment', 'left');
 y = y - rowH;
 label('Show', [x0 y 0.05 rowH]);
-modes = {'plots', 'detections', 'both', 'video', 'dbf', 'mf'};
+% the display modes: DBF out only with the DBF, SLC out only with the sidelobe canceller
+[modes, modeNames] = ppi_display_modes(sys);
+show0 = cfg.display.showMode;
+if ~any(strcmp(show0, modes))
+    warning('cfg.display.showMode = ''%s'' is not available (DBF / SLC switched off): the PPI shows the plots.', show0);
+    show0 = 'plots';
+end
 h.ui.showMode = uicontrol(fig, 'Style', 'popupmenu', 'Units', 'normalized', 'Position', [x0+0.05 y w-0.05 rowH], ...
-    'String', {'Plots (after extractor)', 'Detections (before extractor)', 'Plots and detections', ...
-               'Video (DDC, elements averaged)', 'DBF out (selected beam)', 'MF out (selected beam)'}, ...
-    'Value', find(strcmp(cfg.display.showMode, modes)), ...
+    'String', modeNames, ...
+    'Value', find(strcmp(show0, modes)), ...
     'BackgroundColor', bg, 'ForegroundColor', fg, ...
     'Callback', @(src, evt) ppi_callbacks('option', fig, 'showMode', modes{get(src, 'Value')}));
-opt.showMode = cfg.display.showMode;
-% Beam after the DBF: DBF out, MF out and the range-Doppler map
+opt.showMode = show0;
+opt.modes = modes;
+% Beam after the DBF: DBF out, SLC out, MF out and the range-Doppler map
 y = y - rowH;
 label('Beam', [x0 y 0.05 rowH]);
 beamNames = cell(1, sys.nBeams);

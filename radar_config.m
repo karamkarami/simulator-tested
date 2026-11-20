@@ -43,10 +43,15 @@ cfg.fcMin_Hz      = 150e6; % carrier range of the VBDR board [Hz]: the commands 
 cfg.fcMax_Hz      = 200e6; % (long pulse) set the carrier fcMin_Hz + 0 ... 255 MHz in steps of 1 MHz;
                            % with cfg.udp.format = 'vbdr' the carriers of the modes must be whole MHz in this range
 cfg.ant.nElements = 48;   % receive elements in elevation (1 = single antenna, beamforming disabled)
-cfg.rx.nChannelsUsed = [];  % channels of the DDC output the receiver processes: the first nChannelsUsed
-                            % of the cfg.ant.nElements in every PRI ([] = all; 1 = only the first element,
-                            % no DBF). The DDC output (simulator, files, UDP stream, logs) keeps all of
-                            % them; the DBF uses the first nChannelsUsed columns of its matrix
+cfg.rx.nChannelsUsedDbf = [];  % elements (numbers 1 ... cfg.ant.nElements) the DBF combines into the beams
+                               % ([] = all; one element = no DBF, a single beam). The DBF uses the columns of
+                               % its matrix of these elements, every beam scaled to unit noise gain again (a
+                               % matrix of your own may also have as many columns as elements listed). The
+                               % DDC output (simulator, files, UDP stream, logs) keeps all elements
+cfg.rx.nChannelsUsedSlc = [];  % auxiliary elements of the sidelobe canceller (cfg.slc; numbers 1 ...
+                               % cfg.ant.nElements, none of them in nChannelsUsedDbf; [] = none). With
+                               % cfg.udp.format = 'vbdr' the stream has 4 channels: all numbers of both
+                               % lists are 1 ... 4 then
 cfg.ant.elementSpacing_lambda = 0.66;  % element spacing in elevation [wavelengths]
 % (azimuth: fixed 4.1 deg beam of every element; patterns come from the antenna file)
 cfg.ant.height_m  = 6;    % antenna height above the ground [m]
@@ -65,6 +70,49 @@ cfg.rx.gain_dB         = 60;     % gain of the receiver path from the antenna to
 cfg.rx.txIsolation_dB  = 40;     % transmitter-to-receiver isolation (leakage while transmitting) [dB]
 cfg.rx.addThermalNoise = true;   % false only for debugging / SNR measurements
 cfg.rx.addLeakage      = true;   % false only for debugging / SNR measurements
+
+%% Sidelobe canceller (SLC): after the DBF, before the pulse compression
+% Every beam of the DBF (the main channel; the element itself without DBF) gets the auxiliary
+% elements cfg.rx.nChannelsUsedSlc subtracted with adaptive weights: y_b = beam_b - w_b' * x_aux.
+% The weights of each beam and sub-pulse are estimated in every PRI from training samples of its
+% receive window (only noise and interference expected there) and applied to the whole window:
+%   'qrd-smi'  sample matrix inversion by a QR decomposition of the training samples of this PRI,
+%              with diagonal loading smiLoading_dB (relative to the mean power of an auxiliary element)
+%   'qrd-rls'  recursive least squares (QR decomposition, Givens rotations) over the training samples,
+%              carried from PRI to PRI with the forgetting factor rlsLambda per sample
+%   'nlms'     normalised LMS over the training samples (step nlmsMu, regularisation nlmsEps),
+%              carried from PRI to PRI
+% Training samples: the last trainCells samples of each receive window (far range: no clutter), or
+% the samples of the range interval trainRange_m.<pulse> = [r1 r2] [m] when it is set (e.g. for the
+% short pulse, whose window may end inside the clutter). A strong target in the training samples
+% is partly cancelled too.
+cfg.slc.enable        = false;      % sidelobe canceller on (needs cfg.rx.nChannelsUsedSlc)
+cfg.slc.algorithm     = 'qrd-smi';  % weights: 'qrd-smi', 'qrd-rls' or 'nlms'
+cfg.slc.trainCells    = 128;        % training samples at the end of each receive window
+cfg.slc.trainRange_m.short = [];    % [r1 r2] training interval of the short pulse [m] ([] = trainCells)
+cfg.slc.trainRange_m.long  = [];    % the same for the long pulse
+cfg.slc.smiLoading_dB = -30;        % 'qrd-smi': diagonal loading relative to the auxiliary power [dB]
+cfg.slc.rlsLambda     = 0.999;      % 'qrd-rls': forgetting factor per sample (0 < lambda <= 1)
+cfg.slc.rlsDelta_dB   = -20;        % 'qrd-rls': initial loading relative to the auxiliary power of the
+                                    % first training block [dB] (it fades with the forgetting factor)
+cfg.slc.nlmsMu        = 0.1;        % 'nlms': step size (0 < mu < 2)
+cfg.slc.nlmsEps       = 1;          % 'nlms': regularisation of the normalisation [LSB^2 of the DDC output]
+
+%% Noise jammers (interference for the sidelobe canceller): fixed position, continuous noise
+% One column per jammer (all vectors of the same length). A jammer is received by every element
+% through its antenna patterns (azimuth pattern of the element, elevation element pattern) with the
+% phase of its direction (as an echo), in every PRI and at every antenna azimuth (also in the
+% azimuth sidelobes), with the STC. Its noise is flat over bandwidth_Hz around fc_Hz.
+cfg.jammer.enable       = false;    % jammers on
+cfg.jammer.erp_W        = 2;        % effective radiated power (transmit power x antenna gain) [W]: 2 W at
+                                    % 50 km is ~38 dB above the noise of an element in the DDC band while the
+                                    % antenna looks at it (the run summary prints it); much more overloads the
+                                    % ADC then (cfg.rx.gain_dB)
+cfg.jammer.bandwidth_Hz = 10e6;     % noise bandwidth [Hz]
+cfg.jammer.fc_Hz        = [];       % centre frequency [Hz] ([] = cfg.fc)
+cfg.jammer.az_deg       = 60;       % azimuth, clockwise from North [deg]
+cfg.jammer.el_deg       = 2;        % elevation above the horizon [deg]
+cfg.jammer.range_m      = 50e3;     % distance [m]
 
 %% ADC
 cfg.adc.fs_Hz            = 120e6;  % sampling frequency [Hz]
@@ -278,9 +326,12 @@ cfg.display.showMode          = 'plots';  % PPI shows 'plots' (after the plot ex
                                           % (CFAR detections before it: arcs), 'both' or 'video' (the
                                           % DDC output of the elements averaged non-coherently, receive
                                           % intervals of both sub-pulses joined, colour = power; also in
-                                          % the panel), 'dbf' (DBF output of the selected beam) or 'mf'
-                                          % (pulse compression output of the selected beam)
-cfg.display.beam              = 1;        % beam after the DBF shown by 'dbf', 'mf' and the range-Doppler
+                                          % the panel; the elements of cfg.rx.nChannelsUsedDbf), 'dbf'
+                                          % (DBF output of the selected beam, before the SLC; only with
+                                          % DBF), 'slc' (SLC output of the selected beam; only with
+                                          % cfg.slc.enable) or 'mf' (pulse compression output of the
+                                          % selected beam)
+cfg.display.beam              = 1;        % beam after the DBF shown by 'dbf', 'slc', 'mf' and the range-Doppler
                                           % tab (also in the panel: Beam)
 cfg.display.tab               = 'ppi';    % tab at the start: 'ppi', or 'rd' (range-Doppler map of the
                                           % selected beam next to a small PPI). The map and the plot below

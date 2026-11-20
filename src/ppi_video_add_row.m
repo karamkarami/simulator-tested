@@ -24,7 +24,7 @@ V.time(b) = t_s;
 v = sort(row(row > 0));                                        % noise floor: running 10th percentile (the
 if isempty(v), v = 0; end
 m = 10*log10(v(max(1, ceil(0.1*numel(v)))) + eps);             % raw video is mostly clutter: long-pulse smear)
-if isfield(V, 'kind') && any(strcmp(V.kind, {'dbf', 'mf'}))
+if isfield(V, 'kind') && any(strcmp(V.kind, {'dbf', 'slc', 'mf'}))
     m = m + V.p10Sample_dB;                                    % one complex sample per bin: exponential power,
 else                                                           % its 10th percentile is 9.77 dB below the mean;
     m = m + V.p10Video_dB;                                     % video: the mean over the elements (48: 0.86 dB)

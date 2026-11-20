@@ -17,6 +17,8 @@
  *                                           compression input, zero outside the receive window),
  *                                           shortFirstSample, longFirstSample (1-based DDC sample of
  *                                           column 1), hdr
+ *   <folder>/<name>/slc/slc_<n>.mat        the sidelobe canceller output (only with the SLC): as the
+ *                                           DBF output (short, long, shortFirstSample, longFirstSample)
  *   <folder>/<name>/mf/mf_<n>.mat          the pulse compression output: short, long (complex single
  *                                           [nBeams x nRange]), shortRange_m, longRange_m, hdr (as
  *                                           cfg.io.saveMf of the simulator)
@@ -79,7 +81,7 @@ typedef struct Job {
     int      nSamples, nCh;
     int16_t *iq;
     /* DBF, MF of both sub-pulses */
-    CBlock   dbf[N_PULSES], mf[N_PULSES];
+    CBlock   dbf[N_PULSES], mf[N_PULSES], slc[N_PULSES];
     /* Doppler maps [nfft][nBeams][nRange] */
     int      haveDop[N_PULSES], dopNfft[N_PULSES], dopBeams[N_PULSES], dopRange[N_PULSES];
     float   *dop[N_PULSES];
@@ -123,6 +125,7 @@ static void job_free(Job *j)
     free(j->iq);
     for (int i = 0; i < N_PULSES; i++) {
         free(j->dbf[i].re); free(j->dbf[i].im); free(j->mf[i].re); free(j->mf[i].im); free(j->dop[i]);
+        free(j->slc[i].re); free(j->slc[i].im);
     }
     free(j->dets);
     free(j->plots);
@@ -194,11 +197,12 @@ static void write_job(Logger *L, const Job *j)
         }
         files += finish(L, w, path);
     }
-    for (int kind = 0; kind < 2; kind++) {                       /* DBF, MF */
-        const int bit = kind ? LOG_MF : LOG_DBF;
-        const CBlock *blk = kind ? j->mf : j->dbf;
+    for (int kind = 0; kind < 3; kind++) {                       /* DBF, MF, SLC */
+        static const char *sub[3] = { "dbf", "mf", "slc" };
+        const int bit = kind == 1 ? LOG_MF : kind == 2 ? LOG_SLC : LOG_DBF;
+        const CBlock *blk = kind == 1 ? j->mf : kind == 2 ? j->slc : j->dbf;
         if (!(j->mask & bit) || (!blk[0].have && !blk[1].have)) continue;
-        snprintf(path, sizeof path, "%s/%s/%s_%07u.mat", L->dir, kind ? "mf" : "dbf", kind ? "mf" : "dbf", j->pulseNumber);
+        snprintf(path, sizeof path, "%s/%s/%s_%07u.mat", L->dir, sub[kind], sub[kind], j->pulseNumber);
         MatWriter *w = mat_write_open(path, 0);
         if (w) {
             for (int p = 0; p < N_PULSES; p++) {
@@ -214,7 +218,7 @@ static void write_job(Logger *L, const Job *j)
                 free(re);
                 free(im);
                 char nm[40];
-                if (kind == 0) {
+                if (kind != 1) {                             /* DBF, SLC: the DDC samples */
                     const double first = c->first + 1;
                     snprintf(nm, sizeof nm, "%sFirstSample", g_pulseName[p]);
                     mat_write_double(w, nm, &first, 1, 1);
@@ -357,14 +361,15 @@ Logger *logger_start(const char *folder, const char *name, int mask, const Radar
         name = stamp;
     }
     snprintf(L->dir, sizeof L->dir, "%s/%s", folder, name);
-    static const struct { int bit; const char *sub; } subs[5] = {
-        { LOG_DDC, "ddc" }, { LOG_DBF, "dbf" }, { LOG_MF, "mf" }, { LOG_DOPPLER, "doppler" }, { LOG_DETECTION, "detection" } };
+    static const struct { int bit; const char *sub; } subs[6] = {
+        { LOG_DDC, "ddc" }, { LOG_DBF, "dbf" }, { LOG_SLC, "slc" }, { LOG_MF, "mf" }, { LOG_DOPPLER, "doppler" },
+        { LOG_DETECTION, "detection" } };
     if (make_dirs(L->dir) != 0) {
         snprintf(err, errLen, "cannot create the folder %s", L->dir);
         free(L);
         return NULL;
     }
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         if (!(mask & subs[i].bit)) continue;
         char p[1200];
         snprintf(p, sizeof p, "%s/%s", L->dir, subs[i].sub);
@@ -378,8 +383,8 @@ Logger *logger_start(const char *folder, const char *name, int mask, const Radar
     {
         const time_t now = time(NULL);
         strftime(started, sizeof started, "%Y-%m-%d %H:%M:%S", localtime(&now));
-        snprintf(blocks, sizeof blocks, "%s%s%s%s%s%s", mask & LOG_DDC ? " ddc" : "", mask & LOG_DBF ? " dbf" : "",
-                 mask & LOG_MF ? " mf" : "", mask & LOG_DOPPLER ? " doppler" : "", mask & LOG_DETECTION ? " detection" : "",
+        snprintf(blocks, sizeof blocks, "%s%s%s%s%s%s%s", mask & LOG_DDC ? " ddc" : "", mask & LOG_DBF ? " dbf" : "",
+                 mask & LOG_SLC ? " slc" : "", mask & LOG_MF ? " mf" : "", mask & LOG_DOPPLER ? " doppler" : "", mask & LOG_DETECTION ? " detection" : "",
                  mask & LOG_SCREEN ? " screen" : "");
     }
     {                                                    /* the settings of the processing chain now */
@@ -404,8 +409,9 @@ Logger *logger_start(const char *folder, const char *name, int mask, const Radar
             const time_t now = time(NULL);
             fprintf(f, "Radar receiver log, started %s", ctime(&now));
             fprintf(f, "blocks:%s\n", blocks);
-            fprintf(f, "channels %d (processed %d), beams %d, DDC %d samples at %.0f Hz, short %d / long %d range cells, "
-                       "Doppler %d bins (%s), CPI %d pulses, radar mode %d\n", cfg->nCh, cfg->nChUsed, cfg->nBeams,
+            fprintf(f, "channels %d (DBF %d, SLC %d), beams %d, DDC %d samples at %.0f Hz, short %d / long %d range cells, "
+                       "Doppler %d bins (%s), CPI %d pulses, radar mode %d\n", cfg->nCh, cfg->nChUsed,
+                    cfg->slcEnabled ? cfg->nAux : 0, cfg->nBeams,
                     cfg->nDdc, cfg->fsOut_Hz, cfg->pulse[0].nRange, cfg->pulse[1].nRange, cfg->nfft,
                     cfg->dopplerMethod == DOPPLER_NUFFT ? "NUFFT" : "FFT", cfg->cpiLength, cfg->radarMode);
             fprintf(f, "CFAR threshold %.2f dB at the start\n", 10.0 * log10(rt && rt->alpha > 0 ? rt->alpha : cfg->alpha));
@@ -542,10 +548,10 @@ void logger_block(Logger *L, const BlockOutput *o)
         j->bytes += sizeof(float) * n;
         return;
     }
-    if (o->kind != LOG_DBF && o->kind != LOG_MF) return;
+    if (o->kind != LOG_DBF && o->kind != LOG_SLC && o->kind != LOG_MF) return;
     if (!(L->mask & o->kind)) return;
-    CBlock *c = o->kind == LOG_DBF ? &j->dbf[o->pulse] : &j->mf[o->pulse];
-    const int n = o->kind == LOG_DBF ? o->nSamples : o->nRange;
+    CBlock *c = o->kind == LOG_DBF ? &j->dbf[o->pulse] : o->kind == LOG_SLC ? &j->slc[o->pulse] : &j->mf[o->pulse];
+    const int n = o->kind == LOG_MF ? o->nRange : o->nSamples;
     const size_t m = (size_t)o->nBeams * n;
     float *re = realloc(c->re, sizeof(float) * (m ? m : 1)), *im = re ? realloc(c->im, sizeof(float) * (m ? m : 1)) : NULL;
     if (re) c->re = re;

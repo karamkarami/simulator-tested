@@ -115,6 +115,42 @@ static double num_or(const char *path, double def)
     return has(path) && !empty(path) ? num(path) : def;
 }
 
+/* A numeric row/column/empty of cfg.<path> (or missing): its values into out (at most maxN), the count. */
+static int num_list(const char *path, double *out, int maxN)
+{
+    if (!has(path)) return 0;
+    const MValue *v = field(path, 1);
+    if (v->type != MV_NUM || (v->rows > 1 && v->cols > 1)) fail("cfg.%s must be a row of numbers", path);
+    const int n = v->rows * v->cols;
+    if (n > maxN) fail("cfg.%s has too many values (%d, at most %d)", path, n, maxN);
+    for (int i = 0; i < n; i++) out[i] = v->re[i];
+    return n;
+}
+
+/* Element numbers cfg.rx.<f> (1-based in the file): distinct whole numbers 1 ... nCh, 0-based into ch
+ * ([] or missing: the default list, none for def < 0, all for def = 0). Returns the count. */
+static int channel_list(const char *f, int nCh, int def, int *ch)
+{
+    char path[64];
+    snprintf(path, sizeof path, "rx.%s", f);
+    double *v = xcalloc((size_t)nCh + 64, sizeof(double));
+    int n = num_list(path, v, nCh + 64);
+    if (n == 0) {
+        free(v);
+        if (def < 0) return 0;
+        for (int k = 0; k < nCh; k++) ch[k] = k;
+        return nCh;
+    }
+    for (int i = 0; i < n; i++) {
+        int bad = !(v[i] >= 1 && v[i] <= nCh && v[i] == floor(v[i]));
+        for (int j = 0; j < i && !bad; j++) bad = v[j] == v[i];
+        if (bad) fail("cfg.rx.%s must list distinct element numbers 1 ... cfg.ant.nElements = %d.", f, nCh);
+        ch[i] = (int)v[i] - 1;
+    }
+    free(v);
+    return n;
+}
+
 static const char *str(const char *path)
 {
     const MValue *v = field(path, 1);
@@ -1324,7 +1360,7 @@ static void board_four(const char *path, const double *max, double *out, double 
 
 /* Checks of the VBDR stream (cfg.udp.format, cfg.udp.vbdr) and of the board settings (cfg.board,
  * cfg.fcMin_Hz / fcMax_Hz) as vbdr_setup.m. Returns 1 for the format 'vbdr', 0 for 'rddc'. */
-static int vbdr_check(int nDdc, int nChUsed, const Wave *wv)
+static int vbdr_check(int nDdc, const int *chUsed, int nChUsed, const Wave *wv)
 {
     int isVbdr = 0;
     if (has("udp.format") && !empty("udp.format")) {
@@ -1362,9 +1398,11 @@ static int vbdr_check(int nDdc, int nChUsed, const Wave *wv)
     if (!(nOp == floor(nOp) && nOp >= 1 && nOp <= 255)) fail("cfg.board.nOperationModes must be a whole number 1 ... 255.");
     if (!(op == floor(op) && op >= 1 && op <= nOp))
         fail("cfg.board.operationMode must be a whole number 1 ... cfg.board.nOperationModes = %.0f.", nOp);
-    if (isVbdr && nChUsed > 4)
-        fail("cfg.udp.format = 'vbdr' carries 4 channels (CH1 main, CH2 ... CH4 = J1 ... J3): the receiver can process at "
-             "most 4 (cfg.rx.nChannelsUsed = %d; set cfg.rx.nChannelsUsed or cfg.ant.nElements <= 4).", nChUsed);
+    for (int k = 0; k < nChUsed && isVbdr; k++)
+        if (chUsed[k] >= 4)
+            fail("cfg.udp.format = 'vbdr' carries 4 channels (CH1 main, CH2 ... CH4 = J1 ... J3): the element numbers of "
+                 "cfg.rx.nChannelsUsedDbf and cfg.rx.nChannelsUsedSlc must be 1 ... 4 (element %d is used; [] = all "
+                 "cfg.ant.nElements elements of the DBF).", chUsed[k] + 1);
     return isVbdr;
 }
 
@@ -1464,14 +1502,53 @@ static void export_config(void)
     const double rpm = rpm_choice(&nAvRpm), rate = rpm * 360.0 / 60.0;
     const int nCh = (int)num("ant.nElements");
     const double tilt = num("ant.tilt_deg");
-    /* the channels processed: the first cfg.rx.nChannelsUsed ([] or missing: all) */
-    int nChUsed = nCh;
-    if (has("rx.nChannelsUsed") && !empty("rx.nChannelsUsed")) {
-        const double v = num("rx.nChannelsUsed");
-        if (!(v >= 1 && v <= nCh && v == floor(v)))
-            fail("cfg.rx.nChannelsUsed must be a whole number 1 ... cfg.ant.nElements = %d (or [] = all).", nCh);
-        nChUsed = (int)v;
+    /* the elements processed: those of the DBF (cfg.rx.nChannelsUsedDbf, [] = all) and the auxiliary
+     * elements of the sidelobe canceller (cfg.rx.nChannelsUsedSlc), as setup_radar.m */
+    if (has("rx.nChannelsUsed"))
+        fail("cfg.rx.nChannelsUsed was replaced by cfg.rx.nChannelsUsedDbf (the numbers of the DBF elements, e.g. 1:4 for "
+             "the first 4) and cfg.rx.nChannelsUsedSlc (the auxiliary elements of the SLC).");
+    if (nCh < 1) fail("cfg.ant.nElements must be at least 1.");
+    int *chDbf = xcalloc((size_t)nCh, sizeof(int)), *chSlc = xcalloc((size_t)nCh, sizeof(int));
+    const int nChUsed = channel_list("nChannelsUsedDbf", nCh, 0, chDbf);
+    const int nAux = channel_list("nChannelsUsedSlc", nCh, -1, chSlc);
+    for (int a = 0; a < nAux; a++)
+        for (int k = 0; k < nChUsed; k++)
+            if (chSlc[a] == chDbf[k])
+                fail("cfg.rx.nChannelsUsedSlc and cfg.rx.nChannelsUsedDbf have the element %d in common: an auxiliary "
+                     "element of the SLC must not be one of the DBF ([] = all elements are DBF elements).", chSlc[a] + 1);
+    int allDbf = nChUsed == nCh;                         /* the elements 1 ... nCh in their order */
+    for (int k = 0; k < nChUsed && allDbf; k++) allDbf = chDbf[k] == k;
+    /* sidelobe canceller (cfg.slc; slc_setup of setup_radar.m) */
+    const int slcOn = has("slc.enable") && !empty("slc.enable") && num("slc.enable") != 0;
+    int slcMethod = 0;
+    if (has("slc.algorithm") && !empty("slc.algorithm")) {
+        const char *a = str("slc.algorithm");
+        slcMethod = same_text(a, "qrd-smi") ? 0 : same_text(a, "qrd-rls") ? 1 : same_text(a, "nlms") ? 2 : -1;
+        if (slcMethod < 0) fail("cfg.slc.algorithm must be 'qrd-smi', 'qrd-rls' or 'nlms'.");
     }
+    const double slcTrainCells = num_or("slc.trainCells", 128);
+    if (!(slcTrainCells >= 1 && slcTrainCells == floor(slcTrainCells))) fail("cfg.slc.trainCells must be a whole number >= 1.");
+    double slcTrainIv[2][2];
+    int slcTrainSet[2] = { 0, 0 };
+    for (int i = 0; i < 2; i++) {
+        snprintf(p, sizeof p, "slc.trainRange_m.%s", names[i]);
+        const int n = num_list(p, slcTrainIv[i], 2);
+        if (n == 0) continue;
+        if (n != 2 || !isfinite(slcTrainIv[i][0]) || !isfinite(slcTrainIv[i][1]) || slcTrainIv[i][1] <= slcTrainIv[i][0] ||
+            slcTrainIv[i][0] < 0)
+            fail("cfg.slc.trainRange_m.%s must be [r1 r2] with 0 <= r1 < r2 [m] (or []).", names[i]);
+        slcTrainSet[i] = 1;
+    }
+    const double slcLoading = num_or("slc.smiLoading_dB", -30), slcLambda = num_or("slc.rlsLambda", 0.999);
+    const double slcDelta = num_or("slc.rlsDelta_dB", -20), slcMu = num_or("slc.nlmsMu", 0.1), slcEps = num_or("slc.nlmsEps", 1);
+    if (!isfinite(slcLoading)) fail("cfg.slc.smiLoading_dB must be a finite number [dB].");
+    if (!(slcLambda > 0 && slcLambda <= 1)) fail("cfg.slc.rlsLambda must be in (0, 1].");
+    if (!isfinite(slcDelta)) fail("cfg.slc.rlsDelta_dB must be a finite number [dB].");
+    if (!(slcMu > 0 && slcMu < 2)) fail("cfg.slc.nlmsMu must be in (0, 2).");
+    if (!(slcEps >= 0 && isfinite(slcEps))) fail("cfg.slc.nlmsEps must be a number >= 0.");
+    if (slcOn && nAux == 0)
+        fail("cfg.slc.enable = true needs the auxiliary elements cfg.rx.nChannelsUsedSlc (element numbers that are not in "
+             "cfg.rx.nChannelsUsedDbf).");
 
     /* DDC filters and rates (ddc_decimation.m) */
     const double outRate = num("ddc.outputRate_Hz");
@@ -1818,7 +1895,11 @@ static void export_config(void)
         const double t1 = (double)(m0 + (long)k * ddc.D2 * ddc.D1) / fs + (ddc.L1 - 1) / 2.0 / fs;
         tDdc[k] = t1 + (ddc.L2 - 1) / 2.0 / fs1;
     }
-    const int udpFormat = vbdr_check(nDdc, nChUsed, wv);   /* cfg.udp.format: 0 rddc, 1 vbdr */
+    int *chUsed = xcalloc((size_t)(nChUsed + nAux), sizeof(int));
+    memcpy(chUsed, chDbf, sizeof(int) * (size_t)nChUsed);
+    memcpy(chUsed + nChUsed, chSlc, sizeof(int) * (size_t)nAux);
+    const int udpFormat = vbdr_check(nDdc, chUsed, nChUsed + nAux, wv);   /* cfg.udp.format: 0 rddc, 1 vbdr */
+    free(chUsed);
 
     /* CFAR window size check of the receive intervals */
     for (int i = 0; i < 2; i++) {
@@ -1852,6 +1933,30 @@ static void export_config(void)
             w->delay_s[k] = tDdc[first + k] - 0.5 / fsOut - w->tTx_s;
             w->range_m[k] = c * w->delay_s[k] / 2;
         }
+    }
+    /* SLC training samples of every sub-pulse (0-based, contiguous): the last trainCells samples of the
+     * receive window, or those whose range lies in cfg.slc.trainRange_m.<pulse> */
+    int slcTrainFirst[2] = { 0, 0 }, slcTrainCount[2] = { 0, 0 };
+    for (int i = 0; i < 2 && slcOn; i++) {
+        Wave *w = &wv[i];
+        if (!w->enable) continue;
+        const int f0 = w->rxFirst - 1;
+        if (!slcTrainSet[i]) {
+            slcTrainCount[i] = w->rxCount < (int)slcTrainCells ? w->rxCount : (int)slcTrainCells;
+            slcTrainFirst[i] = f0 + w->rxCount - slcTrainCount[i];
+            continue;
+        }
+        int first = -1, count = 0;
+        for (int k = 0; k < w->rxCount; k++) {
+            const double r = c * (tDdc[f0 + k] - 0.5 / fsOut - w->tTx_s) / 2;
+            if (r >= slcTrainIv[i][0] && r <= slcTrainIv[i][1]) { if (first < 0) first = f0 + k; count++; }
+        }
+        if (count == 0)
+            fail("cfg.slc.trainRange_m.%s = [%g %g] has no sample of the %s-pulse receive window (%.2f ... %.2f km).",
+                 names[i], slcTrainIv[i][0], slcTrainIv[i][1], names[i],
+                 c * (tDdc[f0] - 0.5 / fsOut - w->tTx_s) / 2e3, c * (tDdc[f0 + w->rxCount - 1] - 0.5 / fsOut - w->tTx_s) / 2e3);
+        slcTrainFirst[i] = first;
+        slcTrainCount[i] = count;
     }
     /* handover */
     const int oR = guardR + trainR;
@@ -1890,8 +1995,8 @@ static void export_config(void)
         w->testLast = last;
     }
 
-    /* DBF (the first nChUsed elements: the first nChUsed columns of the matrix, every beam scaled to
-     * unit noise gain again, unless the matrix has nChUsed columns) */
+    /* DBF of the elements chDbf: the columns of the matrix of these elements, every beam scaled to unit
+     * noise gain again (a matrix with nChUsed columns is used as it is) */
     const int dbf = nChUsed > 1;
     int nBeams = 1;
     double *wRe = NULL, *wIm = NULL, *beamU = NULL, *beamElKeep = NULL;
@@ -1922,15 +2027,25 @@ static void export_config(void)
             beamEl = xcalloc((size_t)nBeams, sizeof(double));
             memcpy(beamEl, el->re, sizeof(double) * (size_t)nBeams);
         }
-        {                                                /* the sub-array of the first nChUsed elements */
+        {                                                /* the sub-array of the elements chDbf */
             const int cols = stale ? nCh : (int)mat_var(&df, "W", "dbf")->cols;
-            if (cols != nChUsed) {
+            if (cols == nCh && !allDbf) {
+                double *sr = xcalloc((size_t)(nBeams * nChUsed), sizeof(double));
+                double *si = xcalloc((size_t)(nBeams * nChUsed), sizeof(double));
+                for (int k = 0; k < nChUsed; k++)
+                    for (int b = 0; b < nBeams; b++) {
+                        sr[b + k * nBeams] = wRe[b + chDbf[k] * nBeams];
+                        si[b + k * nBeams] = wIm[b + chDbf[k] * nBeams];
+                    }
                 for (int b = 0; b < nBeams; b++) {
                     double nrm = 0;
-                    for (int k = 0; k < nChUsed; k++) nrm += wRe[b + k * nBeams] * wRe[b + k * nBeams] + wIm[b + k * nBeams] * wIm[b + k * nBeams];
+                    for (int k = 0; k < nChUsed; k++) nrm += sr[b + k * nBeams] * sr[b + k * nBeams] + si[b + k * nBeams] * si[b + k * nBeams];
                     nrm = sqrt(nrm);
-                    for (int k = 0; k < nChUsed; k++) { wRe[b + k * nBeams] /= nrm; wIm[b + k * nBeams] /= nrm; }
+                    for (int k = 0; k < nChUsed; k++) { sr[b + k * nBeams] /= nrm; si[b + k * nBeams] /= nrm; }
                 }
+                free(wRe); free(wIm);
+                wRe = sr;
+                wIm = si;
             }
         }
         beamU = xcalloc((size_t)nBeams, sizeof(double));
@@ -2063,6 +2178,12 @@ static void export_config(void)
     /* ---------------------------------------------------------------- */
     rec_scalar("nCh", nCh);
     rec_scalar("nChUsed", nChUsed);
+    {
+        double *v = xcalloc((size_t)nChUsed, sizeof(double));
+        for (int k = 0; k < nChUsed; k++) v[k] = chDbf[k];
+        rec_vec("chDbf", v, nChUsed, 0);
+        free(v);
+    }
     rec_scalar("nBeams", nBeams);
     rec_scalar("dbfEnabled", dbf);
     if (dbf) {                                           /* the first nChUsed columns (column-major) */
@@ -2071,6 +2192,19 @@ static void export_config(void)
         if (wCplx) memcpy(r->im, wIm, sizeof(double) * (size_t)(nBeams * nChUsed));
     }
     rec_vec("beamU", beamU, nBeams, 1);
+    rec_scalar("slcEnabled", slcOn);
+    if (slcOn) {
+        double *v = xcalloc((size_t)nAux, sizeof(double));
+        for (int k = 0; k < nAux; k++) v[k] = chSlc[k];
+        rec_vec("chSlc", v, nAux, 0);
+        free(v);
+        rec_scalar("slcMethod", slcMethod);
+        rec_scalar("slcSmiLoading_dB", slcLoading);
+        rec_scalar("slcRlsLambda", slcLambda);
+        rec_scalar("slcRlsDelta_dB", slcDelta);
+        rec_scalar("slcNlmsMu", slcMu);
+        rec_scalar("slcNlmsEps", slcEps);
+    }
     rec_scalar("tilt_deg", tilt);
     rec_scalar("height_m", num("ant.height_m"));
     rec_scalar("rate_dps", rate);
@@ -2092,6 +2226,10 @@ static void export_config(void)
         pfx(nm, n, "_rxCount");    rec_scalar(nm, w->rxCount);
         pfx(nm, n, "_ddcFirst");   rec_scalar(nm, w->ddcFirst1 - 1);
         pfx(nm, n, "_ddcCount");   rec_scalar(nm, w->ddcCount);
+        if (slcOn) {
+            pfx(nm, n, "_slcTrainFirst"); rec_scalar(nm, slcTrainFirst[i]);
+            pfx(nm, n, "_slcTrainCount"); rec_scalar(nm, slcTrainCount[i]);
+        }
         pfx(nm, n, "_nTaps");      rec_scalar(nm, w->nTaps);
         pfx(nm, n, "_nRange");     rec_scalar(nm, w->nRange);
         pfx(nm, n, "_taps");       rec_cvec(nm, w->tapsRe, w->tapsIm, w->nTaps);
@@ -2378,7 +2516,7 @@ static void export_config(void)
     }
     (void)trackEnable;
     free(beamElKeep); free(g_qs); free(g_qw); g_qs = g_qw = NULL; free(ceLz); free(ceLG);
-    free(pri); free(mti); free(tDdc); free(wRe); free(wIm); free(beamU); free(win); free(fHz);
+    free(pri); free(mti); free(tDdc); free(wRe); free(wIm); free(beamU); free(win); free(fHz); free(chDbf); free(chSlc);
     free(noiseGain); free(ddc.h1); free(ddc.h2); free(stv.nufftRe); free(stv.nufftIm); free(stv.nufftGain);
     for (int j = 0; j < nScanPrf; j++) { free(s2s[j].win); free(s2s[j].fHz); free(s2s[j].noiseGain); }
     free(s2s); free(scanPrf);

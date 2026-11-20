@@ -35,7 +35,9 @@ or `radar_receiver_linux/README.md`; below `radar_receiver_<os>`).
         |                       \--> optional UDP: int16 DDC output + pulse/scan/azimuth header
         |                             (-> radar_receiver_<os>/, the same processing in C)
         v  split in time: short-pulse samples | long-pulse samples
- DBF (21 x 48 matrix, off for 1 element; the first cfg.rx.nChannelsUsed channels) -> [21 beams x nSamples] per sub-pulse
+ DBF (21 x 48 matrix, off for 1 element; the elements cfg.rx.nChannelsUsedDbf) -> [21 beams x nSamples] per sub-pulse
+ SLC (optional, cfg.slc): every beam minus the auxiliary elements cfg.rx.nChannelsUsedSlc with adaptive
+         weights (QRD-SMI, QRD-RLS or NLMS, trained in every PRI)  -> [21 beams x nSamples]
  Pulse compression (valid convolution): matched filter (range window for LFM, cfg.proc.rangeWindow) or, for a phase code,
          the mismatch filter of inputs/phase_code.mat      -> [21 beams x nRange]   (range/delay axes)
  CPI buffer (circular, the pulses of one CPI)              -> [21 x nRange x 114], short and long
@@ -326,7 +328,7 @@ file was built for other values (for example after you change
 | `make_input_files.m` | default input .mat files |
 | `src/setup_radar.m` | derives the PRI timeline, NCO, DDC segments, pulse compression filters (matched / mismatch), axes, CPI length, FFT length, CFAR factor ... |
 | `src/mismatch_filter.m`, `ddc_pulse.m` | mismatch filter with the smallest peak sidelobe for a code or a sampled pulse; the pulse after the DDC filters |
-| `src/generate_rx_signal.m`, `clutter_init.m`, `clutter_signal.m`, `adc_sample.m` | signal generation |
+| `src/generate_rx_signal.m`, `clutter_init.m`, `clutter_signal.m`, `adc_sample.m` | signal generation (targets, clutter, noise jammers `cfg.jammer`, leakage, STC, noise) |
 | `src/clutter_terrain.m` | terrain map of the clutter: land, mountains, hills, desert, sea; shadowing and horizon, elevation groups |
 | `src/clutter_cnr.m` | CNR of uniform clutter at the matched filter output (`cfg.clutter.cnr_dB` -> sigma0) |
 | `src/stc_gain.m` | STC: gain of the attenuator in front of the receiver over the PRI (`cfg.rx.stc`; 1 with `cfg.rx.stc.enable = false`) |
@@ -340,6 +342,7 @@ file was built for other values (for example after you change
 | `src/udp_sender_open.m`, `udp_make_packets.m`, `udp_send_pulse.m`, `udp_send_packets.m`, `udp_send_datagram.m`, `udp_sender_close.m`, `udp_receiver_open.m`, `udp_receive_pulse.m` | UDP streaming of the DDC output (sender and reference receiver) |
 | `src/ddc_segment.m` | DDC samples of a sub-pulse for the pulse compression (zeros outside its receive interval) |
 | `src/digital_beamforming.m` | DBF |
+| `src/sidelobe_canceller.m` | sidelobe canceller after the DBF: weights by QRD-SMI, QRD-RLS (Givens rotations) or NLMS from the training samples, carried over the PRIs (`cfg.slc`) |
 | `src/matched_filter.m`, `plot_range_profile.m` | pulse compression, range/delay/index plots |
 | `src/cpi_buffer_*.m` | circular CPI buffers |
 | `src/mti_filter.m`, `doppler_process.m` | clutter filter (canceller or FIR filter, `cfg.mti.type`), Doppler processing |
@@ -354,8 +357,9 @@ file was built for other values (for example after you change
 | `src/prune_peaks.m`, `detection_reports.m`, `plot_extractor*.m` | pruning (local peaks, sidelobes) and plot extraction |
 | `src/peak_interpolation.m` | interpolation of the detected peaks: radial velocity across the Doppler bins, elevation across the beams (`cfg.report.dopplerInterp`, `elevationInterp`) |
 | `src/ppi_init.m`, `ppi_update.m`, `ppi_callbacks.m` | interactive PPI display |
-| `src/ppi_video_init.m`, `ppi_video_add.m`, `ppi_video_add_row.m`, `ppi_video_reset.m`, `ppi_video_image.m`, `ppi_video_colormap.m` | raw data map of the PPI (display modes *Video*, *DBF out*, *MF out*) |
-| `src/ppi_profile_row.m`, `ppi_rd_map.m` | DBF / pulse compression output of the selected beam joined in range (*DBF out*, *MF out*); range-Doppler map of the selected beam (second tab of the PPI) |
+| `src/ppi_video_init.m`, `ppi_video_add.m`, `ppi_video_add_row.m`, `ppi_video_reset.m`, `ppi_video_image.m`, `ppi_video_colormap.m` | raw data map of the PPI (display modes *Video*, *DBF out*, *SLC out*, *MF out*) |
+| `src/ppi_profile_row.m`, `ppi_rd_map.m` | DBF / SLC / pulse compression output of the selected beam joined in range (*DBF out*, *SLC out*, *MF out*); range-Doppler map of the selected beam (second tab of the PPI) |
+| `src/ppi_display_modes.m` | the display modes of the PPI (*DBF out* only with the DBF, *SLC out* only with the SLC) |
 | `src/detection_log_init.m`, `detection_log_add.m` | CFAR detections kept for the PPI |
 | `src/cfar_pfa.m` | false alarm probability of a CFAR threshold of any detector (inverse of `cfar_alpha.m`) |
 | `src/snr_budget.m`, `print_snr_budget.m` | expected SNR after every block (incl. STC, ADC noise and DDC rounding; blind speeds marked) |
@@ -655,16 +659,61 @@ there, at the same beam and Doppler, behind very strong far targets.
   spaced in sine space with a Taylor taper. With 1 element the DBF block is
   skipped, the single channel goes straight to the matched filter, and
   plots carry no elevation (NaN).
-* **Channels used** (`cfg.rx.nChannelsUsed`, `radar_config.m`): the DDC
-  output keeps all `cfg.ant.nElements` channels (simulation, DDC files, UDP
-  stream, logs), but the processing uses only the first `nChannelsUsed` of
-  every PRI (`[]` = all). With 1 the DBF is off (one beam, no elevation);
-  with more the DBF uses the first `nChannelsUsed` columns of its matrix,
-  every beam scaled to unit noise gain again (the sub-array of the first
-  elements; a DBF file of your own may also have `nChannelsUsed` columns).
-  The C receiver gets it as `nChUsed` and accepts PRIs with at least that
-  many channels (e.g. a DDC stream of 4 channels of which only the first is
-  processed); its raw video averages the same channels.
+* **Elements used** (`radar_config.m`): `cfg.ant.nElements` is the number of
+  all elements; the DDC output keeps all of them (simulation, DDC files, UDP
+  stream, logs). The processing uses two lists of element numbers
+  (1 ... `nElements`, distinct, in any order; not every element has to be
+  used):
+  * `cfg.rx.nChannelsUsedDbf`: the elements the DBF combines (`[]` = all).
+    With one element the DBF is off (one beam, no elevation); with more the
+    DBF uses the columns of its matrix of these elements, every beam scaled
+    to unit noise gain again (a DBF file of your own may also have one
+    column per listed element).
+  * `cfg.rx.nChannelsUsedSlc`: the auxiliary elements of the sidelobe
+    canceller (below); none of them may be in `nChannelsUsedDbf` (with
+    `nChannelsUsedDbf = []` every element is a DBF element, so the DBF list
+    must be given then).
+  The old `cfg.rx.nChannelsUsed` stops with a message. The C receiver gets
+  the lists as `chDbf` / `chSlc` (0-based) and accepts PRIs with the
+  channels up to the largest element number used (e.g. a DDC stream of 4
+  channels); its raw video averages the DBF elements.
+* **Sidelobe canceller (SLC)** (`cfg.slc`, `radar_config.m`; off by
+  default): after the DBF, before the pulse compression. Every beam (the
+  main channel; the single element without DBF) gets the auxiliary elements
+  subtracted with adaptive weights, `y_b = beam_b - w_b' * x_aux`. The
+  weights of every beam and sub-pulse are estimated in every PRI from
+  **training samples** of its receive window and applied to the whole
+  window: the last `cfg.slc.trainCells` samples (default 128: the far end of
+  the window, where there is no clutter), or the samples whose range lies in
+  `cfg.slc.trainRange_m.<pulse> = [r1 r2]` (e.g. for the short pulse, whose
+  window may end inside the clutter). `cfg.slc.algorithm`:
+  * `'qrd-smi'` (default): least squares of the training samples of this
+    PRI by a QR decomposition, diagonal loading `smiLoading_dB` (-30 dB)
+    relative to the mean power of an auxiliary element;
+  * `'qrd-rls'`: the same recursively (Givens rotations) over the training
+    samples, carried from PRI to PRI with the forgetting factor `rlsLambda`
+    (0.999 per sample); the first PRI starts with the loading `rlsDelta_dB`;
+  * `'nlms'`: normalised LMS (step `nlmsMu` 0.1, regularisation `nlmsEps`
+    1 LSB^2), carried from PRI to PRI.
+  A strong target inside the training samples is partly cancelled too, and a
+  jammer in the main beam of a beam cannot be cancelled without the target
+  of that direction. `sidelobe_canceller.m`; the C receiver does the same in
+  double precision (`processor.c`; it equals MATLAB to 1e-6). The PPI shows
+  the SLC output of the selected beam (display mode *SLC out*, only with the
+  SLC; *DBF out* is the output before the SLC, only with the DBF).
+* **Noise jammers** (`cfg.jammer`, off by default): one value per jammer in
+  every vector: effective radiated power `erp_W`, noise bandwidth
+  `bandwidth_Hz` around `fc_Hz` (`[]` = `cfg.fc`), azimuth `az_deg`,
+  elevation `el_deg` and distance `range_m` (fixed). In every PRI every
+  element receives `ERP * Grx * lambda^2 / ((4 pi R)^2 L)` times its azimuth
+  and elevation patterns (also through the azimuth sidelobes), with the
+  phase of the jammer's direction, as band-limited Gaussian noise on the IF
+  of the receiver LO, through the STC (`generate_rx_signal.m`; the C
+  generator `radar_generate_ddc` and `radar_live_sim` (full and fast
+  fidelity) do the same with their own random numbers). The run summary
+  prints its power over the noise of an element in the DDC band with the
+  antenna toward it (2 W at 50 km: 38 dB; much more overloads the ADC with
+  the default receiver gain).
 * **Pulse compression** (`cfg.wave.<pulse>.compression`): LFM uses its
   matched filter weighted with the range window of the mode
   (`cfg.proc.rangeWindow`: `'taylor'` (default; `rangeWindowNbar`,
@@ -1101,7 +1150,7 @@ The PPI (`ppi_init.m`) is interactive, also while the simulation runs:
 | click on a plot or detection | pin its data tip (click again to remove it) |
 | keys `+` `-`, arrows | zoom, pan |
 | key `c` | remove the pinned data tips |
-| key `d` | next display mode (plots / detections / both / video / DBF out / MF out) |
+| key `d` | next display mode (plots / detections / both / video / DBF out / SLC out / MF out; DBF out only with the DBF, SLC out only with the SLC) |
 | key space, *Pause display* button | pause/resume the display (the simulation continues; nothing new is drawn, also not in the range-Doppler tab, until Resume shows the newest data) |
 
 The figure opens maximized and has two tabs (buttons above the display;
@@ -1189,8 +1238,13 @@ The panel on the right has:
   out*, while in *DBF out* its uncompressed echo is spread over the pulse
   length (22.5 km for the long pulse) and only a strong one stands out. The
   profile is computed only while one of these modes is shown (display time);
-  changing the mode or the beam starts an empty map.
-* **Beam**: the beam after the DBF of *DBF out*, *MF out* and of the
+  changing the mode or the beam starts an empty map. *SLC out* (only with
+  the sidelobe canceller, `cfg.slc.enable`): the same as *DBF out* after the
+  SLC, so the two show what the SLC removed (a jammer); *DBF out* is in the
+  list only with the DBF (more than one DBF element). A start mode that is
+  not in the list (`cfg.display.showMode`, `--ppi-show`) shows the plots.
+  The video averages the DBF elements (`cfg.rx.nChannelsUsedDbf`).
+* **Beam**: the beam after the DBF of *DBF out*, *SLC out*, *MF out* and of the
   range-Doppler tab (start value `cfg.display.beam`, default 1).
 * show/hide of the short- and long-pulse data, the true targets, range
   rings, plot labels (range and velocity next to each plot), the antenna and
@@ -1402,11 +1456,12 @@ board's documentation, `Data_Structure.pptx`). `cfg.udp.format` of
 
 Every PRI is one **stream** of N UDP packets (little-endian). Packets
 1 ... N/2 carry the first half (CH1 and CH2), packets N/2+1 ... N the second
-half (CH3 and CH4). CH1 is the main channel, the one the receiver processes;
-CH2 ... CH4 are the auxiliary channels J1 ... J3, carried along. The
+half (CH3 and CH4). CH1 is the main channel, CH2 ... CH4 are the auxiliary
+channels J1 ... J3 (e.g. the auxiliary elements of the sidelobe canceller:
+`cfg.rx.nChannelsUsedDbf = 1`, `cfg.rx.nChannelsUsedSlc = [2 3 4]`). The
 simulator sends its first 4 elements (missing ones as zeros); with
-`'vbdr'` the receiver processes at most these 4 channels
-(`cfg.rx.nChannelsUsed <= 4`, checked by `setup_radar` and the export).
+`'vbdr'` the element numbers of both lists must be 1 ... 4 (checked by
+`setup_radar` and the export).
 
 Every packet starts with a 28-byte label:
 
@@ -1631,7 +1686,8 @@ budget.
 | `test_clutter` | clutter power and terrain (5 min): the CNR measured at the matched filter output equals `cfg.clutter.cnr_dB` (60, 72.7, 85 dB) and `cnr_dB = []` keeps `sigma0_dB`; desert and sea 15 dB below land; nothing flat beyond the horizon, mountains seen beyond it, their back slopes shadowed, one steering vector per elevation group; internal motion of every type (sea: its drift); no ADC clipping over 360 deg at the default CNR, clipping above the warning at +15 dB; one CPI over land, hills, mountains, desert and sea: the target detected, nothing else |
 | `test_scenarios(scenario, ...)` | several scans (default 3, 48 elements, fixed PRF, terrain clutter) of the `'six'`, `'challenge'` or `'random'` scenario through `run_radar_sim`, with the simulated sectors around every look at every target. A target is expected in a scan unless it is at a blind speed, has less than 3 dB of SNR margin, is out of range or lies in the CFAR window of a stronger (or nearly as strong) target of the same pulse; it must give plots in all expected scans but one and, with enough scans, a confirmed track (not required above the DBF beams, 40 deg, for a 3-D track, or for a crosser faster than 15 deg per scan); at most 2 false plots per scan, no false confirmed track, no ADC overload; a maneuvering target (more than 2 m/s^2: C11 - C13) needs its track only with the PMBM tracker; options: `'prf'`, `'terrain'` (`'uniform'`, `'regions'`, `'off'`), `'cnrOffset'`, `'gainOffset'`, `'nElements'`, `'seed'`, `'method'` (`'ekf'`, `'pmbm'`) |
 | `test_multi_scan(mode, nScans, buildDir, replayOnly, trackMethod, cfarType)` | several scans of the six-target scenario through the C receiver (DDC files, `radar_stream_send`): every PRI received, a confirmed track on every target not at a blind speed, no confirmed false track, at most 2 false plots per scan; `replayOnly` processes the recording of an earlier run again, also with another tracker (`'ekf'`, `'pmbm'`) or CFAR detector |
-| `test_processing_options` | the windows of `window_function.m` (Chebyshev and Kaiser equal `chebwin` / `kaiser`, the peak sidelobe level and mainlobe of every window, the non-uniform evaluation equals the uniform window at uniform positions, unknown names refused for range, Doppler and NUFFT); the range window of the LFM matched filter (Taylor, Chebyshev lower the range sidelobes); the NUFFT of the staggered PRF (a flat noise floor of 1 in every bin for every stagger phase, the bins equal the direct non-uniform DFT, a target at +250 m/s in its own bin where the de-interleaved rows fold it, the notch bin at zero velocity, none on a grid without it); `cfg.rx.nChannelsUsed` (4 of 48: a DBF matrix of 4 columns with unit noise gain; 1: no DBF; 0 or 49 refused) |
+| `test_processing_options` | the windows of `window_function.m` (Chebyshev and Kaiser equal `chebwin` / `kaiser`, the peak sidelobe level and mainlobe of every window, the non-uniform evaluation equals the uniform window at uniform positions, unknown names refused for range, Doppler and NUFFT); the range window of the LFM matched filter (Taylor, Chebyshev lower the range sidelobes); the NUFFT of the staggered PRF (a flat noise floor of 1 in every bin for every stagger phase, the bins equal the direct non-uniform DFT, a target at +250 m/s in its own bin where the de-interleaved rows fold it, the notch bin at zero velocity, none on a grid without it); `cfg.rx.nChannelsUsedDbf` (elements 1:4 and [3 10 17 40] of 48: the columns of these elements with unit noise gain; one element: no DBF; 0, 49, repeated or fractional numbers refused), the old `cfg.rx.nChannelsUsed` refused, `cfg.rx.nChannelsUsedSlc` (an element in both lists, the SLC without auxiliary elements refused) |
+| `test_slc` | the sidelobe canceller: `sidelobe_canceller.m` on synthetic data (a 30 dB jammer cancelled to within 1 dB of the noise by QRD-SMI and QRD-RLS, 2 dB by NLMS, a target outside the training samples kept, without a jammer less than 0.5 dB more noise, QRD-SMI equal to the QRD-RLS Givens rotations with lambda 1, two jammers); the jammer model (its power over the noise of an element as the run summary predicts, the azimuth pattern, the phase step from element to element); `radar_generate_ddc` and `radar_live_sim` (full and fast) the same power and phase as MATLAB; the C receiver on the DDC files of `run_radar_sim` with the jammer: its logged DBF and SLC outputs equal MATLAB's for every algorithm; the display modes (*DBF out* only with the DBF, *SLC out* only with the SLC); one main element with an SLC; (not `test_slc(true)`) a weak target behind the elevation sidelobe of a jammer: detected without it, missed with it, detected again with every SLC algorithm |
 | `test_cfar` | the five CFAR detectors (CA, GO, SO, OS, CE) with the three windows on exponential noise: false alarm rate 1e-3 in the interior (CA also at the range edges, the shifted window; GO / SO edges reported), targets in the first and last range cell detected, only the tested range interval is tested, the noise estimate equals the statistic computed directly from the (shifted) window, also when the whole tested interval lies within the edge cells; OS and CE testing only the local maxima gives the same local maxima as testing every cell; `cfar_pfa` against the single-look closed forms of CA, GO, SO and OS, and for CE (the censored mean of the exponential order statistics) within 0.2 % |
 | `test_tracker_pmbm` | PMBM tracker with IMM-UKF on synthetic plots (target positions from `target_state`, plots at the antenna looks, errors of `cfg.track`, folded radial velocity), 3-D and 2-D, against the EKF on the same plots: six targets with 8 false plots per scan (fixed and staggered PRF): one confirmed track per target, no false track; a 4 deg/s turn: one track, smaller position error than the EKF, CT dominant in the turn; a 6 m/s^2 acceleration: one track, CA dominant, smaller velocity error than the EKF; Pd 0.7 with 30 false plots per scan: every target detected in the last 3 scans tracked, at most one false track; two targets 200 m apart and two crossing targets: no merge, no swap; track termination after the missed scans; speed gate; the 13 challenge targets with detections from the SNR budget: every target detected in the last 3 scans tracked, no false track |
 | `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA, with and without the radial velocity: one confirmed track per target, close to it, no false track; the radial velocity lowers the velocity error after two scans; staggered PRF (folded plot velocities): the track radial velocity is unfolded; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |

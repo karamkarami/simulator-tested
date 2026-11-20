@@ -329,7 +329,7 @@ if(RADAR_BUILD_TESTS)
     # the scan-to-scan PRF, radar mode 1, radar mode 7 with only the long pulse, radar mode 2 (short pulse sent at
     # 11 us, receive windows set in the PRI), the Blackman Doppler window and "agility": stagger pair 3,
     # phase codes 2 / 4 and a manual DDC record (1800 samples from 0 us)
-    foreach(variant IN ITEMS short_off long_off carriers tomht scan2scan lfm_mode mode7 mode2 blackman agility
+    foreach(variant IN ITEMS short_off long_off carriers tomht scan2scan lfm_mode mode7 mode2 blackman agility slc
                              ce nufft channels windows)
         if(variant STREQUAL "short_off")
             set(stmt "cfg.wave.short.enable = false;")
@@ -357,8 +357,11 @@ if(RADAR_BUILD_TESTS)
             # staggered PRF with the NUFFT Doppler processing (Chebyshev window of the non-uniform samples)
             set(stmt "cfg.prf.mode = 'staggered'; cfg.proc.staggerDoppler = 'nufft'; cfg.proc.nufft.window = 'chebyshev';")
         elseif(variant STREQUAL "channels")
-            # the first 4 of the 48 channels processed (DBF of the sub-array)
-            set(stmt "cfg.rx.nChannelsUsed = 4;")
+            # 4 of the 48 elements in the DBF (a sub-array of elements 5 ... 8: not the first channels)
+            set(stmt "cfg.rx.nChannelsUsedDbf = [5 6 7 8];")
+        elseif(variant STREQUAL "slc")
+            # DBF of the elements 1 ... 44, sidelobe canceller with the elements 45 ... 48
+            set(stmt "cfg.rx.nChannelsUsedDbf = 1:44; cfg.rx.nChannelsUsedSlc = 45:48; cfg.slc.enable = true;")
         elseif(variant STREQUAL "windows")
             # LFM mode with a Kaiser range window and a Taylor Doppler window
             set(stmt "cfg.modes.active = 1; cfg = apply_radar_mode(cfg); cfg.proc.rangeWindow = 'kaiser'; cfg.proc.dopplerWindow = 'taylor';")
@@ -392,7 +395,7 @@ if(RADAR_BUILD_TESTS)
     add_test(NAME live_sim_fast COMMAND radar_live_sim --quiet --no-board --fidelity fast --max-pulses 300 --port 50471
              --set "cfg.ant.nElements = 1;" --set "cfg.clutter.enable = false;")
     add_test(NAME live_sim_vbdr COMMAND radar_live_sim --quiet --no-board --format vbdr --max-pulses 20 --speed 0.1 --port 50472
-             --set "cfg.sim.sectors_deg = [0 1];" --set "cfg.rx.nChannelsUsed = 4;")
+             --set "cfg.sim.sectors_deg = [0 1];" --set "cfg.rx.nChannelsUsedDbf = 1:4;")
     add_executable(test_udp_input tests/test_udp_input.c)
     target_link_libraries(test_udp_input PRIVATE radar_core)
     add_test(NAME udp_input COMMAND test_udp_input)

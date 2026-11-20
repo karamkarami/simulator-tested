@@ -1,8 +1,8 @@
 /*
  * video.c - raw video of the PPI ("Video" display mode), as ppi_video_add.m.
  *
- * The DDC output of a PRI is averaged non-coherently over the receive
- * elements (mean of I^2 + Q^2, before the beamforming and the pulse
+ * The DDC output of a PRI is averaged non-coherently over the DBF
+ * elements (cfg.rx.nChannelsUsedDbf; mean of I^2 + Q^2, before the beamforming and the pulse
  * compression). The receive intervals of both sub-pulses are cut out and
  * joined: the short-pulse samples nearer than the first long-pulse range
  * cell (the handover), then all long-pulse samples. Receive sample k of a
@@ -20,7 +20,10 @@ int video_layout_init(VideoLayout *v, const RadarConfig *cfg, double maxRange_m)
 {
     memset(v, 0, sizeof *v);
     if (!cfg || !(cfg->fsOut_Hz > 0) || !(maxRange_m > 0)) return -1;
-    v->nCh = cfg->nChUsed > 0 ? cfg->nChUsed : cfg->nCh;     /* the channels processed */
+    v->nCh = cfg->nChUsed > 0 ? cfg->nChUsed : cfg->nCh;     /* the DBF elements */
+    v->ch = malloc(sizeof(int) * (size_t)v->nCh);
+    if (!v->ch) return -1;
+    for (int k = 0; k < v->nCh; k++) v->ch[k] = cfg->chDbf ? cfg->chDbf[k] : k;
     v->dR_m = 299792458.0 / (2.0 * cfg->fsOut_Hz);
     v->nBins = (int)ceil(maxRange_m / v->dR_m);
     if (v->nBins < 1) v->nBins = 1;
@@ -68,7 +71,9 @@ void video_row(const VideoLayout *v, const PriData *pri, float *row)
         while (i0 + n < v->nSamples && v->sample[i0 + n] == v->sample[i0] + n) n++;
         const int first = v->sample[i0];
         if (first + n <= pri->nSamples) {
-            for (int ch = 0; ch < v->nCh && ch < pri->nCh; ch++) {
+            for (int k = 0; k < v->nCh; k++) {
+                const int ch = v->ch[k];
+                if (ch >= pri->nCh) continue;
                 const int16_t *restrict x = pri->iq + 2 * ((size_t)ch * (size_t)pri->nSamples + (size_t)first);
                 float *restrict a = acc + i0;
                 for (int k = 0; k < n; k++) {
@@ -89,5 +94,6 @@ void video_layout_free(VideoLayout *v)
     free(v->bin);
     free(v->binInv);
     free(v->acc);
+    free(v->ch);
     memset(v, 0, sizeof *v);
 }

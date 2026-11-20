@@ -120,6 +120,7 @@ for i = 1:2
 end
 plots = [];
 tracker = track_init(sys.track);
+slcState = struct('short', [], 'long', []);   % sidelobe canceller: weights / QRD state per sub-pulse
 blockUs = zeros(1, 10);                    % accumulated time of the blocks, console, display [us]
 nProcessed = 0;
 wasActive = false;
@@ -222,13 +223,16 @@ for k = 1:sched.nPulses
     end
     if strcmp(want.raw, 'video')                        % video of the PPI (display time)
         tb = tic;
-        ppi.video = ppi_video_add(ppi.video, I(:, 1:sys.nChUsed), Q(:, 1:sys.nChUsed), az, t);   % the channels used
+        ppi.video = ppi_video_add(ppi.video, I(:, sys.chDbf), Q(:, sys.chDbf), az, t);   % the DBF elements
         blockUs(10) = blockUs(10) + 1e6*toc(tb);
     end
     prof = {[], []};                                    % DBF / MF output of the selected beam (PPI)
     mfOut = struct('short', [], 'long', []);            % recordings of this PRI (cfg.io.saveMf / saveDoppler)
     dopOut = struct('short', [], 'long', []);
-    bb = complex(single(I(:, 1:sys.nChUsed)), single(Q(:, 1:sys.nChUsed)));   % the channels used (cfg.rx.nChannelsUsed)
+    bb = complex(single(I(:, sys.chDbf)), single(Q(:, sys.chDbf)));   % the DBF elements (cfg.rx.nChannelsUsedDbf)
+    if sys.slc.enable                                   % the auxiliary elements of the SLC
+        bbAux = complex(single(I(:, sys.slc.ch)), single(Q(:, sys.slc.ch)));
+    end
 
     % 4-9) Processing chain, separately for the short and the long sub-pulse
     priPlots = [];
@@ -245,6 +249,15 @@ for k = 1:sched.nPulses
         end
         blockUs(1) = blockUs(1) + 1e6*toc(tb);
         if strcmp(want.raw, 'dbf'), prof{i} = bm(min(want.beam, size(bm, 1)), :); end
+        if sys.slc.enable                               % sidelobe canceller (counted in the DBF time)
+            tb = tic;
+            tr = bb(wv.slcTrainIdx, :);                 % training samples of the main channels
+            if sys.dbf.enabled, mainTrain = digital_beamforming(tr, sys.dbf.W); else, mainTrain = tr.'; end
+            [bm, slcState.(p)] = sidelobe_canceller(slcState.(p), bm, ddc_segment(bbAux, wv).', mainTrain, ...
+                                                     bbAux(wv.slcTrainIdx, :).', sys.slc);
+            blockUs(1) = blockUs(1) + 1e6*toc(tb);
+            if strcmp(want.raw, 'slc'), prof{i} = bm(min(want.beam, size(bm, 1)), :); end
+        end
         tb = tic;
         rp = matched_filter(bm, wv);                    % [nBeams x nRange]
         blockUs(2) = blockUs(2) + 1e6*toc(tb);
@@ -306,7 +319,7 @@ for k = 1:sched.nPulses
         dopOut.azCenter_deg = info.azCenter_deg;  dopOut.tCenter_s = info.tCenter_s;
         save_block_file(cfg.io.dopplerFolder, 'doppler', cfg.io.matFormat, hdr, dopOut);
     end
-    if any(strcmp(want.raw, {'dbf', 'mf'}))             % DBF / MF output of the selected beam (display time)
+    if any(strcmp(want.raw, {'dbf', 'slc', 'mf'}))      % DBF / SLC / MF output of the selected beam (display time)
         tb = tic;
         ppi.video = ppi_video_add_row(ppi.video, ppi_profile_row(ppi.video, want.raw, prof), az, t);
         blockUs(10) = blockUs(10) + 1e6*toc(tb);
@@ -389,9 +402,9 @@ if cfg.console.enable
     if sys.track.enable && cfg.console.plots
         print_tracks(tracker);
     end
-    fprintf(['Mean processing time per PRI [us]: DBF %.0f, matched filter %.0f, MTI %.0f, Doppler %.0f, ' ...
+    fprintf(['Mean processing time per PRI [us]: DBF%s %.0f, matched filter %.0f, MTI %.0f, Doppler %.0f, ' ...
              'CFAR %s + pruning %.0f, peak interpolation %.0f, extractor %.0f, tracking %.0f, console %.0f, ' ...
-             'display %.0f\n'], results.timing_us(1:4), sys.cfar.label, results.timing_us(5:10));
+             'display %.0f\n'], slc_label(sys), results.timing_us(1:4), sys.cfar.label, results.timing_us(5:10));
     fprintf('%d PRIs simulated and processed in %.1f s (%.1f ms per PRI)\n', nProcessed, ...
         results.runTime_s, 1e3*results.runTime_s/max(nProcessed, 1));
 end
@@ -404,6 +417,17 @@ fprintf('\n=== Rotating search radar simulation ===\n');
 if sys.dbf.enabled, dbfText = sprintf('%d beams', sys.nBeams); else, dbfText = 'no beamforming'; end
 fprintf('fc = %.2f GHz, Pt = %.0f kW, NF = %.1f dB, %d element(s) -> %s\n', cfg.fc/1e9, ...
     cfg.tx.peakPower_W/1e3, cfg.rx.noiseFigure_dB, sys.nCh, dbfText);
+fprintf('DBF elements %s', element_text(sys.chDbf));
+if sys.slc.enable
+    fprintf(', SLC %s with the auxiliary elements %s', upper(sys.slc.algorithm), element_text(sys.slc.ch));
+end
+fprintf('\n');
+for k = 1:sys.jammer.n
+    fprintf(['Jammer %d: az %.1f deg, el %.1f deg, %.1f km, ERP %g W, %.1f MHz at %.2f MHz: %.1f dB above ', ...
+             'the noise of an element in the DDC band (antenna toward it)\n'], k, sys.jammer.az_deg(k), ...
+        sys.jammer.el_deg(k), sys.jammer.range_m(k)/1e3, cfg.jammer.erp_W(k), sys.jammer.bandwidth_Hz(k)/1e6, ...
+        sys.jammer.fc_Hz(k)/1e6, sys.jammer.jnr_dB(k));
+end
 if isfield(sys, 'mode')
     fprintf('Radar mode %d ''%s'' (modes of this program: %s): short %s, long %s\n', sys.mode.active, ...
         sys.mode.name, num2str(sys.mode.available(:).'), wave_text(sys.wave.short), wave_text(sys.wave.long));
@@ -521,4 +545,23 @@ switch c.type
     case {'go', 'so'}, s = sprintf(' (%d per half)', c.nHalf);
     otherwise,        s = '';
 end
+end
+
+function t = element_text(ch)
+% Element numbers, runs shortened: [1 2 3 4 7] -> '1-4, 7'.
+t = '';
+i = 1;
+while i <= numel(ch)
+    j = i;
+    while j < numel(ch) && ch(j+1) == ch(j) + 1, j = j + 1; end
+    if j > i, p = sprintf('%d-%d', ch(i), ch(j)); else, p = sprintf('%d', ch(i)); end
+    if isempty(t), t = p; else, t = [t ', ' p]; end %#ok<AGROW>
+    i = j + 1;
+end
+if isempty(t), t = 'none'; end
+end
+
+function t = slc_label(sys)
+t = '';
+if sys.slc.enable, t = ' + SLC'; end
 end

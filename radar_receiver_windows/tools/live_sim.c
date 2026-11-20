@@ -1,8 +1,8 @@
 /*
  * live_sim.c - radar_live_sim: the simulator of radar_generate_ddc in real time (a run
  * configuration of the same name in CLion). Included at the end of generate_ddc.c (compiled with
- * RADAR_LIVE_SIM): the same simulation of every PRI (targets, terrain clutter, leakage, STC,
- * noise, ADC, fixed-point DDC), but instead of files every PRI goes to the receiver over UDP at
+ * RADAR_LIVE_SIM): the same simulation of every PRI (targets, terrain clutter, noise jammers,
+ * leakage, STC, noise, ADC, fixed-point DDC), but instead of files every PRI goes to the receiver over UDP at
  * its PRI time, as the board would send it, until Ctrl+C.
  *
  *   radar_live_sim [--config-m FILE] [--set STATEMENT]... [--host H] [--port N]
@@ -15,7 +15,7 @@
  *     --payload BYTES    bytes per datagram (default cfg.udp.payloadBytes, VBDR: cfg.udp.vbdr.payloadBytes
  *                        of the mode)
  *     --fidelity         'full' (as radar_generate_ddc) or 'fast': the signal at the DDC rate (targets,
- *                        leakage, STC and noise, no terrain clutter, no ADC clipping; the gains of the
+ *                        leakage, jammers, STC and noise, no terrain clutter, no ADC clipping; the gains of the
  *                        ADC and DDC are measured once): much less computation (default cfg.sim.liveFidelity)
  *     --board-port N     the board commands of the receiver (default cfg.board.port), answered to
  *     --board-reply H:P  (default cfg.board.pcHost:cfg.board.replyPort); --no-board: not
@@ -126,7 +126,7 @@ static void fast_calibrate(const Radar *s, Work *wk, FastCal *cal)
     cal->noise = n ? sqrt(acc / n) / a : 0;
 }
 
-/* One PRI at the DDC rate: targets, leakage (with the STC), thermal and ADC noise. */
+/* One PRI at the DDC rate: targets, leakage (with the STC), noise jammers, thermal and ADC noise. */
 static void simulate_fast(const Radar *s, const Target *tg, int nTg, const Pri *pr, uint64_t seed, Work *wk,
                           const FastCal *cal)
 {
@@ -202,6 +202,57 @@ static void simulate_fast(const Radar *s, const Target *tg, int nTg, const Pri *
                 }
             }
         }
+    /* noise jammers at the DDC rate: complex white noise of the level of the jammer's power density in
+     * the DDC band (the DDC noise gain cal->noise), limited to its band around its offset from the LO
+     * of the sample, with the STC and the element phases (an approximation of the full simulation: a band
+     * beyond the DDC output band is not received) */
+    for (int j = 0; j < s->nJam; j++) {
+        const double azRel = wrap180(s->jamAz[j] - pr->az);
+        const double u = -sind(s->tilt) * cosd(s->jamEl[j]) * cosd(azRel) + cosd(s->tilt) * sind(s->jamEl[j]);
+        const double g = pattern_gain(&s->az, azRel) * pattern_gain(&s->elElem, asin(u) * 180 / PI);
+        const double P = s->jamPow[j] * g * pow(s->voltGain * s->lsbPerUnit, 2);     /* [LSB^2] at the ADC */
+        const double sigJ = cal->noise * sqrt(P * s->fs / (2 * s->jamBw[j]));       /* per I or Q */
+        if (!(sigJ > 0)) continue;
+        int N = 1;
+        while (N < nDdc) N *= 2;
+        double *re = calloc((size_t)N, sizeof(double)), *im = calloc((size_t)N, sizeof(double));
+        if (!re || !im) { free(re); free(im); continue; }
+        Rng r;
+        rng_seed(&r, seed, (uint64_t)pr->pulse + ((uint64_t)(j + 1) << 40));
+        for (int k = 0; k < nDdc; k++) { re[k] = sigJ * rng_normal(&r); im[k] = sigJ * rng_normal(&r); }
+        if (s->jamBw[j] < s->fsOut) {                     /* band limit at the DDC rate */
+            Fft f;
+            fft_init(&f, N);
+            for (int k = nDdc; k < N; k++) re[k] = im[k] = 0;
+            fft_run(&f, re, im, 0);
+            for (int k = 0; k < N; k++) {
+                const double fr = (k < (N + 1) / 2 ? k : k - N) * s->fsOut / N;
+                if (fabs(fr) > s->jamBw[j] / 2) re[k] = im[k] = 0;
+            }
+            fft_run(&f, re, im, 1);
+            for (int k = 0; k < N; k++) { re[k] /= N; im[k] /= N; }
+            fft_free(&f);
+        }
+        const double kph = cal->sign * 2 * PI * s->spacing_m / s->jamLambda[j] * u;
+        double ph = 0;
+        for (int k = 0; k < nDdc; k++) {
+            const int n = (int)wk->y1[k];
+            const double df = s->jamFc[j] - s->fLOs[n] - s->fIF;              /* offset from the DDC centre */
+            if (k > 0) ph = fmod(ph + cal->sign * 2 * PI * df / s->fsOut, 2 * PI);
+            if (fabs(df) - s->jamBw[j] / 2 >= s->fsOut / 2) continue;         /* outside the DDC band */
+            double a = 1.0;
+            if (s->stcOn) a = s->stc[n];
+            const double cr = cos(ph), ci = sin(ph);
+            const double br = a * (re[k] * cr - im[k] * ci), bi = a * (re[k] * ci + im[k] * cr);
+            for (int ch = 0; ch < nCh; ch++) {
+                const double e = kph * ch, er = cos(e), ei = sin(e);
+                zr[(size_t)ch * nDdc + k] += br * er - bi * ei;
+                zi[(size_t)ch * nDdc + k] += br * ei + bi * er;
+            }
+        }
+        free(re);
+        free(im);
+    }
     Rng rng;
     rng_seed(&rng, seed, (uint64_t)pr->pulse);
     const double sigIn2 = (s->addNoise ? pow(s->sigmaTh * s->voltGain * s->lsbPerUnit, 2) : 0) +
@@ -259,6 +310,8 @@ static void pattern_free(Pattern *p) { free(p->x); free(p->g_dB); }
 static void radar_free(Radar *s)
 {
     free(s->cosNco); free(s->msinNco); free(s->stc); free(s->rxSample); free(s->pri); free(s->scanPri);
+    free(s->jamPow); free(s->jamBw); free(s->jamFc); free(s->jamAz); free(s->jamEl); free(s->jamLambda); free(s->fLOs);
+    if (s->jamFft.n) fft_free(&s->jamFft);
     free(s->h1); free(s->h2);
     for (int p = 0; p < 2; p++) {
         free(s->loShift[p]);

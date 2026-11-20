@@ -28,7 +28,7 @@
  *      ground clutter of the terrain map (land, mountains, hills, desert, sea;
  *      shadowing; CNR -> sigma0), transmitter leakage, STC, thermal noise on
  *      the 30 MHz IF (receiver LO tuned to the carrier of every sub-pulse,
- *      cfg.wave.<pulse>.enable / fc_Hz), receiver
+ *      cfg.wave.<pulse>.enable / fc_Hz), noise jammers (cfg.jammer), receiver
  *      gain, 16-bit ADC with its noise (ENOB)
  *   2. raw ADC data -> <rawFolder>/pulse_<n>.mat (adcData int16 [nAdc x nElements], hdr)
  *   3. fixed-point DDC (2 or 4 MHz) -> <ddcFolder>/ddc_<n>.mat (I, Q int16 [nDdc x nElements], hdr)
@@ -495,6 +495,12 @@ typedef struct {
     double ddcT0;
     Wave   w[2];
     double overloadWarn;
+    /* noise jammers (cfg.jammer, setup_radar.m jammer_setup): power at an element at the maximum of
+     * its patterns [W], bandwidth, centre frequency, direction, wavelength */
+    int    nJam;
+    double *jamPow, *jamBw, *jamFc, *jamAz, *jamEl, *jamLambda;
+    double *fLOs;                    /* receiver LO at every ADC sample (it follows the sub-pulses) */
+    Fft    jamFft;                   /* length >= nAdc: band limit of the jammer noise */
 } Radar;
 
 static void envelope(const Wave *w, double t, double *re, double *im)
@@ -990,6 +996,103 @@ static void setup(Radar *s)
         if (!w->rxFirst) fail("The %s-pulse receive interval holds no DDC sample: move the long pulse later or increase "
                               "cfg.rx.maxRange_m (or widen cfg.wave.%s.rxStart_s / rxEnd_s).", w->name, w->name);
     }
+    /* noise jammers (cfg.jammer; one value per jammer in every vector) */
+    if (has("jammer.enable") && !empty("jammer.enable") && num("jammer.enable") != 0) {
+        static const char *f[5] = { "erp_W", "bandwidth_Hz", "az_deg", "el_deg", "range_m" };
+        int r = 0, cl = 0;
+        const MValue *erp = matrix("jammer.erp_W", &r, &cl);
+        const int n = r * cl;
+        double *v[5];
+        for (int i = 0; i < 5; i++) {
+            char q[64];
+            snprintf(q, sizeof q, "jammer.%s", f[i]);
+            int rr = 0, cc = 0;
+            const MValue *m = matrix(q, &rr, &cc);
+            if (rr * cc != n) fail("cfg.jammer.%s must have one value per jammer (%d, as cfg.jammer.erp_W).", f[i], n);
+            v[i] = xcalloc((size_t)(n ? n : 1), sizeof(double));
+            for (int k = 0; k < n; k++) {
+                v[i][k] = m->re[k];
+                if (!isfinite(v[i][k])) fail("cfg.jammer.%s must have finite values.", f[i]);
+            }
+        }
+        (void)erp;
+        double *fcJ = xcalloc((size_t)(n ? n : 1), sizeof(double));
+        int rf = 0, cf = 0;
+        const MValue *fm = has("jammer.fc_Hz") && !empty("jammer.fc_Hz") ? matrix("jammer.fc_Hz", &rf, &cf) : NULL;
+        if (fm && rf * cf != 1 && rf * cf != n) fail("cfg.jammer.fc_Hz must have one frequency [Hz] per jammer (or [] = cfg.fc).");
+        for (int k = 0; k < n; k++) {
+            fcJ[k] = fm ? fm->re[rf * cf == 1 ? 0 : k] : s->fc;
+            if (!(fcJ[k] > s->fIF)) fail("cfg.jammer.fc_Hz must have one frequency [Hz] per jammer (or [] = cfg.fc).");
+            if (v[0][k] < 0 || v[1][k] <= 0 || v[4][k] <= 0) fail("cfg.jammer: erp_W >= 0, bandwidth_Hz > 0 and range_m > 0.");
+            if (fabs(v[3][k]) > 90) fail("cfg.jammer.el_deg must be in [-90, 90] deg.");
+        }
+        s->nJam = n;
+        s->jamFc = fcJ;
+        s->jamBw = v[1];
+        s->jamAz = v[2];
+        s->jamEl = v[3];
+        s->jamPow = v[0];                                /* ERP -> power at an element */
+        s->jamLambda = xcalloc((size_t)(n ? n : 1), sizeof(double));
+        for (int k = 0; k < n; k++) {
+            s->jamLambda[k] = s->c / fcJ[k];
+            s->jamPow[k] = v[0][k] * pow(10.0, rxGain / 10) * s->jamLambda[k] * s->jamLambda[k] /
+                           (pow(4 * PI * v[4][k], 2) * pow(10.0, num("rx.losses_dB") / 10));
+        }
+        free(v[4]);
+        s->fLOs = xcalloc((size_t)s->nAdc, sizeof(double));
+        for (int k = 0; k < s->nAdc; k++) {               /* setup_radar.m sys.rx.fLO_Hz */
+            const double t = (s->m0 + k) / s->fs;
+            s->fLOs[k] = !ws->enable ? wl->fLO : (wl->enable && t >= wl->tTx) ? wl->fLO : ws->fLO;
+        }
+        int nF = 1;
+        while (nF < s->nAdc) nF *= 2;
+        fft_init(&s->jamFft, nF);
+    }
+}
+
+/* Noise jammers at the ADC input (generate_rx_signal.m jammer_signal): complex Gaussian noise of unit
+ * power, flat over |f| <= bandwidth/2 (FFT mask), on the IF fc - fLO(t), amplitude sqrt(2 P G) with
+ * the patterns of the element, the phase of its direction on every element. Its own random stream per
+ * jammer and PRI (the thermal noise stays the same with or without jammers). */
+static void jammer_add(const Radar *s, double azAnt, int pulse, uint64_t seed, float *x)
+{
+    const int nAdc = s->nAdc, nCh = s->nCh, N = s->jamFft.n;
+    double *re = xcalloc((size_t)N, sizeof(double)), *im = xcalloc((size_t)N, sizeof(double));
+    for (int j = 0; j < s->nJam; j++) {
+        const double azRel = wrap180(s->jamAz[j] - azAnt);
+        const double u = -sind(s->tilt) * cosd(s->jamEl[j]) * cosd(azRel) + cosd(s->tilt) * sind(s->jamEl[j]);
+        const double g = pattern_gain(&s->az, azRel) * pattern_gain(&s->elElem, asin(u) * 180 / PI);
+        const double amp = sqrt(2 * s->jamPow[j] * g);
+        if (amp == 0) continue;
+        Rng r;
+        rng_seed(&r, seed, (uint64_t)pulse + ((uint64_t)(j + 1) << 40));
+        double scale = 1.0 / sqrt(2.0);
+        for (int k = 0; k < N; k++) { re[k] = k < nAdc ? rng_normal(&r) : 0; im[k] = k < nAdc ? rng_normal(&r) : 0; }
+        if (s->jamBw[j] < s->fs) {                        /* band limit */
+            fft_run(&s->jamFft, re, im, 0);
+            int nIn = 0;
+            for (int k = 0; k < N; k++) {
+                const double f = (k < (N + 1) / 2 ? k : k - N) * s->fs / N;
+                if (fabs(f) <= s->jamBw[j] / 2) nIn++;
+                else re[k] = im[k] = 0;
+            }
+            fft_run(&s->jamFft, re, im, 1);
+            scale *= sqrt((double)N / (nIn ? nIn : 1)) / N;
+        }
+        double ph = 0;
+        const double kph = 2 * PI * s->spacing_m / s->jamLambda[j] * u;
+        for (int k = 0; k < nAdc; k++) {
+            const double cr = cos(ph), ci = sin(ph);
+            const double zr = amp * scale * (re[k] * cr - im[k] * ci), zi = amp * scale * (re[k] * ci + im[k] * cr);
+            for (int ch = 0; ch < nCh; ch++) {
+                const double e = kph * ch;
+                x[(size_t)ch * nAdc + k] += (float)(zr * cos(e) - zi * sin(e));
+            }
+            ph = fmod(ph + 2 * PI * (s->jamFc[j] - s->fLOs[k]) / s->fs, 2 * PI);
+        }
+    }
+    free(re);
+    free(im);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1700,6 +1803,8 @@ static double simulate_pri(const Radar *s, const Clutter *C, const Target *tg, i
             }
         }
     }
+    /* 2b) noise jammers */
+    if (s->nJam) jammer_add(s, pr->az, pr->pulse, seed, x);
     /* 3) transmitter leakage */
     if (s->addLeak)
         for (int p = 0; p < 2; p++) {

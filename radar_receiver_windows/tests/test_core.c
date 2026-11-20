@@ -20,6 +20,21 @@
 #define PI 3.14159265358979323846
 
 static int failures = 0;
+
+/* The weight of element channel ch in a beam (the conjugate phase of the beam: a target steered to
+ * it adds up), 1 for an element that is not in the DBF (cfg.rx.nChannelsUsedDbf). */
+static void beam_steer(const RadarConfig *cfg, int beam, int ch, double *sr, double *si)
+{
+    *sr = 1;
+    *si = 0;
+    if (!cfg->dbfEnabled) return;
+    for (int k = 0; k < cfg->nChUsed; k++) {
+        if ((cfg->chDbf ? cfg->chDbf[k] : k) != ch) continue;
+        const double wr = cfg->wRe[beam * cfg->nChUsed + k], wi = cfg->wIm[beam * cfg->nChUsed + k], m = hypot(wr, wi);
+        if (m > 0) { *sr = wr / m; *si = -wi / m; }
+        return;
+    }
+}
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; printf("FAIL %s:%d: ", __FILE__, __LINE__); \
                                               printf(__VA_ARGS__); printf("\n"); } } while (0)
 
@@ -375,13 +390,8 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
     set_header_intervals(&cfg, &pri);
     pri.iq = malloc(sizeof(int16_t) * 2 * (size_t)cfg.nCh * nRec);
     double *steerRe = malloc(sizeof(double) * cfg.nCh), *steerIm = malloc(sizeof(double) * cfg.nCh);
-    for (int ch = 0; ch < cfg.nCh; ch++) {               /* matched to the beam weights (of the channels used) */
-        if (!cfg.dbfEnabled || ch >= cfg.nChUsed) { steerRe[ch] = 1; steerIm[ch] = 0; continue; }
-        const double wr = cfg.wRe[beam * cfg.nChUsed + ch], wi = cfg.wIm[beam * cfg.nChUsed + ch];
-        const double m = hypot(wr, wi);
-        steerRe[ch] = m > 0 ? wr / m : 1;
-        steerIm[ch] = m > 0 ? -wi / m : 0;
-    }
+    for (int ch = 0; ch < cfg.nCh; ch++)                 /* matched to the beam weights (of the DBF elements) */
+        beam_steer(&cfg, beam, ch, &steerRe[ch], &steerIm[ch]);
 
     Processor *proc = processor_create(&cfg, 0);
     CHECK(proc != NULL, "processor_create");
@@ -484,7 +494,7 @@ static int test_end_to_end(const char *configPath, int mfDirect, double threshol
               "a profile every PRI (%d DBF, %d MF)", sink.nProfile[PROFILE_DBF], sink.nProfile[PROFILE_MF]);
         /* one PRI: the echo is spread over the pulse (about 1 dB above the noise per sample after the DBF with
          * 48 elements); after the pulse compression it stands out (with one element its SNR in one PRI is
-         * too low for a check, also with a few channels used (cfg.rx.nChannelsUsed): the range-Doppler
+         * too low for a check, also with a few DBF elements (cfg.rx.nChannelsUsedDbf): the range-Doppler
          * map below integrates the CPI) */
         if (cfg.nChUsed > 8) {
             CHECK(abs(sink.mfPeakBin - tb) <= 1, "MF profile peak at bin %d, target %d", sink.mfPeakBin, tb);
@@ -564,11 +574,8 @@ static void test_mti_range(const char *configPath)
         for (int e = 0; e < 2; e++) {
             const int first = pc->ddcFirst + (e ? r2 : r1) + pc->mfShift;
             for (int ch = 0; ch < cfg.nCh; ch++) {
-                double sr0 = 1, si0 = 0;
-                if (cfg.dbfEnabled && ch < cfg.nChUsed) {
-                    const double wr = cfg.wRe[beam * cfg.nChUsed + ch], wi = cfg.wIm[beam * cfg.nChUsed + ch], m = hypot(wr, wi);
-                    if (m > 0) { sr0 = wr / m; si0 = -wi / m; }
-                }
+                double sr0, si0;
+                beam_steer(&cfg, beam, ch, &sr0, &si0);
                 for (int m = 0; m < nEcho; m++) {
                     const double sr = pc->nPulse ? pc->pulseRe[m] / pulseNorm : pc->tapsRe[pc->nTaps - 1 - m];
                     const double si = pc->nPulse ? pc->pulseIm[m] / pulseNorm : -pc->tapsIm[pc->nTaps - 1 - m];
@@ -707,7 +714,8 @@ static void test_video(const char *configPath)
     const int bS = (int)floor((ps->range_m[0] + kS * v.dR_m) / v.dR_m), bL = (int)floor((pl->range_m[0] + kL * v.dR_m) / v.dR_m);
     double rest = 0;
     for (int b = 0; b < v.nBins; b++) if (b != bS && b != bL) rest += row[b];
-    const double expS = cfg.nCh == 1 ? 16.0 : 10.0;
+    double expS = 0;                                    /* the mean over the DBF elements */
+    for (int k = 0; k < cfg.nChUsed; k++) expS += ((cfg.chDbf ? cfg.chDbf[k] : k) % 2 ? 4.0 : 16.0) / cfg.nChUsed;
     CHECK(fabs(row[bS] - expS) < 1e-4 && fabs(row[bL] - 25.0) < 1e-4 && rest == 0.0,
           "video: short %.3f (expected %.1f), long %.3f (25), elsewhere %.3f (0: no short-pulse sample beyond "
           "the handover)", row[bS], expS, row[bL], rest);
@@ -774,11 +782,8 @@ static void test_scan2scan(const char *configPath)
                 const double ph = -4 * PI * vr * t / pc->lambda_m;
                 const int first = pc->ddcFirst + r0 + pc->mfShift;
                 for (int ch = 0; ch < cfg.nCh; ch++) {
-                    double sr0 = 1, si0 = 0;
-                    if (cfg.dbfEnabled) {
-                        const double wr = cfg.wRe[beam * cfg.nChUsed + ch], wi = cfg.wIm[beam * cfg.nChUsed + ch], mg = hypot(wr, wi);
-                        sr0 = mg > 0 ? wr / mg : 1;  si0 = mg > 0 ? -wi / mg : 0;
-                    }
+                    double sr0, si0;
+                    beam_steer(&cfg, beam, ch, &sr0, &si0);
                     const double cr = 30.0 * (sr0 * cos(ph) - si0 * sin(ph)), ci = 30.0 * (sr0 * sin(ph) + si0 * cos(ph));
                     for (int m = 0; m < (pc->nPulse ? pc->nPulse : pc->nTaps); m++) {
                         const double sr = pc->nPulse ? pc->pulseRe[m] / pulseNorm : pc->tapsRe[pc->nTaps - 1 - m];
@@ -816,6 +821,99 @@ static void test_scan2scan(const char *configPath)
            (unsigned long long)tm.prfSwitches);
     (void)plotsAfter;
     processor_destroy(proc);
+    free(pri.iq);
+    radar_config_free(&cfg);
+}
+
+/* Sidelobe canceller (configuration with cfg.slc.enable): a noise jammer from one direction on every
+ * element (about 36 dB above the noise of an element) in every PRI. For each algorithm (QRD-SMI,
+ * QRD-RLS, NLMS) the SLC output of every beam, outside the training samples, is at least 10 dB below
+ * the DBF output and within 3 dB of the noise alone (the jammer cancelled); without the jammer the
+ * SLC adds less than 1 dB of noise. */
+typedef struct { const RadarConfig *cfg; int pulse; double pDbf, pSlc; long nDbf, nSlc; } SlcSink;
+
+static void slc_block(void *user, const BlockOutput *o)
+{
+    SlcSink *k = user;
+    if (o->pulse != k->pulse || (o->kind != LOG_DBF && o->kind != LOG_SLC)) return;
+    const PulseConfig *pc = &k->cfg->pulse[o->pulse];
+    double sum = 0;
+    long cnt = 0;
+    for (int b = 0; b < o->nBeams; b++)
+        for (int j = 0; j < o->nSamples; j++) {
+            const int t = o->first + j;                     /* DDC sample */
+            if (t < pc->rxFirst || t >= pc->rxFirst + pc->rxCount) continue;
+            if (t >= pc->slcTrainFirst && t < pc->slcTrainFirst + pc->slcTrainCount) continue;
+            const double re = o->re[(size_t)b * o->nSamples + j], im = o->im[(size_t)b * o->nSamples + j];
+            sum += re * re + im * im;
+            cnt++;
+        }
+    if (o->kind == LOG_DBF) { k->pDbf = sum; k->nDbf = cnt; }
+    else { k->pSlc = sum; k->nSlc = cnt; }
+}
+
+static void test_slc(const char *configPath)
+{
+    RadarConfig cfg;
+    char err[256];
+    if (radar_config_load(configPath, &cfg, err, sizeof err) != 0) return;
+    if (!cfg.slcEnabled) {
+        radar_config_free(&cfg);
+        return;
+    }
+    static const char *names[3] = { "QRD-SMI", "QRD-RLS", "NLMS" };
+    const int pulse = cfg.pulse[PULSE_LONG].enable ? PULSE_LONG : PULSE_SHORT;
+    PriData pri;
+    memset(&pri, 0, sizeof pri);
+    pri.nCh = cfg.nCh;
+    pri.nSamples = cfg.nDdc;
+    pri.ddcFs_Hz = (float)cfg.fsOut_Hz;
+    set_header_intervals(&cfg, &pri);
+    pri.iq = malloc(sizeof(int16_t) * 2 * (size_t)cfg.nCh * cfg.nDdc);
+    const double phi = 2.0;                                 /* jammer phase step between the elements */
+    for (int m = 0; m < 3; m++) {
+        double noiseDbf = 0, noiseSlc = 0;
+        for (int jam = 0; jam < 2; jam++) {
+            cfg.slcMethod = m;
+            Processor *proc = processor_create(&cfg, 1);
+            processor_set_log(proc, LOG_DBF | LOG_SLC);
+            SlcSink sink = { &cfg, pulse, 0, 0, 0, 0 };
+            ProcessorCallbacks cb;
+            memset(&cb, 0, sizeof cb);
+            cb.user = &sink;
+            cb.block = slc_block;
+            for (int k = 0; k < 12; k++) {                  /* NLMS, RLS: weights carried over the PRIs */
+                pri.pulseNumber = (uint32_t)k + 1;
+                pri.time_s = k * 1e-3;
+                pri.staggerIndex = 1;
+                for (int n = 0; n < cfg.nDdc; n++) {
+                    const double jr = jam ? 1000.0 * gauss() / sqrt(2.0) : 0, ji = jam ? 1000.0 * gauss() / sqrt(2.0) : 0;
+                    for (int ch = 0; ch < cfg.nCh; ch++) {
+                        const double c = cos(phi * ch), sn = sin(phi * ch);
+                        int16_t *v = pri.iq + 2 * ((size_t)ch * cfg.nDdc + n);
+                        v[0] = sat16(jr * c - ji * sn + 16.0 * gauss());
+                        v[1] = sat16(jr * sn + ji * c + 16.0 * gauss());
+                    }
+                }
+                processor_process(proc, &pri, &cb);
+            }
+            processor_destroy(proc);
+            const double dbf = sink.pDbf / (sink.nDbf ? sink.nDbf : 1), slc = sink.pSlc / (sink.nSlc ? sink.nSlc : 1);
+            if (!jam) {
+                noiseDbf = dbf;
+                noiseSlc = slc;
+                CHECK(slc < 1.26 * dbf, "%s without jammer: SLC output %.1f dB above the DBF output (limit 1 dB)",
+                      names[m], 10 * log10(slc / dbf));
+            } else {
+                CHECK(slc < 0.1 * dbf && slc < 2.0 * noiseDbf,
+                      "%s: jammer %.1f dB above the noise at the DBF output, SLC output %.1f dB above it (limits: "
+                      "10 dB below the DBF output, 3 dB above the noise)", names[m], 10 * log10(dbf / noiseDbf),
+                      10 * log10(slc / noiseDbf));
+                printf("SLC %s: DBF output %.1f dB, SLC output %.1f dB above the noise (no jammer: %.2f dB)\n", names[m],
+                       10 * log10(dbf / noiseDbf), 10 * log10(slc / noiseDbf), 10 * log10(noiseSlc / noiseDbf));
+            }
+        }
+    }
     free(pri.iq);
     radar_config_free(&cfg);
 }
@@ -872,6 +970,7 @@ int main(int argc, char **argv)
         test_video(argv[1]);
         test_mti_range(argv[1]);
         test_scan2scan(argv[1]);
+        test_slc(argv[1]);
     } else {
         printf("no configuration file given: end-to-end test skipped\n");
     }

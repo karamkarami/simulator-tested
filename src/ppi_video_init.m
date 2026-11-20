@@ -28,8 +28,8 @@ idx = [ws.rxIdx(keepS), wl.rxIdx];                            % DDC samples of t
 r   = [rS(keepS), rL];
 V.dR_m = dR;
 V.nR = max(1, ceil(rMax_m / dR));                             % range bins (at least one sample each)
-V.kind = 'video';                                             % what the map holds: 'video', 'dbf', 'mf'
-V.beam = 1;                                                   % beam of 'dbf' / 'mf'
+V.kind = 'video';                                             % what the map holds: 'video', 'dbf', 'slc', 'mf'
+V.beam = 1;                                                   % beam of 'dbf' / 'slc' / 'mf'
 % DBF output: the pulse compression input of a sub-pulse (wv.ddcIdx, ddc_segment.m) inside its
 % receive interval; MF output: its range cells. Short pulse: nearer than the long pulse's first cell.
 waves = {ws, wl};                                             % (own variable names: r, ok follow below)
@@ -64,7 +64,7 @@ V.time = -Inf(V.nAz, 1);                                      % time of the newe
 V.sum = zeros(1, V.nR);  V.n = 0;  V.azBin = 0;                % PRIs of the current azimuth bin
 V.noise_dB = NaN;                                             % noise floor (running 10th percentile of the video)
 V.azNoise = nan(V.nAz, 1);                                    % its estimate in every azimuth bin (ppi_video_add_row.m)
-nCh = sys.nCh;  if isfield(sys, 'nChUsed'), nCh = sys.nChUsed; end   % the channels averaged
+nCh = sys.nCh;  if isfield(sys, 'nChUsed'), nCh = sys.nChUsed; end   % the elements averaged (DBF elements)
 x = gammaincinv(0.1, nCh);                                % its offset: the 10th percentile of the mean of
 V.p10Video_dB = 10*log10(nCh / x);                        % nCh exponential powers is below the mean (1: 9.77
 V.p10Sample_dB = 10*log10(1 / gammaincinv(0.1, 1));           % dB, 48: 0.86 dB); one sample (DBF, MF out): 9.77 dB

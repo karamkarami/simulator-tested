@@ -363,15 +363,15 @@ Not supported: `cfg.adc.quantize = false` (analog ADC values, MATLAB only).
 | `--replay FILE` | read the datagrams from a recorded FILE instead of the network (as fast as possible) |
 | `--ppi` | show the interactive PPI (Qt build, see below) |
 | `--ppi-snapshot FILE` | save the PPI as a PNG at the end and close it |
-| `--ppi-show MODE` | what the PPI shows at the start: `plots` (default, after the plot extractor), `detections` (CFAR detections before it), `both`, `video` (the raw video: DDC output averaged over the elements), `dbf` (DBF output of the selected beam) or `mf` (pulse compression output of the selected beam) |
-| `--ppi-beam N` | the beam after the DBF of `dbf`, `mf` and the range-Doppler tab at the start (default 1; also in the panel) |
+| `--ppi-show MODE` | what the PPI shows at the start: `plots` (default, after the plot extractor), `detections` (CFAR detections before it), `both`, `video` (the raw video: DDC output averaged over the DBF elements), `dbf` (DBF output of the selected beam; only with the DBF), `slc` (sidelobe canceller output of the selected beam; only with the SLC) or `mf` (pulse compression output of the selected beam); a mode that is not available shows the plots |
+| `--ppi-beam N` | the beam after the DBF of `dbf`, `slc`, `mf` and the range-Doppler tab at the start (default 1; also in the panel) |
 | `--ppi-tab TAB` | tab at the start: `ppi` (default) or `rd` (range-Doppler map of the selected beam next to a small PPI) |
 | `--ppi-rd-plot P` | plot below the range-Doppler map at the start: `spectrum` (default, Doppler spectrum of a range bin) or `range` (range profile of a Doppler bin); also in the selector on top of that plot |
 | `--ppi-rd-rate HZ` | range-Doppler maps per second handed to that tab (default `cfg.display.rdRate_Hz` in the configuration, 10) |
 | `--cfar-threshold DB` | CFAR threshold factor 10 log10(alpha) in dB of the configured detector and window (default: the configuration, i.e. the method's Pfa); can also be changed in the PPI |
 | `--log-dir DIR` | log the processing chain from the start into `DIR/<name>` (see Logging below; also the PPI tab *Controls*, whose folder field it fills) |
 | `--log-name NAME` | name of the log folder (default `log_<date>_<time>`) |
-| `--log-blocks LIST` | blocks of the log, comma separated: `ddc`, `dbf`, `mf`, `doppler`, `detection` (default `ddc,detection`), and `screen`: with `--ppi` the video of the window (see Screen recording below) |
+| `--log-blocks LIST` | blocks of the log, comma separated: `ddc`, `dbf`, `slc` (only with the SLC), `mf`, `doppler`, `detection` (default `ddc,detection`), and `screen`: with `--ppi` the video of the window (see Screen recording below) |
 | `--ffmpeg PATH` | the ffmpeg program of the screen recording (default: `ffmpeg` / `ffmpeg.exe` next to `radar_receiver`, else the one on `PATH`) |
 | `--record-audio SPEC` | sound of the screen recording: `auto` (default: the default microphone), `none`, or an ffmpeg input `FORMAT:DEVICE` (`-f FORMAT -i DEVICE`), e.g. `pulse:default`, `alsa:hw:1,0`, `dshow:audio=Microphone (Realtek(R) Audio)` |
 | `--record-fps N` | frames per second of the screen recording (default 10) |
@@ -547,8 +547,9 @@ PPI) and the panel with the settings and the block times.
 **Controls**: settings of the receiver, without the panel of the other two
 tabs. For now it has the **Logging** box: *Folder* (with *Browse ...*; default
 `./logs`, or `--log-dir`) and *Log name* (empty: `log_<date>_<time>`), next to
-them the blocks to log (*DDC output*, *DBF output*, *Pulse compression
-output*, *Doppler output*, *Detection output*)
+them the blocks to log (*DDC output*, *DBF output*, *SLC output* (only with
+the sidelobe canceller), *Pulse compression output*, *Doppler output*,
+*Detection output*)
 and *Screen record* (with the sound of the microphone when there is one, else without sound), and next to them *Start logging* / *Stop logging* with the state of the log
 (its folder, PRIs, files and MB written, the queue, PRIs dropped, file
 errors, and the screen recording: its time, size, frame rate and sound input,
@@ -607,8 +608,11 @@ The panel on the right of the window has:
   (`ProcessorCallbacks.profile`, a few microseconds per PRI, display time;
   nothing is computed in the other modes). One complex sample per bin has an
   exponential power, so the noise floor is the 10th percentile + 9.77 dB.
-  Changing the mode or the beam starts an empty map. Key `D` cycles plots,
-  detections, both, video, DBF out, MF out.
+  Changing the mode or the beam starts an empty map. *SLC out (selected
+  beam)*: the same after the sidelobe canceller (the list has it only with
+  the SLC, `cfg.slc.enable`; *DBF out*, the output before the SLC, only
+  with the DBF). Key `D` cycles plots, detections, both, video, DBF out,
+  SLC out, MF out (those in the list).
 * **Save screenshot (PNG) ...**: saves the whole window as it is now (the
   shown tab and this panel); the default file name has the date and time.
 * **Tracks (T)**: shows or hides the tracks of the tracker (EKF or PMBM): a hollow
@@ -664,6 +668,7 @@ The panel on the right of the window has:
 | `screen_record.mp4` | with *Screen record* (`screen`): the video of the window, see Screen recording below |
 | `ddc/ddc_<n>.mat` | `I`, `Q` (int16 [samples x channels], all channels of the PRI as received) and `hdr` (pulse and scan number, time, azimuth, PRI, stagger index, DDC rate, time of the first sample, receive intervals): the format of the simulator's DDC files, so a log is processed again with `radar_stream_send <folder>/<name>/ddc` (or `replay_ddc_udp.m`); `hdr.pri_s` is the time to the next PRI of the log |
 | `dbf/dbf_<n>.mat` | `short`, `long`: the beamformer output (complex single [beams x samples], the pulse compression input: zero outside the receive window), `shortFirstSample`, `longFirstSample` (1-based DDC sample of the first column), `hdr` |
+| `slc/slc_<n>.mat` | the sidelobe canceller output (only with the SLC), as `dbf/` |
 | `mf/mf_<n>.mat` | `short`, `long`: the pulse compression output (complex single [beams x range cells]), `shortRange_m`, `longRange_m`, `hdr` (as `cfg.io.saveMf` of the simulator) |
 | `doppler/doppler_<n>.mat` | only PRIs with a CPI update: `short`, `long`: the range-Doppler power after the noise-gain equalisation (single [beams x range cells x Doppler bins], the map the CFAR tests), `f_Hz`, `shortV_mps`, `longV_mps`, `shortRange_m`, `longRange_m`, `hdr` (as `cfg.io.saveDoppler`) |
 | `detection/detection_<n>.mat` | `dets`: the CFAR detections after the pruning (and the peak interpolation) of the PRI's CPI updates, `plots`: the plots closed in the PRI, one row each with the columns of `columns` (pulse 1 short / 2 long, pulse number, time, azimuth, range, elevation, radial velocity, SNR, power, beam, range cell, Doppler bin (1-based), hits), `hdr` |
@@ -745,11 +750,23 @@ of a 4-vCPU VM), and the CFAR 5.0 ms against 1.2 ms (4 times the Doppler
 bins). For real time raise `cfg.proc.updateEvery`, use fewer bins
 (`cfg.proc.nufft.nPoints`) or more threads.
 
-**Channels**: the receiver processes the first `nChUsed` channels of every
-PRI (`cfg.rx.nChannelsUsed`; older files: all), with the DBF matrix of those
-channels; a PRI needs at least `nChUsed` channels (more are accepted, e.g. a
-4-channel DDC stream of which only the first is used). The DDC log keeps
-every channel.
+**Channels**: the DBF combines the elements `chDbf` of every PRI
+(`cfg.rx.nChannelsUsedDbf`, element numbers; older files: the first
+`nChUsed`) with the DBF matrix of those elements; a PRI needs the channels up
+to the largest element number used by the DBF and the SLC (more are
+accepted, e.g. a 4-channel DDC stream of which only the first is used). The
+DDC log keeps every channel.
+
+**Sidelobe canceller** (`cfg.slc`, configuration records `slcEnabled`,
+`chSlc`, `slcMethod`, ..., `<pulse>_slcTrainFirst` / `_slcTrainCount`;
+`processor.c`): after the DBF, every beam minus the auxiliary elements
+`chSlc` (`cfg.rx.nChannelsUsedSlc`) with weights estimated in every PRI from
+the training samples of the sub-pulse: QRD-SMI (QR decomposition of the
+training samples with diagonal loading), QRD-RLS (Givens rotations carried
+over the PRIs with a forgetting factor) or NLMS, in double precision; the
+same as `sidelobe_canceller.m` (the C and MATLAB outputs agree to 1e-6,
+`test_slc.m`). Its time is the row *SLC* of the block times and of the
+summary at the end.
 
 **Tracking** (`cfg.track.enable` in the configuration, `tracker.c`, which
 selects `cfg.track.method`): `tracker_ekf.c`, the same EKF as `track_ekf.m`
@@ -1175,7 +1192,7 @@ scenario at 30 deg (11.9 km, -234 m/s) from both fidelities over VBDR.
 | `ddc_files` (`tests/test_ddc_files.c`) | MAT-file reader with files written as MATLAB writes them (data in smaller storage types, small elements, skipped char field, compressed `-v7`: with zlib, or stored blocks for the built-in inflate without zlib; with zlib the built-in inflate is checked against zlib's dynamic and fixed Huffman blocks); folder listing; the datagrams of a DDC file are accepted by `udp_input.c` and give back the same PRI; corrupted, truncated, `-v7.3` and big-endian files are refused |
 | `mfile` (`tests/test_mfile.c`) | the MATLAB subset of `radar_export_config`: function line, comments, block comments, continuation lines, matrices with spaces and unary minus, multi-line cells, `struct`, `fullfile`/`fileparts`/`mfilename`, precedence (`-2^2`), indexing, functions, `--set` statements, unevaluated MATLAB functions, subfunctions; function files with input arguments (in the caller's folder), `feval`, `sprintf`, a function file with an `if` block unevaluated, too many input arguments; errors with the line |
 | `export_config`, `core_exported` | `radar_export_config` writes the configuration of `../radar_config.m`, and the core test runs the whole chain with it |
-| `export_<variant>`, `core_<variant>` | the options of this revision exported and processed by the core test: `short_off` / `long_off` (one sub-pulse: its plot, no update of the other, the video of one sub-pulse), `carriers` (165 / 175 MHz, the clutter filter up to 50 km, a manual CPI of 96 pulses); the core test also checks the range limit of the clutter filter in every configuration (a stationary echo cancelled before it and kept beyond it, the same noise floor on both sides) |
+| `export_<variant>`, `core_<variant>` | the options of this revision exported and processed by the core test: `short_off` / `long_off` (one sub-pulse: its plot, no update of the other, the video of one sub-pulse), `carriers` (165 / 175 MHz, the clutter filter up to 50 km, a manual CPI of 96 pulses), `channels` (the DBF of the elements 5 ... 8 of 48: the target in its beam, the video over these elements), `slc` (DBF of the elements 1 ... 44, sidelobe canceller with 45 ... 48: the target through the SLC, and a noise jammer about 36 dB above the noise from one direction on every element: for QRD-SMI, QRD-RLS and NLMS the SLC output at least 10 dB below the DBF output and within 3 dB of the noise, without the jammer at most 1 dB more noise); the core test also checks the range limit of the clutter filter in every configuration (a stationary echo cancelled before it and kept beyond it, the same noise floor on both sides) |
 | `tracker_tomht` | the self tests of `tracker` with the TOMHT tracker (`cfg.track.method = 'tomht'`) |
 | `generate_ddc`, `generated_ddc_files` | `radar_generate_ddc` writes 4 PRIs of the default configuration (targets, terrain clutter, noise) and they are read back (`ddc_load`): the channels, consecutive pulses, the receive intervals of the header, signal present |
 | `serial` | frame encoding and CRC; real output to a pseudo-terminal (Linux): exact bytes, 200-detection split, non-blocking drops, close |

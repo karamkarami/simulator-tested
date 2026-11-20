@@ -273,6 +273,33 @@ int main(int argc, char **argv)
     win.refresh();
     check(win.modeBox()->currentIndex() == 0 && ppi_video_wanted() == 0 && ppi_profile_wanted(nullptr) == PROFILE_NONE,
           "key D from MF out back to the plots");
+    {   /* the raw outputs offered (ppi_set_raw_outputs): SLC out only with the SLC, DBF out only with the DBF */
+        ppi_set_raw_outputs(1, 1);
+        PpiWindow ws(60e3, nullptr);
+        check(ws.modeBox()->count() == 7 && ws.modeBox()->itemText(5).startsWith("SLC out") &&
+              ws.modeBox()->itemText(6).startsWith("MF out"), "with the SLC: the box lists SLC out between DBF out and MF out");
+        ws.modeBox()->setCurrentIndex(5);
+        int bm = -1;
+        check(ws.ppi().displayMode() == DisplayMode::SlcOut && ppi_profile_wanted(&bm) == PROFILE_SLC,
+              "the box selects SLC out: the profile of the SLC output wanted");
+        send_key(ws.ppi(), Qt::Key_D, "d");
+        ws.refresh();
+        check(ws.ppi().displayMode() == DisplayMode::MfOut && ws.modeBox()->currentIndex() == 6, "key D: from SLC out to MF out");
+        ws.modeBox()->setCurrentIndex(4);
+        send_key(ws.ppi(), Qt::Key_D, "d");
+        check(ws.ppi().displayMode() == DisplayMode::SlcOut, "key D: from DBF out to SLC out");
+        ws.modeBox()->setCurrentIndex(0);
+        ppi_set_raw_outputs(0, 1);
+        PpiWindow wn(60e3, nullptr);
+        check(wn.modeBox()->count() == 6 && wn.modeBox()->findData((int)DisplayMode::DbfOut) < 0 &&
+              wn.modeBox()->findData((int)DisplayMode::SlcOut) == 4, "without the DBF (one main element): no DBF out, SLC out");
+        wn.modeBox()->setCurrentIndex(0);
+        ppi_set_raw_outputs(1, 0);
+        PpiWindow wd(60e3, nullptr);
+        check(wd.modeBox()->count() == 6 && wd.modeBox()->findData((int)DisplayMode::SlcOut) < 0,
+              "without the SLC: no SLC out (the default)");
+        wd.modeBox()->setCurrentIndex(0);
+    }
     {   /* the data tip in the window (in its tab page) is readable: text unlike its background */
         const Detection t = make_plot(25e3, 45.0, 2.0, 50.0, 20.0, PULSE_LONG, 777);
         ppi_post_antenna(45.0, 7.0, 1);
