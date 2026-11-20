@@ -229,9 +229,17 @@ int radar_config_load(const char *path, RadarConfig *cfg, char *err, size_t errL
             cfg->slcRlsDelta_dB   = get_scalar(&rs, "slcRlsDelta_dB");
             cfg->slcNlmsMu        = get_scalar(&rs, "slcNlmsMu");
             cfg->slcNlmsEps       = get_scalar(&rs, "slcNlmsEps");
+            {
+                const Record *l = find_optional(&rs, "slcNlmsLoading_dB");
+                cfg->slcNlmsLoading_dB = l && l->rows * l->cols >= 1 ? l->data[0] : -INFINITY;
+            }
+            {
+                const Record *m = find_optional(&rs, "slcWeightMemory");
+                cfg->slcWeightMemory = m && m->rows * m->cols >= 1 ? m->data[0] : 1.0;
+            }
             if (!rs.failed && (cfg->slcMethod < SLC_QRD_SMI || cfg->slcMethod > SLC_NLMS ||
                                !(cfg->slcRlsLambda > 0 && cfg->slcRlsLambda <= 1) || !(cfg->slcNlmsMu > 0 && cfg->slcNlmsMu < 2) ||
-                               !(cfg->slcNlmsEps >= 0)))
+                               !(cfg->slcNlmsEps >= 0) || !(cfg->slcWeightMemory >= 1)))
                 set_error(&rs, "invalid sidelobe canceller settings");
         }
         cfg->nBeams          = get_int(&rs, "nBeams");

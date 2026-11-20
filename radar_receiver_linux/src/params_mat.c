@@ -188,6 +188,8 @@ int radar_parameters_write(const char *path, const RadarConfig *cfg, const Runti
         SC(s, "rlsDelta_dB", cfg->slcRlsDelta_dB);
         SC(s, "nlmsMu", cfg->slcNlmsMu);
         SC(s, "nlmsEps", cfg->slcNlmsEps);
+        SC(s, "nlmsLoading_dB", cfg->slcNlmsLoading_dB);
+        SC(s, "weightMemory_pri", cfg->slcWeightMemory);
         for (int p = 0; p < N_PULSES; p++) {             /* training samples: 1-based DDC samples */
             char nm[40];
             snprintf(nm, sizeof nm, "%sTrainFirstSample", p ? "long" : "short");

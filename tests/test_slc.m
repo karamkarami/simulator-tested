@@ -4,8 +4,8 @@ function ok = test_slc(quick)
 %   ok = TEST_SLC() runs every part; TEST_SLC(true) skips the long simulation of part 6.
 %
 %   1) sidelobe_canceller.m on synthetic data (4 auxiliary elements, 3 beams): a noise jammer
-%      30 dB above the noise is cancelled by QRD-SMI and QRD-RLS to within 1 dB of the noise
-%      (NLMS: 2 dB, its misadjustment with the step 0.1), a target outside the training samples keeps its amplitude (0.5 dB), without the
+%      30 dB above the noise is cancelled by QRD-SMI, QRD-RLS and NLMS to within 1 dB of the
+%      noise, a target outside the training samples keeps its amplitude (0.5 dB), without the
 %      jammer the SLC adds less than 0.5 dB of noise; QRD-SMI (qr) equals the QRD-RLS Givens
 %      rotations with lambda = 1 and the same loading; the weights of NLMS and QRD-RLS go on
 %      from PRI to PRI (a second PRI cancels better than or as well as the first); two jammers
@@ -24,9 +24,15 @@ function ok = test_slc(quick)
 %   5) DBF of the elements [3 10 17 40] and SLC with [1 48] in run_radar_sim (the selection by
 %      element number), the single-element main channel with an SLC (no DBF), the 'slc' display
 %      of the PPI only with the SLC
-%   6) (not quick) a weak target behind the elevation sidelobe of a jammer: detected without the
-%      jammer, missed with it, detected again with the SLC (each algorithm) with an SNR within
-%      6 dB of the case without the jammer
+%   7) configuration variants with the SLC and a jammer: radar modes 0, 1 (LFM), 2 (long range),
+%      4 MHz DDC, short or long pulse off, sub-pulses on 165 / 175 MHz with a 2 MHz jammer, staggered
+%      and scan-to-scan PRF, a training interval in range with QRD-RLS, two jammers with 3
+%      auxiliary elements and NLMS, VBDR (main CH1, SLC with CH2 ... CH4): setup, the export of
+%      MATLAB equal to radar_export_config, a few PRIs of run_radar_sim
+%   6) (not quick) a weak target behind the elevation sidelobe of a jammer, with the hills of the
+%      terrain in the beam: detected without the jammer, missed with it (or 8 dB weaker); with the
+%      SLC (each algorithm) detected again within 3 dB of the SNR without the jammer, and no false
+%      plot over the clutter; the SLC without a jammer: no false plot, the SNR within 1 dB
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'), fullfile(root, 'tests'));
 if nargin < 1, quick = false; end
@@ -56,8 +62,7 @@ for m = 0:2
         res(pri) = mean(mean(abs(y(:, 1000:n-K)).^2, 2)); %#ok<AGROW>
     end
     tg = mean(abs(y(:, 505)).^2 ./ abs(main(:, 505) - gB * jam(505)).^2);
-    lim = 1 + (m == 2);                                        % NLMS: its misadjustment (step 0.1)
-    ok = check(10*log10(res(2)) < lim && res(2) <= res(1) * 1.2 && abs(10*log10(tg)) < 0.5, ...
+    ok = check(10*log10(res(2)) < 1 && res(2) <= res(1) * 1.2 && abs(10*log10(tg)) < 0.5, ...
                sprintf('%s: jammer 30 dB -> residual %.2f dB above the noise (first PRI %.2f dB), target %.2f dB', ...
                        upper(names{m+1}), 10*log10(res(2)), 10*log10(res(1)), 10*log10(tg))) && ok;
     st = [];  aux = noise(nA, n);  main = noise(nB, n);
@@ -263,34 +268,96 @@ catch err
     ok = check(false, ['run_radar_sim with one main element and an SLC: ' err.message]) && ok;
 end
 
-%% 6) a weak target behind the elevation sidelobe of a jammer
+%% 7) configuration variants with the SLC and the jammer: radar modes 0 / 1 / 2, 4 MHz DDC, one
+% sub-pulse, other carriers, staggered and scan-to-scan PRF, a training interval in range, VBDR:
+% setup, the same export in MATLAB and C, a few PRIs of run_radar_sim (the jammer cancelled)
+exe = fullfile(build, ['radar_export_config' exeSfx]);
+variants = {'mode 0 (phase codes)', {}
+            'mode 1 (LFM)', {'modes.active', 1}
+            'mode 2 (long range, set receive windows)', {'modes.active', 2}
+            '4 MHz DDC', {'ddc.outputRate_Hz', 4e6}
+            'short pulse off', {'wave.short.enable', false}
+            'long pulse off', {'wave.long.enable', false}
+            'short 165 MHz, long 175 MHz, jammer 175 MHz 2 MHz wide', {'wave.short.fc_Hz', 165e6; 'wave.long.fc_Hz', 175e6; ...
+                                                                       'jammer.fc_Hz', 175e6; 'jammer.bandwidth_Hz', 2e6}
+            'staggered PRF', {'prf.mode', 'staggered'}
+            'scan-to-scan PRF', {'prf.mode', 'scan2scan'}
+            'training interval of the long pulse 60 ... 75 km, QRD-RLS', {'slc.trainRange_m.long', [60e3 75e3]; 'slc.algorithm', 'qrd-rls'}
+            'two jammers, 3 auxiliary elements, NLMS', {'rx.nChannelsUsedSlc', [46 47 48]; 'rx.nChannelsUsedDbf', 1:45; ...
+                'jammer.erp_W', [2 1]; 'jammer.az_deg', [60 61]; 'jammer.el_deg', [2 -5]; 'jammer.range_m', [50e3 30e3]; ...
+                'jammer.bandwidth_Hz', [10e6 10e6]; 'slc.algorithm', 'nlms'}
+            'VBDR: main CH1, SLC with CH2 ... CH4 (J1 ... J3)', {'udp.format', 'vbdr'; 'rx.nChannelsUsedDbf', 1; ...
+                                                                'rx.nChannelsUsedSlc', [2 3 4]}};
+for k = 1:size(variants, 1)
+    c = radar_config();
+    c.display.enable = false;  c.console.enable = false;  c.io.saveRaw = false;  c.clutter.enable = false;
+    c.rx.nChannelsUsedDbf = 1:44;  c.rx.nChannelsUsedSlc = 45:48;  c.slc.enable = true;
+    c.jammer.enable = true;  c.targets = c.targets(1);
+    sets = '';
+    for j = 1:size(variants{k, 2}, 1)
+        parts = strsplit(variants{k, 2}{j, 1}, '.');
+        c = setfield(c, parts{:}, variants{k, 2}{j, 2});
+        if strcmp(variants{k, 2}{j, 1}, 'modes.active'), c = apply_radar_mode(c); end
+        sets = [sets, sprintf('cfg.%s = %s; ', variants{k, 2}{j, 1}, m_text(variants{k, 2}{j, 2}))]; %#ok<AGROW>
+        if strcmp(variants{k, 2}{j, 1}, 'modes.active'), sets = [sets, 'cfg = apply_radar_mode(cfg); ']; end %#ok<AGROW>
+    end
+    c.sim.sectors_deg = [59.9 60.1];
+    try
+        sysV = setup_radar(c);
+        same = true;  why = '';
+        if exist(exe, 'file')
+            fm = [tempname() '.bin'];  fc = [tempname() '.bin'];
+            evalc('export_receiver_config(c, fm)');
+            base = ['cfg.rx.nChannelsUsedDbf = 1:44; cfg.rx.nChannelsUsedSlc = 45:48; cfg.slc.enable = true; ' ...
+                    'cfg.jammer.enable = true; cfg.clutter.enable = false; '];
+            [st, msg] = system(sprintf('"%s" --quiet --out "%s" --set "%s%s"', exe, fc, base, sets));
+            same = st == 0 && same_records_slc(fm, fc);
+            if st ~= 0, why = msg; end
+            delete(fm);  if exist(fc, 'file'), delete(fc); end
+        end
+        r = run_radar_sim(c);
+        ok = check(same && r.nProcessed > 0 && sysV.slc.enable, sprintf('%s: setup, export MATLAB = C, %d PRIs %s', ...
+                   variants{k, 1}, r.nProcessed, why)) && ok;
+    catch err
+        ok = check(false, sprintf('%s: %s', variants{k, 1}, err.message)) && ok;
+    end
+end
+
+%% 6) a weak target behind the elevation sidelobe of a jammer, over the hills of the terrain
 if ~quick
     c6 = radar_config();
     c6.display.enable = false;  c6.console.enable = false;  c6.io.saveRaw = false;  c6.console.plots = false;
     c6.targets = c6.targets(3);                                % T3: 34 km, el 10 deg, at az 160 deg
-    c6.targets.rcs_m2 = 0.05;  c6.sim.swerling = 0;
-    c6.sim.sectors_deg = [153 167];
+    c6.targets.rcs_m2 = 0.002;  c6.sim.swerling = 0;
+    c6.sim.sectors_deg = [153 167];                            % (the hills: 100 ... 160 deg, 3 ... 12 km)
     c6.rx.nChannelsUsedDbf = 1:44;  c6.rx.nChannelsUsedSlc = 45:48;
     c6.jammer.az_deg = 160;  c6.jammer.el_deg = 2;  c6.jammer.erp_W = 2;
-    runs = {'no jammer', false, false, ''; 'jammer, no SLC', true, false, ''; 'jammer, QRD-SMI', true, true, 'qrd-smi'; ...
-            'jammer, QRD-RLS', true, true, 'qrd-rls'; 'jammer, NLMS', true, true, 'nlms'};
-    snr = nan(1, size(runs, 1));
+    runs = {'no jammer, no SLC', false, ''; 'jammer, no SLC', true, ''};
+    for m = 1:3
+        runs(end+1, :) = {['jammer, ' upper(names{m})], true, names{m}}; %#ok<AGROW>
+        runs(end+1, :) = {['no jammer, ' upper(names{m})], false, names{m}}; %#ok<AGROW>
+    end
+    snr = nan(1, size(runs, 1));  nFalse = zeros(1, size(runs, 1));
     for k = 1:size(runs, 1)
-        cc = c6;  cc.jammer.enable = runs{k, 2};  cc.slc.enable = runs{k, 3};
-        if runs{k, 3}, cc.slc.algorithm = runs{k, 4}; end
+        cc = c6;  cc.jammer.enable = runs{k, 2};  cc.slc.enable = ~isempty(runs{k, 3});
+        if cc.slc.enable, cc.slc.algorithm = runs{k, 3}; end
         r = run_radar_sim(cc);
         p = r.plots;
         if ~isempty(p)
-            near = abs([p.range_m] - 34.2e3) < 600;
+            near = abs([p.range_m] - 34.2e3) < 600 & abs(wrap180([p.az_deg] - 160)) < 3;
+            nFalse(k) = sum(~near);
             if any(near), snr(k) = max([p(near).snr_dB]); end
         end
-        fprintf('  %-18s: %d plots, target SNR %.1f dB\n', runs{k, 1}, numel(p), snr(k));
+        fprintf('  %-20s: %d plots, %d of them away from the target, target SNR %.1f dB\n', runs{k, 1}, numel(p), ...
+                nFalse(k), snr(k));
     end
-    ok = check(isfinite(snr(1)) && isnan(snr(2)), sprintf(['weak target: detected without the jammer (%.1f dB), ' ...
-               'missed with it'], snr(1))) && ok;
-    for k = 3:5
-        ok = check(isfinite(snr(k)) && snr(k) > snr(1) - 6, sprintf('%s: the target again, SNR %.1f dB (no jammer %.1f dB)', ...
-                   runs{k, 1}, snr(k), snr(1))) && ok;
+    ok = check(isfinite(snr(1)) && nFalse(1) == 0 && (isnan(snr(2)) || snr(2) < snr(1) - 8), ...
+               sprintf('weak target: %.1f dB without the jammer, %.1f dB with it (NaN: missed)', snr(1), snr(2))) && ok;
+    for k = 3:size(runs, 1)
+        jam = runs{k, 2};
+        good = isfinite(snr(k)) && nFalse(k) == 0 && snr(k) > snr(1) - ternary(jam, 3, 1);
+        ok = check(good, sprintf('%s: target SNR %.1f dB (without the jammer and the SLC %.1f dB), %d false plots', ...
+                   runs{k, 1}, snr(k), snr(1), nFalse(k))) && ok;
     end
 end
 fprintf('Sidelobe canceller, element lists and jammers: %s\n', ternary(ok, 'PASS', 'FAIL'));
@@ -298,14 +365,51 @@ end
 
 function slc = slc_settings(method)
 names = {'qrd-smi', 'qrd-rls', 'nlms'};
-slc = struct('method', method, 'algorithm', names{method+1}, 'smiLoading_dB', -30, 'rlsLambda', 0.999, ...
-             'rlsDelta_dB', -20, 'nlmsMu', 0.1, 'nlmsEps', 1);
+slc = struct('method', method, 'algorithm', names{method+1}, 'smiLoading_dB', 6, 'rlsLambda', 0.999, ...
+             'rlsDelta_dB', 0, 'nlmsMu', 0.02, 'nlmsEps', 1, 'nlmsLoading_dB', 6, 'weightMemory_pri', 1);
 end
 
 function [jnr, ph] = jam_stats(x, pN)
 % Jammer power over the noise pN [dB] and the mean phase step from element to element.
 jnr = 10*log10(mean(abs(x(:)).^2) / pN - 1);
 ph = angle(sum(sum(x(:, 2:end) .* conj(x(:, 1:end-1)))));
+end
+
+function t = m_text(v)
+% A value as MATLAB text (for --set).
+if ischar(v), t = ['''' v ''''];
+elseif islogical(v), t = mat2str(v);
+else, t = mat2str(v, 17); end
+end
+
+function same = same_records_slc(a, b)
+% The records of two receiver configuration files agree (relative 1e-9).
+A = read_records_slc(a);  B = read_records_slc(b);
+same = isequal(sort(fieldnames(A)), sort(fieldnames(B)));
+if ~same, return; end
+f = fieldnames(A);
+for i = 1:numel(f)
+    x = A.(f{i});  y = B.(f{i});
+    d = abs(x(:) - y(:)) ./ max(max(abs(x(:)), abs(y(:))), 1e-300);
+    d(x(:) == y(:) | (isnan(x(:)) & isnan(y(:)))) = 0;
+    if ~isequal(size(x), size(y)) || any(d > 1e-9), same = false; return; end
+end
+end
+
+function R = read_records_slc(file)
+fid = fopen(file, 'r', 'ieee-le');
+fread(fid, 8, 'char=>char');
+h = fread(fid, 2, 'uint32');
+R = struct();
+for i = 1:h(2)
+    name = deblank(char(fread(fid, 32, 'uint8=>char').'));
+    name = name(name ~= 0);
+    t = fread(fid, 3, 'uint32');
+    v = fread(fid, t(2) * t(3) * (1 + t(1)), 'double');
+    if t(1), v = complex(v(1:2:end), v(2:2:end)); end
+    R.(name) = reshape(v, t(2), t(3));
+end
+fclose(fid);
 end
 
 function ok = check(cond, msg)

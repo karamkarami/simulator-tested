@@ -109,6 +109,9 @@ typedef struct {
     int    *chSlc;         /* [nAux] their channel numbers, 0-based                                    */
     int     slcMethod;     /* SLC_QRD_SMI, SLC_QRD_RLS or SLC_NLMS (cfg.slc.algorithm)                */
     double  slcSmiLoading_dB, slcRlsLambda, slcRlsDelta_dB, slcNlmsMu, slcNlmsEps;
+    double  slcNlmsLoading_dB; /* leaky NLMS: leak above the noise (optional in the file: -Inf, none) */
+    double  slcWeightMemory; /* weights applied: their exponential mean over about this many PRIs
+                                (cfg.slc.weightMemory_pri; optional in the file: 1)          */
     double *beamU;         /* [nBeams] sine of the beam angle from broadside (NaN without DBF) */
     double  tilt_deg;
     double  height_m;

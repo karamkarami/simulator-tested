@@ -1539,13 +1539,19 @@ static void export_config(void)
             fail("cfg.slc.trainRange_m.%s must be [r1 r2] with 0 <= r1 < r2 [m] (or []).", names[i]);
         slcTrainSet[i] = 1;
     }
-    const double slcLoading = num_or("slc.smiLoading_dB", -30), slcLambda = num_or("slc.rlsLambda", 0.999);
-    const double slcDelta = num_or("slc.rlsDelta_dB", -20), slcMu = num_or("slc.nlmsMu", 0.1), slcEps = num_or("slc.nlmsEps", 1);
+    const double slcLoading = num_or("slc.smiLoading_dB", 6), slcLambda = num_or("slc.rlsLambda", 0.999);
+    const double slcDelta = num_or("slc.rlsDelta_dB", 0), slcMu = num_or("slc.nlmsMu", 0.02), slcEps = num_or("slc.nlmsEps", 1);
+    const double slcNlmsLoading = num_or("slc.nlmsLoading_dB", 6);
+    const double slcMemory = num_or("slc.weightMemory_pri", 50);
     if (!isfinite(slcLoading)) fail("cfg.slc.smiLoading_dB must be a finite number [dB].");
     if (!(slcLambda > 0 && slcLambda <= 1)) fail("cfg.slc.rlsLambda must be in (0, 1].");
     if (!isfinite(slcDelta)) fail("cfg.slc.rlsDelta_dB must be a finite number [dB].");
     if (!(slcMu > 0 && slcMu < 2)) fail("cfg.slc.nlmsMu must be in (0, 2).");
     if (!(slcEps >= 0 && isfinite(slcEps))) fail("cfg.slc.nlmsEps must be a number >= 0.");
+    if (!(isfinite(slcNlmsLoading) || slcNlmsLoading == -INFINITY))
+        fail("cfg.slc.nlmsLoading_dB must be a number [dB] (-Inf: no leak).");
+    if (!(slcMemory >= 1 && isfinite(slcMemory)))
+        fail("cfg.slc.weightMemory_pri must be a number >= 1 (PRIs; 1 = the weights of every PRI).");
     if (slcOn && nAux == 0)
         fail("cfg.slc.enable = true needs the auxiliary elements cfg.rx.nChannelsUsedSlc (element numbers that are not in "
              "cfg.rx.nChannelsUsedDbf).");
@@ -2204,6 +2210,8 @@ static void export_config(void)
         rec_scalar("slcRlsDelta_dB", slcDelta);
         rec_scalar("slcNlmsMu", slcMu);
         rec_scalar("slcNlmsEps", slcEps);
+        rec_scalar("slcNlmsLoading_dB", slcNlmsLoading);
+        rec_scalar("slcWeightMemory", slcMemory);
     }
     rec_scalar("tilt_deg", tilt);
     rec_scalar("height_m", num("ant.height_m"));

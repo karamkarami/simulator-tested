@@ -1281,16 +1281,21 @@ for i = 1:2
         slc.trainRange_m.(nm{i}) = iv(:).';
     end
 end
-slc.smiLoading_dB = num(s, 'smiLoading_dB', -30);
+slc.smiLoading_dB = num(s, 'smiLoading_dB', 6);
 slc.rlsLambda = num(s, 'rlsLambda', 0.999);
-slc.rlsDelta_dB = num(s, 'rlsDelta_dB', -20);
-slc.nlmsMu = num(s, 'nlmsMu', 0.1);
+slc.rlsDelta_dB = num(s, 'rlsDelta_dB', 0);
+slc.nlmsMu = num(s, 'nlmsMu', 0.02);
+slc.nlmsLoading_dB = num(s, 'nlmsLoading_dB', 6);
 slc.nlmsEps = num(s, 'nlmsEps', 1);
+slc.weightMemory_pri = num(s, 'weightMemory_pri', 50);
 if ~isscalar(slc.smiLoading_dB) || ~isfinite(slc.smiLoading_dB)
     error('cfg.slc.smiLoading_dB must be a finite number [dB].');
 end
 if ~isscalar(slc.rlsLambda) || ~(slc.rlsLambda > 0 && slc.rlsLambda <= 1)
     error('cfg.slc.rlsLambda must be in (0, 1].');
+end
+if ~isscalar(slc.nlmsLoading_dB) || ~(isfinite(slc.nlmsLoading_dB) || slc.nlmsLoading_dB == -Inf)
+    error('cfg.slc.nlmsLoading_dB must be a number [dB] (-Inf: no leak).');
 end
 if ~isscalar(slc.rlsDelta_dB) || ~isfinite(slc.rlsDelta_dB)
     error('cfg.slc.rlsDelta_dB must be a finite number [dB].');
@@ -1300,6 +1305,9 @@ if ~isscalar(slc.nlmsMu) || ~(slc.nlmsMu > 0 && slc.nlmsMu < 2)
 end
 if ~isscalar(slc.nlmsEps) || ~(slc.nlmsEps >= 0) || ~isfinite(slc.nlmsEps)
     error('cfg.slc.nlmsEps must be a number >= 0.');
+end
+if ~isscalar(slc.weightMemory_pri) || ~(slc.weightMemory_pri >= 1) || ~isfinite(slc.weightMemory_pri)
+    error('cfg.slc.weightMemory_pri must be a number >= 1 (PRIs; 1 = the weights of every PRI).');
 end
 if slc.enable && slc.nAux == 0
     error(['cfg.slc.enable = true needs the auxiliary elements cfg.rx.nChannelsUsedSlc (element ', ...

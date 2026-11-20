@@ -875,6 +875,7 @@ static void test_slc(const char *configPath)
         double noiseDbf = 0, noiseSlc = 0;
         for (int jam = 0; jam < 2; jam++) {
             cfg.slcMethod = m;
+            cfg.slcWeightMemory = 1;                        /* the weights of every PRI (the algorithm alone) */
             Processor *proc = processor_create(&cfg, 1);
             processor_set_log(proc, LOG_DBF | LOG_SLC);
             SlcSink sink = { &cfg, pulse, 0, 0, 0, 0 };

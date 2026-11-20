@@ -688,13 +688,36 @@ there, at the same beam and Doppler, behind very strong far targets.
   `cfg.slc.trainRange_m.<pulse> = [r1 r2]` (e.g. for the short pulse, whose
   window may end inside the clutter). `cfg.slc.algorithm`:
   * `'qrd-smi'` (default): least squares of the training samples of this
-    PRI by a QR decomposition, diagonal loading `smiLoading_dB` (-30 dB)
-    relative to the mean power of an auxiliary element;
+    PRI by a QR decomposition, diagonal loading `smiLoading_dB` (+6 dB)
+    above the noise power of an auxiliary element (the smallest eigenvalue
+    of the covariance of the auxiliary training samples: the SLC needs more
+    auxiliary elements than jammers; with one auxiliary element 30 dB below
+    its power);
   * `'qrd-rls'`: the same recursively (Givens rotations) over the training
     samples, carried from PRI to PRI with the forgetting factor `rlsLambda`
-    (0.999 per sample); the first PRI starts with the loading `rlsDelta_dB`;
-  * `'nlms'`: normalised LMS (step `nlmsMu` 0.1, regularisation `nlmsEps`
-    1 LSB^2), carried from PRI to PRI.
+    (0.999 per sample); the first PRI starts with the loading `rlsDelta_dB`
+    (0 dB above the noise);
+  * `'nlms'`: leaky normalised LMS (step `nlmsMu` 0.02, regularisation
+    `nlmsEps` 1 LSB^2, leak `nlmsLoading_dB` 6 dB above the noise: the same
+    as a diagonal loading), carried from PRI to PRI. A larger step adapts
+    faster, but the weights fluctuate more (step 0.1 without the leak: 10
+    false plots over the hills without a jammer in the simulation).
+
+  The weights applied are a smooth mean of the weights of about the last
+  `cfg.slc.weightMemory_pri` PRIs (50; two exponential means of 25 PRIs one
+  after the other). The auxiliary elements receive the clutter with the full
+  gain of an element: weights that change from PRI to PRI modulate it, and
+  the MTI and Doppler processing cannot cancel it. In the simulation (a
+  jammer 38 dB above the noise of an element, the hills of the default
+  terrain in the beam) the weights of every PRI gave 138 false plots over the
+  clutter, a first-order mean of 50 PRIs 51; the second-order mean none with
+  the jammer, and the loading above the noise none without a jammer (the
+  weights then fit the noise of the training samples). A longer memory
+  follows a jammer more slowly while the antenna turns past it (100 PRIs:
+  1.5 dB less SNR of a target near the jammer). The training samples must be
+  free of clutter: 256 samples at the end of the short-pulse window reach
+  into the clutter of the default terrain and the jammer is then cancelled by
+  only 20 instead of 38 dB (128: to 2 dB above the noise).
   A strong target inside the training samples is partly cancelled too, and a
   jammer in the main beam of a beam cannot be cancelled without the target
   of that direction. `sidelobe_canceller.m`; the C receiver does the same in
@@ -1687,7 +1710,7 @@ budget.
 | `test_scenarios(scenario, ...)` | several scans (default 3, 48 elements, fixed PRF, terrain clutter) of the `'six'`, `'challenge'` or `'random'` scenario through `run_radar_sim`, with the simulated sectors around every look at every target. A target is expected in a scan unless it is at a blind speed, has less than 3 dB of SNR margin, is out of range or lies in the CFAR window of a stronger (or nearly as strong) target of the same pulse; it must give plots in all expected scans but one and, with enough scans, a confirmed track (not required above the DBF beams, 40 deg, for a 3-D track, or for a crosser faster than 15 deg per scan); at most 2 false plots per scan, no false confirmed track, no ADC overload; a maneuvering target (more than 2 m/s^2: C11 - C13) needs its track only with the PMBM tracker; options: `'prf'`, `'terrain'` (`'uniform'`, `'regions'`, `'off'`), `'cnrOffset'`, `'gainOffset'`, `'nElements'`, `'seed'`, `'method'` (`'ekf'`, `'pmbm'`) |
 | `test_multi_scan(mode, nScans, buildDir, replayOnly, trackMethod, cfarType)` | several scans of the six-target scenario through the C receiver (DDC files, `radar_stream_send`): every PRI received, a confirmed track on every target not at a blind speed, no confirmed false track, at most 2 false plots per scan; `replayOnly` processes the recording of an earlier run again, also with another tracker (`'ekf'`, `'pmbm'`) or CFAR detector |
 | `test_processing_options` | the windows of `window_function.m` (Chebyshev and Kaiser equal `chebwin` / `kaiser`, the peak sidelobe level and mainlobe of every window, the non-uniform evaluation equals the uniform window at uniform positions, unknown names refused for range, Doppler and NUFFT); the range window of the LFM matched filter (Taylor, Chebyshev lower the range sidelobes); the NUFFT of the staggered PRF (a flat noise floor of 1 in every bin for every stagger phase, the bins equal the direct non-uniform DFT, a target at +250 m/s in its own bin where the de-interleaved rows fold it, the notch bin at zero velocity, none on a grid without it); `cfg.rx.nChannelsUsedDbf` (elements 1:4 and [3 10 17 40] of 48: the columns of these elements with unit noise gain; one element: no DBF; 0, 49, repeated or fractional numbers refused), the old `cfg.rx.nChannelsUsed` refused, `cfg.rx.nChannelsUsedSlc` (an element in both lists, the SLC without auxiliary elements refused) |
-| `test_slc` | the sidelobe canceller: `sidelobe_canceller.m` on synthetic data (a 30 dB jammer cancelled to within 1 dB of the noise by QRD-SMI and QRD-RLS, 2 dB by NLMS, a target outside the training samples kept, without a jammer less than 0.5 dB more noise, QRD-SMI equal to the QRD-RLS Givens rotations with lambda 1, two jammers); the jammer model (its power over the noise of an element as the run summary predicts, the azimuth pattern, the phase step from element to element); `radar_generate_ddc` and `radar_live_sim` (full and fast) the same power and phase as MATLAB; the C receiver on the DDC files of `run_radar_sim` with the jammer: its logged DBF and SLC outputs equal MATLAB's for every algorithm; the display modes (*DBF out* only with the DBF, *SLC out* only with the SLC); one main element with an SLC; (not `test_slc(true)`) a weak target behind the elevation sidelobe of a jammer: detected without it, missed with it, detected again with every SLC algorithm |
+| `test_slc` | the sidelobe canceller: `sidelobe_canceller.m` on synthetic data (a 30 dB jammer cancelled to within 1 dB of the noise by QRD-SMI, QRD-RLS and NLMS, a target outside the training samples kept, without a jammer less than 0.5 dB more noise, QRD-SMI equal to the QRD-RLS Givens rotations with lambda 1, two jammers); the jammer model (its power over the noise of an element as the run summary predicts, the azimuth pattern, the phase step from element to element); `radar_generate_ddc` and `radar_live_sim` (full and fast) the same power and phase as MATLAB; the C receiver on the DDC files of `run_radar_sim` with the jammer: its logged DBF and SLC outputs equal MATLAB's for every algorithm; the display modes (*DBF out* only with the DBF, *SLC out* only with the SLC); one main element with an SLC; (not `test_slc(true)`) a weak target behind the elevation sidelobe of a jammer with the hills of the terrain in the beam: detected without the jammer, missed with it, with every SLC algorithm detected again within 3 dB and no false plot over the clutter; the SLC without a jammer: no false plot |
 | `test_cfar` | the five CFAR detectors (CA, GO, SO, OS, CE) with the three windows on exponential noise: false alarm rate 1e-3 in the interior (CA also at the range edges, the shifted window; GO / SO edges reported), targets in the first and last range cell detected, only the tested range interval is tested, the noise estimate equals the statistic computed directly from the (shifted) window, also when the whole tested interval lies within the edge cells; OS and CE testing only the local maxima gives the same local maxima as testing every cell; `cfar_pfa` against the single-look closed forms of CA, GO, SO and OS, and for CE (the censored mean of the exponential order statistics) within 0.2 % |
 | `test_tracker_pmbm` | PMBM tracker with IMM-UKF on synthetic plots (target positions from `target_state`, plots at the antenna looks, errors of `cfg.track`, folded radial velocity), 3-D and 2-D, against the EKF on the same plots: six targets with 8 false plots per scan (fixed and staggered PRF): one confirmed track per target, no false track; a 4 deg/s turn: one track, smaller position error than the EKF, CT dominant in the turn; a 6 m/s^2 acceleration: one track, CA dominant, smaller velocity error than the EKF; Pd 0.7 with 30 false plots per scan: every target detected in the last 3 scans tracked, at most one false track; two targets 200 m apart and two crossing targets: no merge, no swap; track termination after the missed scans; speed gate; the 13 challenge targets with detections from the SNR budget: every target detected in the last 3 scans tracked, no false track |
 | `test_tracker` | EKF tracker on synthetic plots of the six targets over 5 scans with false plots, 3-D and 2-D, CV and CA, with and without the radial velocity: one confirmed track per target, close to it, no false track; the radial velocity lowers the velocity error after two scans; staggered PRF (folded plot velocities): the track radial velocity is unfolded; GNN with two targets 200 m apart (nearest neighbour would merge them); CA against CV on a target accelerating at 4 m/s^2; when built, the C tracker gives the same track updates |

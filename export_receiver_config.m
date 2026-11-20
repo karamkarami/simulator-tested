@@ -51,6 +51,8 @@ if sys.slc.enable
     r{end+1} = {'slcRlsDelta_dB', sys.slc.rlsDelta_dB};
     r{end+1} = {'slcNlmsMu', sys.slc.nlmsMu};
     r{end+1} = {'slcNlmsEps', sys.slc.nlmsEps};
+    r{end+1} = {'slcNlmsLoading_dB', sys.slc.nlmsLoading_dB};
+    r{end+1} = {'slcWeightMemory', sys.slc.weightMemory_pri};   % mean of the weights over PRIs
 end
 r{end+1} = {'tilt_deg', sys.ant.tilt_deg};
 r{end+1} = {'height_m', sys.ant.height_m};
