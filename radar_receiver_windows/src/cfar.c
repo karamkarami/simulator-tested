@@ -468,6 +468,30 @@ static void os_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int
     }
 }
 
+/* Each training power >= level contributes at least level, and each one >=
+ * 2 * level contributes at least that much again. At most n - keep of
+ * either count can be censored. This gives a cheap lower bound on the
+ * original sum, using integer counts so there is no rounding near a tie.
+ * A float times up to 2^29 copies fits exactly in a double, including every
+ * intermediate sum. The original sum of nonnegative powers is monotone. */
+static int ce_below_threshold(const float *win, int n, int keep, float level, double alpha, double power)
+{
+    int above = 0, twice = 0, invalid = 0;
+    const float second = 2.0f * level;
+    for (int i = 0; i < n; i++) {
+        above += win[i] >= level;
+        twice += win[i] >= second;
+        invalid |= !(win[i] >= 0.0f);
+    }
+    const int censored = n - keep;
+    if (invalid || above <= censored) return 0;
+    const int count = above - censored;
+    double units = (double)count + (twice > censored ? twice - censored : 0);
+    const double exactLimit = ldexp(1.0, DBL_MANT_DIG - FLT_MANT_DIG);
+    if (units > exactLimit) units = exactLimit;
+    return alpha * (units * level / keep) >= power;
+}
+
 /* CE (censored mean level): the local peaks of the tested cells are the candidates; the N
  * training cells of a candidate are gathered, the keep = N - round(c N / nTrain) smallest
  * selected (select_kth leaves them in w->win[0 ... keep-1]) and summed in double; detected when
@@ -480,29 +504,59 @@ static void ce_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int
     const int nCens = cfg->nTrain - cfg->cfarCeKeep;
     const size_t nCells = (size_t)m->nCells;
     const float *Pb = m->P + (size_t)b * nR;
+    /* Probe at twice and four times the mean just sufficient for rejection.
+     * At low thresholds most peaks need selection anyway. For alpha >= 4
+     * both probe levels also fit the float range of the cell under test. */
+    const double probeScale = alpha >= 4.0 ? 2.0 / alpha : 0.0;
     for (int d = 0; d < nfft; d++) {
         unsigned char *det = m->det + (size_t)d * nCells + (size_t)b * nR;
         for (int r = cf; r <= cl; r++) det[r] = 1;
         peaks_row(m, b, d, cf, cl, w->colMax, det);              /* the candidates */
         const float *x = Pb + (size_t)d * nCells;
+        const int firstBin = ((d - oD) % nfft + nfft) % nfft;
+        const int afterGuard = (d + gD + 1) % nfft;
         for (int r = cf; r <= cl; r++) {
             if (!det[r]) continue;
-            const int rc = window_centre(r, oR, nR);
             int n = 0;
-            for (int k = -oD; k <= oD; k++) {
-                const float *row = Pb + (size_t)(((d + k) % nfft + nfft) % nfft) * nCells;
-                if (abs(k) <= gD) {                              /* the row without its guard cells */
-                    const int g1 = r - gR, g2 = r + gR;
-                    for (int rr = rc - oR; rr <= rc + oR; rr++)
-                        if (rr < g1 || rr > g2) w->win[n++] = row[rr];
-                } else {
-                    for (int rr = rc - oR; rr <= rc + oR; rr++) w->win[n++] = row[rr];
+            if (oR == 0) {                                      /* one range cell per Doppler row */
+                for (int side = 0; side < 2; side++) {
+                    int bin = side == 0 ? firstBin : afterGuard;
+                    for (int k = 0; k < cfg->trainDoppler; k++) {
+                        w->win[n++] = Pb[(size_t)bin * nCells + r];
+                        if (++bin == nfft) bin = 0;
+                    }
+                }
+            } else {
+                const int rc = window_centre(r, oR, nR);
+                const int first = rc - oR, end = rc + oR + 1;
+                const int g1 = r - gR > first ? r - gR : first;
+                const int g2 = r + gR + 1 < end ? r + gR + 1 : end;
+                int bin = firstBin;
+                for (int k = -oD; k <= oD; k++) {
+                    const float *row = Pb + (size_t)bin * nCells;
+                    if (abs(k) <= gD) {
+                        memcpy(w->win + n, row + first, (size_t)(g1 - first) * sizeof(float));
+                        n += g1 - first;
+                        memcpy(w->win + n, row + g2, (size_t)(end - g2) * sizeof(float));
+                        n += end - g2;
+                    } else {
+                        memcpy(w->win + n, row + first, (size_t)(end - first) * sizeof(float));
+                        n += end - first;
+                    }
+                    if (++bin == nfft) bin = 0;
                 }
             }
             long keep = n - lround((double)nCens * n / cfg->nTrain);
             if (keep < 1) keep = 1;
             if (keep > n) keep = n;
-            if (keep < n) select_kth(w->win, n, (int)keep - 1);   /* the keep smallest first */
+            if (keep < n) {
+                if (probeScale > 0.0 && ce_below_threshold(w->win, n, (int)keep,
+                                                          (float)(x[r] * probeScale), alpha, x[r])) {
+                    det[r] = 0;
+                    continue;
+                }
+                select_kth(w->win, n, (int)keep - 1);             /* the keep smallest first */
+            }
             double sum = 0.0;
             for (long i = 0; i < keep; i++) sum += w->win[i];
             const double mean = sum / (double)keep;

@@ -24,40 +24,59 @@ isDet = false(nB, nR, nD);
 noise = zeros(nB, nR, nD, class(P));
 t = wv.testIdx;
 if t(2) < t(1), return; end
-M = local_max(P);
-cand = false(nB, nR, nD);
+tested = t(1):t(2);
 if isfield(c, 'osAllCells') && c.osAllCells
-    cand(:, t(1):t(2), :) = true;
+    cand = true(nB, numel(tested), nD);
 else
-    cand(:, t(1):t(2), :) = P(:, t(1):t(2), :) >= M(:, t(1):t(2), :);
+    % Neighbours one cell beyond the tested interval still participate in peak picking.
+    lo = max(1, t(1)-1);  hi = min(nR, t(2)+1);
+    M = local_max(P(:, lo:hi, :));
+    cand = P(:, tested, :) >= M(:, tested-lo+1, :);
 end
-idx = find(cand);
+idx = find(cand(:));
 if isempty(idx), return; end
-[b, r, d] = ind2sub([nB nR nD], idx);
+[b, r, d] = ind2sub([nB numel(tested) nD], idx);
+r = r + t(1) - 1;
+idx = b + nB*(r-1) + nB*nR*(d-1);
+rc = min(max(r, oR+1), nR-oR);
+% Cells with the same range shift have identical training offsets and censor count.
+[shift, order] = sort(rc - r);
+idx = idx(order);
+groups = [1; find(diff(shift)) + 1; numel(idx) + 1];
 [offR, offD] = ndgrid(-oR:oR, -oD:oD);
-offR = offR(:).';  offD = offD(:).';
-N = c.nTrain;
-nCens = N - c.ceKeep;
-alpha = c.alpha;
-block = 20000;
-for s = 1:block:numel(idx)
-    k = s:min(s + block - 1, numel(idx));
-    rr = r(k);  bb = b(k);  dd = d(k);
-    rc = min(max(rr, oR + 1), nR - oR);
-    ri = rc + offR;
-    di = mod(dd - 1 + offD, nD) + 1;
-    guard = abs(ri - rr) <= gR & abs(offD) <= gD;
-    V = double(P(bb + nB*(ri - 1) + nB*nR*(di - 1)));
-    V(guard) = Inf;                                  % the guard cells go to the end of every sorted row
-    pc = double(P(idx(k)));
-    nGuard = (min(rr + gR, nR) - max(rr - gR, 1) + 1) * (2*gD + 1);
-    Nr = numel(offR) - nGuard;                       % training cells of the cell
-    keep = max(1, Nr - round(nCens * Nr / N));       % the smallest ones that are averaged
-    S = cumsum(sort(V, 2), 2);
-    mu = S(sub2ind(size(S), (1:numel(k)).', keep)) ./ keep;
-    det = pc > alpha * mu;
-    isDet(idx(k(det))) = true;
-    noise(idx(k(det))) = mu(det) / c.noiseScale;
+offR = offR(:);  offD = offD(:);
+if oD > 0
+    % Pad the needed range rows in Doppler so even wrapped windows use linear offsets.
+    lo = min(rc)-oR;  hi = max(rc)+oR;
+    padded = P(:, lo:hi, mod(-oD:nD+oD-1, nD) + 1);
+else
+    lo = 1;  hi = nR;
+    padded = P;
+end
+strideD = nB*(hi-lo+1);
+centre = b + nB*(rc-lo) + strideD*(d-1+oD);
+centre = centre(order);
+nCens = c.nTrain - c.ceKeep;
+for group = 1:numel(groups)-1
+    first = groups(group);  last = groups(group+1)-1;
+    dr = shift(first);
+    train = abs(dr + offR) > gR | abs(offD) > gD;
+    offsets = nB*offR(train) + strideD*offD(train);
+    nr = numel(offsets);
+    keep = max(1, nr - round(nCens * nr / c.nTrain));
+    % One window per column, with bounded temporary storage even for wide windows.
+    block = max(1, floor(131072 / nr));
+    for s = first:block:last
+        k = s:min(s+block-1, last);
+        cut = idx(k);
+        values = reshape(padded(offsets + centre(k).'), nr, []);
+        values = sort(values, 1);
+        totals = cumsum(double(values(1:keep, :)), 1);
+        mu = totals(end, :).' / keep;
+        det = reshape(double(P(cut)), [], 1) > c.alpha * mu;
+        isDet(cut(det)) = true;
+        noise(cut(det)) = mu(det) / c.noiseScale;
+    end
 end
 end
 
@@ -71,5 +90,7 @@ if nB > 1
 end
 M2 = max(M, cat(2, M(:, 2:end, :), -inf(nB, 1, nD, class(P))));
 M = max(M2, cat(2, -inf(nB, 1, nD, class(P)), M(:, 1:end-1, :)));
-M = max(M, max(circshift(M, 1, 3), circshift(M, -1, 3)));
+if nD > 1
+    M = max(M, max(circshift(M, 1, 3), circshift(M, -1, 3)));
+end
 end

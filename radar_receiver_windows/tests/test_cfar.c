@@ -1,5 +1,5 @@
 /*
- * test_cfar.c - the CFAR detectors (cfar.c: CA, GO, SO, OS) of processor.c
+ * test_cfar.c - the CFAR detectors (cfar.c: CA, GO, SO, OS, CE) of processor.c
  * against a direct computation.
  *
  * White-box test: it includes processor.c to call its static cfar(). On maps
@@ -7,7 +7,8 @@
  * that of the statistic computed directly from the training cells (CA: mean;
  * GO / SO: larger / smaller mean of the two halves, leading and lagging in
  * range for the 2-D and range windows, below and above in Doppler for the
- * Doppler window; OS: k-th smallest) combined with the direct local peak
+ * Doppler window; OS: k-th smallest; CE: mean of the retained smallest
+ * cells) combined with the direct local peak
  * test (cfar() keeps only the detections that are the maximum of their
  * 3 x 3 x 3 neighbourhood), for every detector with the 2-D, the 1-D range
  * and the 1-D Doppler window and for tested range intervals in the middle,
@@ -37,7 +38,7 @@ static int cmp_float(const void *a, const void *b);
  * outer window centred on the nearest cell whose window lies inside the data
  * (shifted inwards at the range edges), minus the guard cells inside the
  * data; Doppler circular. CA mean, GO / SO the larger / smaller half mean,
- * OS the k-th smallest (k scaled to the training cells of the cell). */
+ * OS the k-th smallest, CE the mean after censoring the largest cells. */
 static double direct_statistic(const RadarConfig *cfg, const PulseState *s, int b, int r, int d)
 {
     const int nR = s->nR, nfft = cfg->nfft;
@@ -68,6 +69,13 @@ static double direct_statistic(const RadarConfig *cfg, const PulseState *s, int 
         if (k < 1) k = 1;
         if (k > n) k = n;
         z = v[k - 1];
+    } else if (cfg->cfarType == CFAR_CE) {
+        qsort(v, n, sizeof(float), cmp_float);
+        const long censored = lround((double)(cfg->nTrain - cfg->cfarCeKeep) * n / cfg->nTrain);
+        const long keep = n > censored ? n - censored : 1;
+        sum = 0.0;
+        for (long i = 0; i < keep; i++) sum += v[i];
+        z = sum / keep;
     } else {
         z = sum / n;
     }
@@ -87,6 +95,42 @@ static int direct_peak(const RadarConfig *cfg, const PulseState *s, int b, int r
     return 1;
 }
 
+/* At the first range and Doppler cell, the shifted, wrapped training window
+ * has a known retained mean. Exercise ties and both neighbours of the
+ * threshold, including a censored outlier too large to subtract from a sum. */
+static void check_ce_threshold(RadarConfig *cfg, Processor *p, PulseState *s)
+{
+    PulseConfig pc = cfg->pulse[PULSE_LONG];
+    pc.testFirst = 0;
+    pc.testCount = 1;
+    const int keep[] = {1, cfg->cfarCeKeep, cfg->nTrain};
+    const size_t outlier = (size_t)(cfg->nfft - 1) * s->nCells + cfg->guardRange + 2;
+    const double alphas[] = {nextafter(4.0, 0.0), 4.0, nextafter(4.0, 5.0)};
+    for (size_t k = 0; k < sizeof keep / sizeof keep[0]; k++) {
+        cfg->cfarCeKeep = keep[k];
+        for (int floor = 0; floor <= 1; floor++) {
+            for (size_t i = 0; i < (size_t)cfg->nfft * s->nCells; i++) s->P[i] = (float)floor;
+            if (keep[k] < cfg->nTrain) s->P[outlier] = FLT_MAX;
+            const float cut = 4.0f * floor;
+            const float powers[] = {nextafterf(cut, 0.0f), cut, nextafterf(cut, 5.0f)};
+            for (size_t j = 0; j < sizeof alphas / sizeof alphas[0]; j++) {
+                processor_set_cfar_alpha(p, alphas[j]);
+                for (size_t i = 0; i < sizeof powers / sizeof powers[0]; i++) {
+                    s->P[0] = powers[i];
+                    cfar(p, s, &pc);
+                    const int expected = powers[i] > alphas[j] * floor;
+                    if (s->det[0] != expected ||
+                        (expected && s->noise[0] != (float)(floor / cfg->cfarNoiseScale))) {
+                        failures++;
+                        printf("FAIL CE threshold: keep %d, mean %d, power %.9g, alpha %.17g\n",
+                               keep[k], floor, powers[i], alphas[j]);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /* One CFAR window (guard and training cells per side in range and Doppler),
  * with nBeams beams (0: those of the configuration) and nThreads threads (0:
  * the default). */
@@ -100,6 +144,7 @@ static void check_window(RadarConfig cfg, int type, int method, const char *name
     cfg.cfarMethod = method;
     cfg.cfarNHalf = method == CFAR_DOPPLER ? tD : (gR + tR) * (2 * (gD + tD) + 1) - gR * (2 * gD + 1);
     cfg.cfarOsK = (int)lround(0.75 * cfg.nTrain);
+    cfg.cfarCeKeep = cfg.nTrain - (int)lround(0.1 * cfg.nTrain);
     cfg.cfarNoiseScale = type == CFAR_CA ? 1.0 : 1.3;          /* any value: the estimate is divided by it */
     if (nBeams > 0) cfg.nBeams = nBeams;                /* the CFAR only needs the maps */
     cfg.snrNoise = SNR_NOISE_CFAR;                      /* the CFAR keeps the noise of its detections */
@@ -129,8 +174,9 @@ static void check_window(RadarConfig cfg, int type, int method, const char *name
                     detected += got;
                     if (!tested) { wrong += got; continue; }
                     if (b != 0 && b != cfg.nBeams - 1) continue;        /* direct sums: first and last beam */
+                    if (!direct_peak(&cfg, s, b, r, d)) { wrong += got; continue; }
                     const double thr = p->alpha * direct_statistic(&cfg, s, b, r, d), v = P_at(s, d, b, r);
-                    if (fabs(v - thr) > 1e-5 * thr && got != (v > thr && direct_peak(&cfg, s, b, r, d)))
+                    if (fabs(v - thr) > 1e-5 * thr && got != (v > thr))
                         wrong++;                                        /* (ties: float sums) */
                     if (got) {                                          /* its noise for the SNR */
                         const double nz = s->noise[(size_t)d * s->nCells + (size_t)b * nR + r] * cfg.cfarNoiseScale;
@@ -143,6 +189,7 @@ static void check_window(RadarConfig cfg, int type, int method, const char *name
                    pc.testFirst, pc.testFirst + pc.testCount - 1, nR, wrong, detected);
         }
     }
+    if (type == CFAR_CE && method == CFAR_2D && nBeams == 1) check_ce_threshold(&cfg, p, s);
     printf("%-35s window (range %d+%d, Doppler %d+%d): %s\n", label, gR, tR, gD, tD,
            failures > failuresBefore ? "FAIL" : "every decision equals the direct statistic and peak test");
     processor_destroy(p);
@@ -342,7 +389,7 @@ int main(int argc, char **argv)
         printf("configuration %s: %s\n", argv[1], err);
         return 1;
     }
-    for (int type = CFAR_CA; type <= CFAR_OS; type++)
+    for (int type = CFAR_CA; type <= CFAR_CE; type++)
         for (int one = 0; one < 2; one++) {             /* the configured beams; one beam in 4 threads */
             const int nB = one ? 1 : 0, nThr = one ? 4 : 0;
             check_window(cfg, type, CFAR_2D, "2-D", 3, 8, 3, 4, nB, nThr);
