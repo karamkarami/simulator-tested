@@ -66,6 +66,7 @@ typedef int sock_t;
 #include "radar_rx.h"
 #include "thread_compat.h"
 #include "ddc_files.h"
+#include "mfile.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -484,7 +485,7 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-    const char *path = NULL, *host = "127.0.0.1", *timingCsv = NULL, *format = "rddc", *boardReply = "127.0.0.1:5100";
+    const char *path = NULL, *host = "127.0.0.1", *timingCsv = NULL, *format = NULL, *boardReply = "127.0.0.1:5100";
     int vbdrPayload = 1400, boardPort = 5000, noBoard = 0;
     int port = 50000, loops = 1, payload = 1400, queue = 256, keepGaps = 1, catchUp = 0, quiet = 0;
     double speed = 1.0, spread = 0.0;
@@ -513,6 +514,25 @@ int main(int argc, char **argv)
     if (payload < 4 || payload > MAX_DATAGRAM - 64 - 8 - 20) {
         fprintf(stderr, "--payload must be 4 ... %d bytes\n", MAX_DATAGRAM - 64 - 8 - 20);
         return 2;
+    }
+    if (!format) {
+        char configError[512];
+        MValue *cfg = mfile_eval(RADAR_SOURCE_DIR "/../radar_config.m", NULL, 0,
+                                 configError, sizeof configError);
+        if (!cfg) {
+            fprintf(stderr, "radar_config.m: %s\n", configError);
+            return 2;
+        }
+        const MValue *setting = mvalue_get(cfg, "udp.format");
+        if (setting && setting->type == MV_STR) {
+            if (!strcmp(setting->str, "rddc")) format = "rddc";
+            if (!strcmp(setting->str, "vbdr")) format = "vbdr";
+        }
+        mvalue_free(cfg);
+        if (!format) {
+            fprintf(stderr, "cfg.udp.format must be 'rddc' or 'vbdr'\n");
+            return 2;
+        }
     }
     if (strcmp(format, "rddc") && strcmp(format, "vbdr")) {
         fprintf(stderr, "--format must be 'rddc' or 'vbdr'\n");

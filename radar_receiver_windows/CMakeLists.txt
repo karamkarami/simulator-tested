@@ -180,7 +180,8 @@ endif()
 
 # Sends the DDC files (ddc_<n>.mat) or a recorded stream (--record) over UDP
 # with the real PRI timing
-add_executable(radar_stream_send tools/stream_send.c)
+add_executable(radar_stream_send tools/stream_send.c tools/mfile.c)
+target_compile_definitions(radar_stream_send PRIVATE RADAR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(radar_stream_send PRIVATE radar_core radar_ddc_files)
 
 # The receiver configuration from radar_config.m without MATLAB (the same file as

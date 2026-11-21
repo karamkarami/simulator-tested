@@ -87,7 +87,7 @@ cfg.ant.rpm          = 6;               % rotation speed in use [rev/min] (one o
 % 32 uint16 system parameters (64 bytes) + nDdc x (I, Q of its two channels, int16) = 64 + 8*nDdc
 % bytes. The last packet of each half is shorter (no padding). README "VBDR stream".
 cfg.udp.vbdr.payloadBytes = 1400;       % bytes of the half-stream per packet (after the 28-byte label)
-cfg.udp.vbdr.nPackets     = 22;         % packets per stream = 2*ceil((64 + 8*nDdc)/payloadBytes), checked
+cfg.udp.vbdr.nPackets     = [];         % compute packets per stream from the DDC length and payload size
                                         % against the DDC record of the mode ([] = computed)
 
 %% Board settings of this mode (VBDR board; PPI tab Controls: Radar Settings)
