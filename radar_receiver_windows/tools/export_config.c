@@ -2531,6 +2531,7 @@ static void export_config(void)
     for (int i = 0; i < 2; i++) {
         free(wv[i].codeRe); free(wv[i].codeIm); free(wv[i].misRe); free(wv[i].misIm);
         free(wv[i].tapsRe); free(wv[i].tapsIm); free(wv[i].delay_s); free(wv[i].range_m);
+        free(wv[i].beamU);
     }
 }
 
