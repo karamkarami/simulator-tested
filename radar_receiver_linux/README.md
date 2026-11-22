@@ -444,9 +444,11 @@ streams that never arrived and the last `Loss=` of the board.
 
 With `--ppi`, the tab *Controls* has the section **Radar Settings** below
 *Logging* (see "Radar Settings of the PPI" in `../README.md`): Radar Mode,
-Phase Code, Stagger Pattern, RPM, STC Main / J1 / J2 / J3, Gain Main / J1 /
-J2 / J3, Operation Mode, F1 and F2 with Apply, Reset defaults for this mode
-/ for all modes, Export / Import settings (MAT-file), and the status. A
+Phase Code, Stagger Pattern, RPM, STC Main, STC Auxiliary, Gain Main, Gain
+Auxiliary, Operation Mode, F1 and F2 with Apply, Reset defaults for this mode
+/ for all modes, Export / Import settings (MAT-file), and the status. Each
+Auxiliary dropdown lists the options shared by J1, J2 and J3 and applies the
+selection to all three. It shows *Mixed* when their settings differ. A
 thread of its own (`board_control.c`) writes every change to the board
 (`board_link.c`: `CNTL W 0xAA 0xVV` to `cfg.board.host:port`, answers on
 `cfg.board.replyPort`), reads it back, and keeps the confirmed settings of

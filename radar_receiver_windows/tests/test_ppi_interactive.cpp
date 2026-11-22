@@ -15,9 +15,11 @@
  */
 #include "../src/ppi_qt.cpp"
 
+#include <QAbstractItemView>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QThread>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -842,37 +844,109 @@ int main(int argc, char **argv)
         char err[1024];
         uint8_t regs[256] = { 0 };
         regs[0x01] = 1; regs[0x02] = 20; regs[0x03] = 20; regs[0x28] = 1;
-        for (int k = 0x29; k <= 0x30; k++) regs[k] = 1;
+        /* Different legacy values on the three auxiliary channels of each group. */
+        const uint8_t stc[4] = { 3, 2, 1, 3 }, gain[4] = { 4, 1, 2, 4 };
+        for (int k = 0; k < 4; k++) { regs[0x29 + k] = stc[k]; regs[0x2d + k] = gain[k]; }
         BoardSim *sim = board_sim_open(50231, "127.0.0.1", 50232, regs, 0, err, sizeof err);
         BoardInfo bi;
         const char *sets[3] = { "cfg.board.host = '127.0.0.1';", "cfg.board.port = 50231;", "cfg.board.replyPort = 50232;" };
         const int okInfo = board_info_load(RADAR_SOURCE_DIR "/../radar_config.m", sets, 3, &bi, err, sizeof err) == 0;
         check(sim && okInfo, "Radar Settings: the simulated board and the modes of radar_config.m");
         if (sim && okInfo) {
+            for (int i = 0; i < bi.nModes; i++) if (bi.modes[i].mode == 0) {
+                bi.modes[i].stcOptions[2] = 2;          /* the shared choice must fit J2 for STC, J1 for gain */
+                bi.modes[i].gainOptions[1] = 3;
+            }
             ModeSettings cur = board_mode_info(&bi, 0)->defaults;
+            for (int k = 0; k < 4; k++) { cur.stc[k] = stc[k]; cur.gain[k] = gain[k]; }
             BoardControl *bc = board_control_start(&bi, 0, &cur, err, sizeof err);
             ppi_set_board_control(bc);
             PpiWindow bw(60e3, nullptr);
             bw.resize(1300, 1000);
             bw.show();
             bw.tabs()->setCurrentIndex(2);
+            std::array<uint32_t, 8> written;
             auto settle = [&]() {                         /* the board answers until the control is idle */
+                written.fill(0);
                 BoardState st;
                 for (int i = 0; i < 400; i++) {
-                    board_sim_poll(sim, 5, nullptr);
+                    board_sim_poll(sim, 5, written.data());
                     board_control_state(bc, &st);
                     if (!st.busy) break;
                 }
                 bw.refresh();
                 QCoreApplication::processEvents();
             };
+            auto wroteOnly = [&](std::initializer_list<int> addresses) {
+                std::array<uint32_t, 8> expected = {};
+                for (int address : addresses) expected[address / 32] |= 1u << (address % 32);
+                return written == expected;
+            };
+            auto choices = [](QComboBox *box) {
+                QStringList items;
+                for (int i = 0; i < box->count(); i++) {
+                    const auto flags = box->model()->flags(box->model()->index(i, 0));
+                    if (flags.testFlag(Qt::ItemIsSelectable) && flags.testFlag(Qt::ItemIsEnabled))
+                        items << box->itemText(i);
+                }
+                return items;
+            };
+            auto choose = [&](QComboBox *box, int value) {
+                const int i = box->findText(QString::number(value));
+                box->setCurrentIndex(i);
+                emit box->activated(i);
+                settle();
+            };
             board_control_request(bc, BOARD_REQ_CHECK, 0, 0, nullptr);
             settle();
+            check(wroteOnly({}), "opening Radar Settings reads the mixed settings without a write");
             QComboBox *code = bw.boardCombo(BOARD_CODE), *stagger = bw.boardCombo(BOARD_STAGGER);
             check(code && code->count() == 4 && code->isEnabled() && !stagger->isEnabled() &&
-                  bw.boardCombo(BOARD_MODE)->count() == 3 && bw.boardCombo(BOARD_STC_J2)->count() == 4 &&
+                  bw.boardCombo(BOARD_MODE)->count() == 3 &&
                   bw.boardCarrier(0)->value() == 170 && bw.boardStatus().contains("holds the settings"),
                   "Radar Settings: the lists of mode 0, the check of the board at the start");
+            QComboBox *auxStc = bw.boardCombo(BOARD_STC_J1), *auxGain = bw.boardCombo(BOARD_GAIN_J1);
+            QComboBox *mainStc = bw.boardCombo(BOARD_STC_MAIN), *mainGain = bw.boardCombo(BOARD_GAIN_MAIN);
+            QStringList labels;
+            for (const auto *label : bw.tabs()->widget(2)->findChildren<QLabel *>())
+                if (label->isVisible()) labels << label->text();
+            check(labels.count("STC Auxiliary") == 1 && labels.count("Gain Auxiliary") == 1 &&
+                  labels.filter("STC J").isEmpty() && labels.filter("Gain J").isEmpty() &&
+                  auxStc == bw.boardCombo(BOARD_STC_J2) && auxStc == bw.boardCombo(BOARD_STC_J3) &&
+                  auxGain == bw.boardCombo(BOARD_GAIN_J2) && auxGain == bw.boardCombo(BOARD_GAIN_J3) &&
+                  auxStc != auxGain && auxStc != mainStc && auxGain != mainGain,
+                  "one labeled auxiliary selector per group on the Controls tab");
+            const QStringList two = { "1", "2" }, three = { "1", "2", "3" }, four = { "1", "2", "3", "4" };
+            check(auxStc->currentText().contains("Mixed") && auxGain->currentText().contains("Mixed") &&
+                  choices(auxStc) == two && choices(auxGain) == three && choices(mainStc) == four && choices(mainGain) == four,
+                  "mixed auxiliary settings shown, only common numbers can be selected");
+            settle();
+            check(wroteOnly({}), "refreshing the mixed values does not write to the board");
+            for (int attempt = 0; attempt < 2; attempt++) {
+                /* Select 2 from Mixed, then confirm the same selection again in the popup. */
+                auxStc->showPopup();
+                QCoreApplication::processEvents();
+                if (attempt == 0) send_key(*auxStc->view(), Qt::Key_End, "");
+                send_key(*auxStc->view(), Qt::Key_Return, "\r");
+                settle();
+                check(wroteOnly({ 0x2a, 0x2b, 0x2c }) && auxStc->currentText() == "2" &&
+                      board_sim_register(sim, 0x2a) == 2 && board_sim_register(sim, 0x2b) == 2 &&
+                      board_sim_register(sim, 0x2c) == 2 && mainStc->currentText() == "3",
+                      attempt ? "reselecting STC writes all three STC auxiliary registers" :
+                                "selecting STC writes only the three STC auxiliary registers");
+                choose(auxGain, 3);
+                check(wroteOnly({ 0x2e, 0x2f, 0x30 }) && auxGain->currentText() == "3" &&
+                      board_sim_register(sim, 0x2e) == 3 && board_sim_register(sim, 0x2f) == 3 &&
+                      board_sim_register(sim, 0x30) == 3 && mainGain->currentText() == "4",
+                      attempt ? "reselecting Gain writes all three Gain auxiliary registers" :
+                                "selecting Gain writes only the three Gain auxiliary registers");
+            }
+            choose(mainStc, 1);
+            check(wroteOnly({ 0x29 }) && board_sim_register(sim, 0x29) == 1 && auxStc->currentText() == "2",
+                  "STC Main changes independently");
+            choose(mainGain, 1);
+            check(wroteOnly({ 0x2d }) && board_sim_register(sim, 0x2d) == 1 && auxGain->currentText() == "3",
+                  "Gain Main changes independently");
             code->setCurrentIndex(2);
             emit code->activated(2);                      /* the user chooses phase code 3 */
             settle();
@@ -889,6 +963,9 @@ int main(int argc, char **argv)
             settle();
             check(board_sim_register(sim, 0x00) == 1 && !bw.boardCombo(BOARD_CODE)->isEnabled(),
                   "Radar Settings: mode 1, its phase code dropdown is off");
+            check(choices(auxStc) == four && choices(auxGain) == four &&
+                  auxStc->currentText() == "1" && auxGain->currentText() == "1",
+                  "changing mode shows the new common options and confirmed auxiliary values");
             while (board_control_take_config(bc, &next, &mode, nullptr)) radar_config_free(&next);
             bw.boardCarrier(1)->setValue(176);
             bw.boardCarrierApply(1)->click();

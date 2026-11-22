@@ -1606,12 +1606,17 @@ The tab *Controls* of the C receiver's PPI has, below *Logging*, the
 section **Radar Settings**: the dropdowns Radar Mode (the modes of
 `cfg.modes.available`), Phase Code (off when the mode has no phase-coded
 sub-pulse), Stagger Pattern (off without a staggered PRF), RPM (the
-`cfg.ant.availableRpm` of the mode), STC Main / J1 / J2 / J3, Gain Main /
-J1 / J2 / J3 and Operation Mode, the fields F1 and F2 [MHz] with Apply (off
+`cfg.ant.availableRpm` of the mode), STC Main, STC Auxiliary, Gain Main,
+Gain Auxiliary and Operation Mode, the fields F1 and F2 [MHz] with Apply (off
 for a sub-pulse the mode does not use), the buttons *Reset defaults for this
 mode*, *Reset defaults for all modes*, *Export settings ...*, *Import
 settings ...* and the status.
 
+* STC Auxiliary and Gain Auxiliary list the option numbers available to all
+  three auxiliary channels in the current mode. Selecting a number sends it
+  to J1, J2 and J3, with a separate write and readback for each channel.
+  The menu displays *Mixed* when the three settings differ. Hover over it to
+  see each channel's value. STC Main and Gain Main control the main channel.
 * Every change is written to the board, then read back; the status says
   that it is set, that it is not set (the board reads back another value),
   or that the board did not respond (timeout 0.5 s, one retry).

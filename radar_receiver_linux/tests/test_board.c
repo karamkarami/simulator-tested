@@ -6,7 +6,7 @@
  *   3) the settings of the modes of radar_config.m (argv[1])
  *   4) the control thread with the simulated board: check at the start, a phase code, a mode
  *      change (new receiver configuration), memory of a mode, export / import, reset, and a
- *      board that does not answer
+ *      board that does not answer; grouped auxiliary STC/gain with per-register feedback
  * Prints PASS or FAIL and returns 0 on success.
  */
 #if defined(_WIN32)
@@ -43,6 +43,29 @@ static int g_failures = 0;
         }                                                                        \
     } while (0)
 
+/* Observe the control thread's exchanges and inject a fault at a specific
+ * register. Successful requests still run through the UDP client and board.
+ * The test sets and reads this trace only while the control thread is idle. */
+static int g_writes[256], g_reads[256], g_commands, g_sequence[12];
+static int g_timeoutAddr = -1, g_heldAddr = -1;
+static int test_exchange(BoardLink *link, int write, int address, int value,
+                         double timeout, int retries, uint32_t *returned)
+{
+    if (g_commands < 12) g_sequence[g_commands] = write ? address : -address;
+    g_commands++;
+    if (write) {
+        g_writes[address]++;
+        if (address == g_timeoutAddr) return 0;
+        if (address == g_heldAddr) value = 1;   /* this register stays at 1 */
+    } else {
+        g_reads[address]++;
+    }
+    return board_link_exchange(link, write, address, value, timeout, retries, returned);
+}
+#define board_link_exchange test_exchange
+#include "../src/board_control.c"
+#undef board_link_exchange
+
 static BoardSim *g_sim;
 static int g_simOn = 1;
 
@@ -57,6 +80,32 @@ static void wait_idle(BoardControl *bc, BoardState *st)
     }
     printf("timeout of the board control\n");
     g_failures++;
+}
+
+static void set_aux(BoardControl *bc, BoardState *st, int item, double value, int expectedWrites)
+{
+    memset(g_writes, 0, sizeof g_writes);
+    memset(g_reads, 0, sizeof g_reads);
+    g_commands = 0;
+    CHECK(board_control_request(bc, BOARD_REQ_SET_AUX, item, value, NULL) == 0);
+    wait_idle(bc, st);
+    int expectedCommands = 0;
+    for (int k = 0; k < 3; k++) {
+        const int addr = board_item_address(item + k);
+        const int expectedReads = expectedWrites && addr != g_timeoutAddr;
+        CHECK(g_writes[addr] == expectedWrites && g_reads[addr] == expectedReads);
+        expectedCommands += expectedWrites + expectedReads;
+    }
+    CHECK(g_commands == expectedCommands);             /* no command to Main or the other group */
+}
+
+static void check_channels(const int state[4], int mainItem, int j1, int j2, int j3)
+{
+    const int expected[] = {j1, j2, j3};
+    for (int k = 1; k <= 3; k++) {
+        CHECK(state[k] == expected[k - 1]);
+        CHECK(board_sim_register(g_sim, board_item_address(mainItem + k)) == expected[k - 1]);
+    }
 }
 
 int main(int argc, char **argv)
@@ -138,6 +187,7 @@ int main(int argc, char **argv)
     ModeSettings cur;
     board_settings_of_config(&bi, &cfg0, &cur);
     CHECK(cur.code == 1 && cur.f1_MHz == 170 && cur.f2_MHz == 170 && fabs(cur.rpm - 6) < 1e-9);
+    bi.modes[0].stcOptions[2] = 2;    /* J1 and J3 accept 3, J2 does not */
     BoardControl *bc = board_control_start(&bi, 0, &cur, err, sizeof err);
     CHECK(bc != NULL);
     if (!bc) { printf("board_control_start: %s\nFAIL\n", err); return 1; }
@@ -162,6 +212,47 @@ int main(int argc, char **argv)
     CHECK(board_control_take_config(bc, &next, &mode, NULL) && mode == 0 && next.codeIndex[0] == 3);
     radar_config_free(&next);
 
+    const double invalid[] = {3, 1.5, NAN, 256};
+    for (size_t i = 0; i < sizeof invalid / sizeof invalid[0]; i++) {
+        set_aux(bc, &st, BOARD_STC_J1, invalid[i], 0);
+        CHECK(st.level == 2);
+    }
+    check_channels(st.cur.stc, BOARD_STC_MAIN, 1, 1, 1);
+
+    g_timeoutAddr = board_item_address(BOARD_STC_J1);
+    set_aux(bc, &st, BOARD_STC_J1, 2, 1);
+    CHECK(st.level == 2 && strstr(st.status, "STC J1"));
+    check_channels(st.cur.stc, BOARD_STC_MAIN, 1, 2, 2);
+    g_timeoutAddr = -1;
+    set_aux(bc, &st, BOARD_STC_J1, 2, 1);
+    CHECK(st.level == 0);
+    check_channels(st.cur.stc, BOARD_STC_MAIN, 2, 2, 2);
+    check_channels(st.cur.gain, BOARD_GAIN_MAIN, 1, 1, 1);
+
+    g_commands = 0;
+    CHECK(board_control_request(bc, BOARD_REQ_SET_AUX, BOARD_STC_J1, 2, NULL) == 0);
+    CHECK(board_control_request(bc, BOARD_REQ_SET_AUX, BOARD_GAIN_J1, 2, NULL) == 0);
+    wait_idle(bc, &st);
+    CHECK(st.level == 0 && g_commands == 12);
+    for (int i = 0; i < 6; i++) {
+        const int first = i < 3 ? BOARD_STC_J1 : BOARD_GAIN_J1;
+        const int addr = board_item_address(first + i % 3);
+        CHECK(g_sequence[2 * i] == addr && g_sequence[2 * i + 1] == -addr);
+    }
+    check_channels(st.cur.gain, BOARD_GAIN_MAIN, 2, 2, 2);
+    g_heldAddr = board_item_address(BOARD_GAIN_J2);
+    set_aux(bc, &st, BOARD_GAIN_J1, 3, 1);
+    CHECK(st.level == 2 && strstr(st.status, "Gain J2"));
+    check_channels(st.cur.gain, BOARD_GAIN_MAIN, 3, 1, 3);      /* observed J2 differs from both 2 and 3 */
+    g_heldAddr = -1;
+    set_aux(bc, &st, BOARD_GAIN_J1, 3, 1);
+    CHECK(st.level == 0);
+    check_channels(st.cur.gain, BOARD_GAIN_MAIN, 3, 3, 3);
+    check_channels(st.cur.stc, BOARD_STC_MAIN, 2, 2, 2);
+    CHECK(st.cur.stc[0] == 1 && board_sim_register(g_sim, 0x29) == 2);
+    CHECK(st.cur.gain[0] == 1 && board_sim_register(g_sim, 0x2D) == 1);
+    CHECK(!board_control_take_config(bc, &next, &mode, NULL));
+
     board_control_request(bc, BOARD_REQ_SET, BOARD_GAIN_J2, 4, NULL);
     wait_idle(bc, &st);
     CHECK(st.level == 0 && st.cur.gain[2] == 4 && board_sim_register(g_sim, 0x2F) == 4);
@@ -184,7 +275,9 @@ int main(int argc, char **argv)
     board_control_request(bc, BOARD_REQ_SET, BOARD_MODE, 0, NULL);           /* back: the kept settings */
     wait_idle(bc, &st);
     CHECK(st.mode == 0 && st.cur.code == 3 && st.cur.gain[2] == 4 && st.cur.f2_MHz == 175);
-    CHECK(board_sim_register(g_sim, 0x01) == 3 && board_sim_register(g_sim, 0x2F) == 4);
+    CHECK(board_sim_register(g_sim, 0x01) == 3);
+    check_channels(st.cur.stc, BOARD_STC_MAIN, 2, 2, 2);
+    check_channels(st.cur.gain, BOARD_GAIN_MAIN, 3, 4, 3);
     CHECK(board_control_take_config(bc, &next, &mode, NULL) && mode == 0 && next.codeIndex[1] == 3);
     radar_config_free(&next);
 
@@ -202,12 +295,32 @@ int main(int argc, char **argv)
     while (board_control_take_config(bc, &next, &mode, NULL)) radar_config_free(&next);
     board_control_request(bc, BOARD_REQ_IMPORT, 0, 0, file);
     wait_idle(bc, &st);
-    CHECK(st.level == 0 && st.cur.code == 3 && st.cur.gain[2] == 4 && st.opMode == 3 && board_sim_register(g_sim, 0x2F) == 4);
+    CHECK(st.level == 0 && st.cur.code == 3 && st.opMode == 3);
+    check_channels(st.cur.stc, BOARD_STC_MAIN, 2, 2, 2);
+    check_channels(st.cur.gain, BOARD_GAIN_MAIN, 3, 4, 3);
     while (board_control_take_config(bc, &next, &mode, NULL)) radar_config_free(&next);
     remove(file);
     board_control_request(bc, BOARD_REQ_IMPORT, 0, 0, "no_such_file.mat");
     wait_idle(bc, &st);
     CHECK(st.level == 2 && st.cur.code == 3);
+
+    g_timeoutAddr = board_item_address(BOARD_GAIN_J2);
+    board_control_request(bc, BOARD_REQ_RESET_MODE, 0, 0, NULL);
+    wait_idle(bc, &st);
+    CHECK(st.level == 2 && strstr(st.status, "Gain J2"));
+    check_channels(st.cur.gain, BOARD_GAIN_MAIN, 1, 4, 1);
+    CHECK(board_control_take_config(bc, &next, &mode, &cur));
+    CHECK(cur.gain[1] == 1 && cur.gain[2] == 4 && cur.gain[3] == 1);
+    radar_config_free(&next);
+    g_timeoutAddr = -1;
+    board_control_request(bc, BOARD_REQ_SET, BOARD_MODE, 2, NULL);
+    wait_idle(bc, &st);
+    CHECK(st.level == 0 && st.mode == 2);
+    board_control_request(bc, BOARD_REQ_SET, BOARD_MODE, 0, NULL);
+    wait_idle(bc, &st);
+    CHECK(st.level == 0 && st.mode == 0);
+    check_channels(st.cur.gain, BOARD_GAIN_MAIN, 1, 4, 1);       /* remembered across modes */
+    while (board_control_take_config(bc, &next, &mode, NULL)) radar_config_free(&next);
 
     g_simOn = 0;                                         /* the board does not answer */
     board_control_request(bc, BOARD_REQ_SET, BOARD_STC_J1, 2, NULL);

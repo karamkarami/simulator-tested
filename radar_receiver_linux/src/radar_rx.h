@@ -807,7 +807,8 @@ enum { BOARD_REQ_SET = 0,        /* item, value                                 
        BOARD_REQ_RESET_ALL,      /* forget every mode; the current one sent now         */
        BOARD_REQ_EXPORT,         /* path: the settings of every mode to a MAT-file       */
        BOARD_REQ_IMPORT,         /* path: settings of a MAT-file (checked), sent now     */
-       BOARD_REQ_CHECK };        /* read every register and compare (the start)          */
+       BOARD_REQ_CHECK,          /* read every register and compare (the start)          */
+       BOARD_REQ_SET_AUX };      /* STC_J1 or GAIN_J1: one value for J1, J2 and J3      */
 typedef struct {
     uint64_t     serial;         /* changes with every new state                         */
     int          busy;           /* a request is running                                  */

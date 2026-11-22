@@ -75,6 +75,7 @@
 #include <QGroupBox>
 #include <QLineEdit>
 #include <QGuiApplication>
+#include <QStandardItemModel>
 #include <QStandardPaths>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -113,6 +114,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -2968,8 +2970,10 @@ public:
         if (item == BOARD_STAGGER) return bStagger_;
         if (item == BOARD_RPM) return bRpm_;
         if (item == BOARD_OPMODE) return bOp_;
-        if (item >= BOARD_STC_MAIN && item <= BOARD_STC_J3) return bStc_[item - BOARD_STC_MAIN];
-        if (item >= BOARD_GAIN_MAIN && item <= BOARD_GAIN_J3) return bGain_[item - BOARD_GAIN_MAIN];
+        if (item == BOARD_STC_MAIN) return bStcMain_;
+        if (item >= BOARD_STC_J1 && item <= BOARD_STC_J3) return bStcAux_;
+        if (item == BOARD_GAIN_MAIN) return bGainMain_;
+        if (item >= BOARD_GAIN_J1 && item <= BOARD_GAIN_J3) return bGainAux_;
         return nullptr;
     }
     QSpinBox *boardCarrier(int i) { return bF_[i]; }
@@ -3289,16 +3293,23 @@ private:
         const BoardInfo *bi = board_control_info(g_board);
         QGridLayout *g = new QGridLayout();
         g->setHorizontalSpacing(10);
-        auto combo = [&](const QString &label, int row, int col, int item) {
+        auto combo = [&](const QString &label, int row, int col, int item, int request = BOARD_REQ_SET) {
             QLabel *l = new QLabel(label, box);
             if (col > 0) l->setContentsMargins(80, 0, 0, 0);   /* a gap after the field on its left */
             g->addWidget(l, row, 2 * col);
             QComboBox *c = new QComboBox(box);
             c->setMinimumWidth(110);
             g->addWidget(c, row, 2 * col + 1);
-            QObject::connect(c, QOverload<int>::of(&QComboBox::activated), [this, c, item](int index) {
+            QObject::connect(c, QOverload<int>::of(&QComboBox::activated), [this, c, item, request](int index) {
                 const QVariant d = c->itemData(index);
-                if (d.isValid()) board_control_request(g_board, BOARD_REQ_SET, item, d.toDouble(), nullptr);
+                if (!d.isValid()) return;
+                if (board_control_request(g_board, request, item, d.toDouble(), nullptr) != 0) {
+                    boardSerial_ = 0;
+                    showBoard();
+                    bStatus_->setText(QStringLiteral("Could not queue the board setting. Please try again."));
+                    return;
+                }
+                showBoard();
             });
             return c;
         };
@@ -3306,11 +3317,10 @@ private:
         bCode_    = combo(QStringLiteral("Phase Code"), 0, 1, BOARD_CODE);
         bStagger_ = combo(QStringLiteral("Stagger Pattern"), 0, 2, BOARD_STAGGER);
         bRpm_     = combo(QStringLiteral("RPM"), 0, 3, BOARD_RPM);
-        static const char *const ch[4] = { "Main", "J1", "J2", "J3" };
-        for (int k = 0; k < 4; k++) {
-            bStc_[k]  = combo(QStringLiteral("STC %1").arg(QLatin1String(ch[k])), 1, k, BOARD_STC_MAIN + k);
-            bGain_[k] = combo(QStringLiteral("Gain %1").arg(QLatin1String(ch[k])), 2, k, BOARD_GAIN_MAIN + k);
-        }
+        bStcMain_  = combo(QStringLiteral("STC Main"), 1, 0, BOARD_STC_MAIN);
+        bStcAux_   = combo(QStringLiteral("STC Auxiliary"), 1, 1, BOARD_STC_J1, BOARD_REQ_SET_AUX);
+        bGainMain_ = combo(QStringLiteral("Gain Main"), 2, 0, BOARD_GAIN_MAIN);
+        bGainAux_  = combo(QStringLiteral("Gain Auxiliary"), 2, 1, BOARD_GAIN_J1, BOARD_REQ_SET_AUX);
         bOp_ = combo(QStringLiteral("Operation Mode"), 3, 0, BOARD_OPMODE);
         for (int i = 0; i < 2; i++) {                    /* F1 (short pulse), F2 (long pulse) [MHz] */
             QLabel *fl = new QLabel(i ? QStringLiteral("F2") : QStringLiteral("F1"), box);
@@ -3413,13 +3423,25 @@ private:
             fill(bCode_, codes, st.cur.code, idle && m->nCodes > 0);
             fill(bStagger_, staggers, st.cur.stagger, idle && m->staggered);
             fill(bRpm_, rpms, st.cur.rpm, idle);
-            for (int k = 0; k < 4; k++) {
-                QList<QPair<QString, double>> a, b;
-                for (int i = 1; i <= m->stcOptions[k]; i++) a << qMakePair(QString::number(i), (double)i);
-                for (int i = 1; i <= m->gainOptions[k]; i++) b << qMakePair(QString::number(i), (double)i);
-                fill(bStc_[k], a, st.cur.stc[k], idle);
-                fill(bGain_[k], b, st.cur.gain[k], idle);
-            }
+            auto fillChannels = [&](QComboBox *main, QComboBox *aux, const int options[4], const int values[4]) {
+                auto numbered = [](int count) {
+                    QList<QPair<QString, double>> items;
+                    for (int i = 1; i <= count; i++) items << qMakePair(QString::number(i), (double)i);
+                    return items;
+                };
+                fill(main, numbered(options[0]), values[0], idle);
+                const int common = std::min({options[1], options[2], options[3], 255});   /* one byte on the board */
+                const bool mixed = values[1] != values[2] || values[1] != values[3];
+                fill(aux, numbered(common), mixed ? -1 : values[1], idle && common > 0);
+                if (mixed) {
+                    aux->insertItem(0, QStringLiteral("Mixed"));
+                    static_cast<QStandardItemModel *>(aux->model())->item(0)->setEnabled(false);
+                    aux->setCurrentIndex(0);
+                }
+                aux->setToolTip(QStringLiteral("J1 = %1, J2 = %2, J3 = %3").arg(values[1]).arg(values[2]).arg(values[3]));
+            };
+            fillChannels(bStcMain_, bStcAux_, m->stcOptions, st.cur.stc);
+            fillChannels(bGainMain_, bGainAux_, m->gainOptions, st.cur.gain);
             const int f[2] = { st.cur.f1_MHz, st.cur.f2_MHz };
             for (int i = 0; i < 2; i++) {
                 const bool on = m->enable[i] != 0;
@@ -3577,7 +3599,8 @@ private:
     QPushButton           *logButton_;
     QLabel                *logStatus_;
     QComboBox             *bMode_ = nullptr, *bCode_ = nullptr, *bStagger_ = nullptr, *bRpm_ = nullptr, *bOp_ = nullptr;
-    QComboBox             *bStc_[4] = {}, *bGain_[4] = {};
+    QComboBox             *bStcMain_ = nullptr, *bStcAux_ = nullptr;
+    QComboBox             *bGainMain_ = nullptr, *bGainAux_ = nullptr;
     QSpinBox              *bF_[2] = {};
     QPushButton           *bFApply_[2] = {};
     std::vector<QPushButton *> bButtons_;

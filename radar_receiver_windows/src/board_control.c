@@ -98,7 +98,7 @@ static void publish(BoardControl *bc, int busy, int mode, const ModeSettings *cu
 {
     mutex_lock(&bc->mu);
     bc->st.serial++;
-    bc->st.busy = busy;
+    bc->st.busy = busy || bc->qCount > 0;
     if (mode >= 0) bc->st.mode = mode;
     if (cur) bc->st.cur = *cur;
     if (opMode > 0) bc->st.opMode = opMode;
@@ -152,6 +152,21 @@ static void set_item(ModeSettings *s, int item, double v)
     }
 }
 
+static int aux_option_count(const ModeInfo *m, int item)
+{
+    if (item >= BOARD_STC_J1 && item <= BOARD_STC_J3) return m->stcOptions[item - BOARD_STC_MAIN];
+    if (item >= BOARD_GAIN_J1 && item <= BOARD_GAIN_J3) return m->gainOptions[item - BOARD_GAIN_MAIN];
+    return -1;
+}
+
+static void copy_aux_settings(ModeSettings *dest, const ModeSettings *src)
+{
+    for (int j = 1; j <= 3; j++) {
+        dest->stc[j] = src->stc[j];
+        dest->gain[j] = src->gain[j];
+    }
+}
+
 static int processing_item(int item)
 {
     return item == BOARD_MODE || item == BOARD_CODE || item == BOARD_F1 || item == BOARD_F2 || item == BOARD_STAGGER ||
@@ -191,11 +206,11 @@ static int send_item(BoardControl *bc, int item, int value, int *got)
 static void report_failure(BoardControl *bc, int item, int result, int got)
 {
     if (result == 0)
-        say(bc, 2, "%s not set: the board did not respond (%s:%d)", board_item_name(item), bc->bi.host, bc->bi.port);
+        say(bc, 2, "%s unconfirmed: the board did not respond (%s:%d)", board_item_name(item), bc->bi.host, bc->bi.port);
     else if (result == 2)
         say(bc, 2, "%s not set: the board reads back %d", board_item_name(item), got);
     else
-        say(bc, 2, "%s not set: network error", board_item_name(item));
+        say(bc, 2, "%s unconfirmed: network error", board_item_name(item));
 }
 
 /* Builds the configuration of (mode, s) and hands it to the worker. Returns 1 on success. */
@@ -228,13 +243,12 @@ static const ModeSettings *settings_for(BoardControl *bc, int mode)
 /* Requests                                                                  */
 /* ------------------------------------------------------------------------ */
 
-/* Sends all settings s of the mode (with the mode register when withMode); the confirmed ones are
- * kept, the others reported (and kept as the defaults). Then the receiver uses (mode, s). */
+/* Sends the mode settings. For J1 ... J3, only a valid readback replaces the
+ * current value (same mode) or the destination mode's default (mode change). */
 static void send_mode(BoardControl *bc, int mode, ModeSettings s, int withMode, const char *why)
 {
     const ModeInfo *m = board_mode_info(&bc->bi, mode);
     const int oldMode = bc->st.mode;
-    const ModeSettings old = bc->st.cur;
     int got = 0, r;
     if (withMode) {
         r = send_item(bc, BOARD_MODE, mode, &got);
@@ -245,19 +259,24 @@ static void send_mode(BoardControl *bc, int mode, ModeSettings s, int withMode, 
         }
     }
     ModeSettings kept = s;
+    copy_aux_settings(&kept, mode == oldMode ? &bc->st.cur : &m->defaults);
     int nFail = 0;
     for (int item = BOARD_CODE; item < BOARD_EXT_TRIG; item++) {
         if (item == BOARD_OPMODE || !item_applies(m, 1, item)) continue;
         r = send_item(bc, item, item_value(bc, mode, &s, 0, item), &got);
+        const int options = aux_option_count(m, item);
+        if ((r == 1 || r == 2) && got >= 1 && got <= options) set_item(&kept, item, got);
         if (r == 1) continue;
         report_failure(bc, item, r, got);
-        set_item(&kept, item, item == BOARD_RPM ? m->defaults.rpm : item_value(bc, mode, &m->defaults, 0, item) +
-                                                        (item == BOARD_F1 || item == BOARD_F2 ? bc->bi.fcMin_MHz : 0));
+        if (options < 0)
+            set_item(&kept, item, item == BOARD_RPM ? m->defaults.rpm : item_value(bc, mode, &m->defaults, 0, item) +
+                                                            (item == BOARD_F1 || item == BOARD_F2 ? bc->bi.fcMin_MHz : 0));
         nFail++;
         if (r == 0 && nFail >= 2) { say(bc, 2, "the other settings were not sent"); break; }
     }
     bc->mem[mode & 7] = kept;
     bc->have[mode & 7] = 1;
+    copy_aux_settings(&s, &kept);
     if (!post_config(bc, mode, &s)) return;
     if (mode != oldMode) note(bc, "Radar Settings: radar mode %d -> %d (%s)", oldMode, mode, why);
     else note(bc, "Radar Settings: mode %d %s", mode, why);
@@ -267,7 +286,6 @@ static void send_mode(BoardControl *bc, int mode, ModeSettings s, int withMode, 
              s.gain[2], s.gain[3]);
     note(bc, "Radar Settings: %s", t);
     if (!nFail) say(bc, 0, "%s: radar mode %d %s set", why, mode, mode != oldMode ? "and its settings" : "settings");
-    (void)old;
     publish(bc, 1, mode, &s, -1);
 }
 
@@ -319,6 +337,51 @@ static void do_set(BoardControl *bc, int item, double value)
         item == BOARD_RPM && !bc->bi.sendRpm ? " (receiver only)" : "");
     note(bc, "Radar Settings: %s %s -> %s (mode %d)", board_item_name(item), before, after, mode);
     publish(bc, 1, mode, &s, newOp);
+}
+
+/* One selection for J1, J2 and J3. Validate it against the mode active when
+ * this request runs, before sending anything. Each register has its own readback. */
+static void do_set_aux(BoardControl *bc, int first, double value)
+{
+    if (first != BOARD_STC_J1 && first != BOARD_GAIN_J1) {
+        say(bc, 2, "unknown auxiliary setting");
+        return;
+    }
+    const int mode = bc->st.mode;
+    const ModeInfo *m = board_mode_info(&bc->bi, mode);
+    if (!(value >= 1 && value <= 255) || value != floor(value)) {
+        say(bc, 2, "the auxiliary setting must be a whole register value from 1 to 255");
+        return;
+    }
+    for (int j = 1; j <= 3; j++) {
+        const int item = first + j - 1, options = aux_option_count(m, item);
+        if (value > options) {
+            say(bc, 2, "%s in mode %d accepts settings 1 ... %d",
+                board_item_name(item), mode, options);
+            return;
+        }
+    }
+
+    ModeSettings cur = bc->st.cur;
+    for (int j = 1; j <= 3; j++) {
+        const int item = first + j - 1;
+        int got = 0;
+        const int result = send_item(bc, item, (int)value, &got);
+        if (result == 1) say(bc, 0, "%s = %d set", board_item_name(item), got);
+        else report_failure(bc, item, result, got);
+
+        if (result == 1 || (result == 2 && got >= 1 && got <= aux_option_count(m, item))) {
+            const int before = item_value(bc, mode, &cur, bc->st.opMode, item);
+            if (!bc->have[mode]) {
+                bc->mem[mode] = cur;
+                bc->have[mode] = 1;
+            }
+            set_item(&cur, item, got);
+            set_item(&bc->mem[mode], item, got);
+            note(bc, "Radar Settings: %s %d -> %d (mode %d, readback)", board_item_name(item), before, got, mode);
+        }
+        publish(bc, 1, mode, &cur, -1);
+    }
 }
 
 static void do_check(BoardControl *bc)
@@ -454,6 +517,9 @@ static void run_request(BoardControl *bc, const Request *q)
     case BOARD_REQ_SET:
         do_set(bc, q->item, q->value);
         break;
+    case BOARD_REQ_SET_AUX:
+        do_set_aux(bc, q->item, q->value);
+        break;
     case BOARD_REQ_RESET_MODE:
         bc->have[mode & 7] = 0;
         send_mode(bc, mode, board_mode_info(&bc->bi, mode)->defaults, 0, "Reset defaults of this mode");
@@ -562,7 +628,6 @@ void board_control_state(BoardControl *bc, BoardState *st)
 {
     mutex_lock(&bc->mu);
     *st = bc->st;
-    if (bc->qCount) st->busy = 1;
     mutex_unlock(&bc->mu);
 }
 
