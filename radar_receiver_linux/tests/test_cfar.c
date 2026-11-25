@@ -1,15 +1,15 @@
 /*
- * test_cfar.c - the CFAR detectors (cfar.c: CA, GO, SO, OS, CE) of processor.c
+ * test_cfar.c - the receiver CFAR detectors (CA, GO, SO, OS, CE)
  * against a direct computation.
  *
- * White-box test: it includes processor.c to call its static cfar(). On maps
- * of exponential noise (one per window), every decision of cfar() must equal
+ * White-box test of the detector linked from radar_core. On maps
+ * of exponential noise (one per window), every decision must equal
  * that of the statistic computed directly from the training cells (CA: mean;
  * GO / SO: larger / smaller mean of the two halves, leading and lagging in
  * range for the 2-D and range windows, below and above in Doppler for the
  * Doppler window; OS: k-th smallest; CE: mean of the retained smallest
  * cells) combined with the direct local peak
- * test (cfar() keeps only the detections that are the maximum of their
+ * test (the detector keeps only the detections that are the maximum of their
  * 3 x 3 x 3 neighbourhood), for every detector with the 2-D, the 1-D range
  * and the 1-D Doppler window and for tested range intervals in the middle,
  * at both range edges (shifted windows, also when the whole interval lies
@@ -26,9 +26,13 @@
  * axis, the lowest beam keeps its centre, and nothing changes with the
  * options off.
  */
-#include "../src/processor.c"
+#include "processor_internal.h"
 
+#include <float.h>
+#include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 static int failures = 0;
 
@@ -117,7 +121,7 @@ static void check_ce_threshold(RadarConfig *cfg, Processor *p, PulseState *s)
                 processor_set_cfar_alpha(p, alphas[j]);
                 for (size_t i = 0; i < sizeof powers / sizeof powers[0]; i++) {
                     s->P[0] = powers[i];
-                    cfar(p, s, &pc);
+                    processor_cfar(p, s, &pc);
                     const int expected = powers[i] > alphas[j] * floor;
                     if (s->det[0] != expected ||
                         (expected && s->noise[0] != (float)(floor / cfg->cfarNoiseScale))) {
@@ -163,7 +167,7 @@ static void check_window(RadarConfig cfg, int type, int method, const char *name
         PulseConfig pc = cfg.pulse[PULSE_LONG];
         pc.testFirst = intervals[k][0];
         pc.testCount = intervals[k][1];
-        cfar(p, s, &pc);
+        processor_cfar(p, s, &pc);
         int wrong = 0, detected = 0;
         for (int d = 0; d < nfft; d++)
             for (int b = 0; b < cfg.nBeams; b++)
@@ -267,13 +271,14 @@ static void check_pruning(RadarConfig cfg, const char *name, int nStrong, double
     processor_set_cfar_alpha(p, alpha);
     PulseConfig all = *pc;
     all.testFirst = 0;  all.testCount = nR;
-    cfar(p, s, &all);
+    processor_cfar(p, s, &all);
     const double t0 = now_seconds();
     prune_and_report(p, PULSE_LONG, s);
     const double dt = now_seconds() - t0;
 
     /* the direct rules */
-    Cell *c = malloc(sizeof(Cell) * (size_t)nfft * s->nCells);
+    typedef struct { int b, r, d; float pw; } ReferenceCell;
+    ReferenceCell *c = malloc(sizeof *c * (size_t)nfft * s->nCells);
     int n = 0, nDet = 0;
     for (int d = 0; d < nfft; d++)
         for (int r = 0; r < nR; r++)
@@ -286,7 +291,7 @@ static void check_pruning(RadarConfig cfg, const char *name, int nStrong, double
                     for (int bb = b - 1; bb <= b + 1; bb++)
                         for (int rr = r - 1; rr <= r + 1; rr++)
                             if (bb >= 0 && bb < nB && rr >= 0 && rr < nR && P_at(s, (d + dd + nfft) % nfft, bb, rr) > v) peak = 0;
-                if (peak) c[n++] = (Cell){ b, r, d, v };
+                if (peak) c[n++] = (ReferenceCell){ b, r, d, v };
             }
     const double ratio = pow(10.0, cfg.sidelobeMargin_dB / 10.0);
     int nKeep = 0, wrong = 0, k = 0;
@@ -311,6 +316,13 @@ static void check_pruning(RadarConfig cfg, const char *name, int nStrong, double
     }
     printf("pruning (%s): %d CFAR detections (local peaks: %d), %d kept (the direct rules: %d) in %.1f ms: %s\n", name,
            nDet, n, s->nReports, nKeep, dt * 1e3, wrong || k != s->nReports || dt > 0.5 ? "FAIL" : "ok");
+    /* The next CPI has no detections. Its report list must replace the previous one. */
+    memset(s->det, 0, (size_t)nfft * s->nCells * sizeof *s->det);
+    prune_and_report(p, PULSE_LONG, s);
+    if (s->nReports != 0) {
+        failures++;
+        printf("FAIL pruning (%s): empty detection map kept %d old reports\n", name, s->nReports);
+    }
     free(c);
     processor_destroy(p);
 }
@@ -332,11 +344,13 @@ static Detection interp_one(Processor *p, PulseState *s, double d0, double b0, i
     det.rIdx = r;
     det.dIdx = ((int)lround(d0) + nfft) % nfft;
     det.vr_mps = -cfg->dopFreq_Hz[det.dIdx] * cfg->pulse[PULSE_LONG].lambda_m / 2;
-    det.el_deg = cfg->dbfEnabled ? cfg->tilt_deg + asin(cfg->beamU[det.beam]) * 180 / PI : NAN;
-    s->nReports = 0;
-    add_report(s, &det);
-    peak_interpolation(p, PULSE_LONG, s);
-    return s->reports[0];
+    det.el_deg = cfg->dbfEnabled ? cfg->tilt_deg + asin(cfg->beamU[det.beam]) * 180 / PROCESSOR_PI : NAN;
+    PulseState fixture = *s;
+    fixture.reports = &det;
+    fixture.nReports = 1;
+    fixture.capReports = 1;
+    peak_interpolation(p, PULSE_LONG, &fixture);
+    return det;
 }
 
 static void check_interpolation(RadarConfig cfg)
@@ -358,8 +372,8 @@ static void check_interpolation(RadarConfig cfg)
         if (cfg.dbfEnabled) {
             const int i0 = (int)floor(b0);
             const double u = cfg.beamU[i0] + (b0 - i0) * (cfg.beamU[i0 + 1] - cfg.beamU[i0]);
-            elTrue = cfg.tilt_deg + asin(u) * 180 / PI;
-            elBeam = cfg.tilt_deg + asin(cfg.beamU[(int)lround(b0)]) * 180 / PI;
+            elTrue = cfg.tilt_deg + asin(u) * 180 / PROCESSOR_PI;
+            elBeam = cfg.tilt_deg + asin(cfg.beamU[(int)lround(b0)]) * 180 / PROCESSOR_PI;
         }
         bad += fabs(d.vr_mps - (on ? vrTrue : vrBin)) > 1e-3;
         if (cfg.dbfEnabled && nB > 2) bad += fabs(d.el_deg - (on ? elTrue : elBeam)) > 1e-3;
@@ -369,7 +383,7 @@ static void check_interpolation(RadarConfig cfg)
         /* the lowest beam has no neighbour below: its centre stays */
         if (cfg.dbfEnabled && nB > 2) {
             d = interp_one(p, s, d0, 0.2, r);
-            bad += fabs(d.el_deg - (cfg.tilt_deg + asin(cfg.beamU[0]) * 180 / PI)) > 1e-9;
+            bad += fabs(d.el_deg - (cfg.tilt_deg + asin(cfg.beamU[0]) * 180 / PROCESSOR_PI)) > 1e-9;
         }
         processor_destroy(p);
     }

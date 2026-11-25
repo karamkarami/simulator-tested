@@ -20,20 +20,44 @@ at 921600 baud.
         |  input thread: reassembly of each PRI (udp_input.c) -> queue of PRIs (input_thread.c)
         v  split in time: short-pulse samples | long-pulse samples
  DBF (21 x 48 matrix, off for 1 element)
+ Sidelobe canceller (optional, uses the auxiliary channels)
  Pulse compression: matched filter, or the mismatch filter of a phase code
          (valid convolution; FFT fast convolution when it is faster)
  CPI ring buffer (the pulses of one CPI) -> MTI ring (MTI output of each pulse computed once)
- Doppler: fixed PRF Hamming + FFT 128 | staggered: de-interleave, Hamming, FFT 32, NCI;
-          division by the noise gain of every bin
- CFAR (cfar.c): CA, GO, SO or OS detector with the 2-D, 1-D range or 1-D Doppler window
+ Doppler (per-bin noise-gain correction)
+   fixed PRF      -> windowed FFT
+   staggered PRF  -> windowed FFT per stagger row and non-coherent integration, or full-CPI NUFFT
+ CFAR (cfar.c): CA, GO, SO, OS or CE detector with the 2-D, 1-D range or 1-D Doppler window
    (tested range interval, shifted range window at the edges)
-   -> pruning (local peaks, sidelobe blanking) -> reports -> plot extraction
+   -> pruning (local peaks, sidelobe blanking) -> reports -> peak interpolation -> plot extraction
    -> tracking (optional, tracker.c): EKF + GNN (tracker_ekf.c), PMBM + IMM-UKF (tracker_pmbm.c)
       or TOMHT (k-best, N-scan) + IMM-UKF (tracker_tomht.c)
         |                                   |                         |                |
         |                                   +-> serial (detections)   +-> CSV, console, Qt PPI,
         |                                                                 serial (plots) +-> CSV, Qt PPI
 ```
+
+| Processing block | Source file |
+| --- | --- |
+| PRI reassembly and input queue | [udp_input.c](src/udp_input.c), [input_thread.c](src/input_thread.c) |
+| Channel loading and sub-pulse selection | [subpulse_input.c](src/subpulse_input.c) |
+| Digital beamforming | [dbf.c](src/dbf.c) |
+| Sidelobe cancellation | [sidelobe_canceller.c](src/sidelobe_canceller.c) |
+| Range processing and pulse compression | [range_processing.c](src/range_processing.c) |
+| CPI ring buffer | [cpi_buffer.c](src/cpi_buffer.c) |
+| Moving target indication (MTI) | [mti.c](src/mti.c) |
+| Doppler processing | [doppler.c](src/doppler.c) |
+| CFAR detection | [cfar.c](src/cfar.c) |
+| Peak pruning and sidelobe blanking | [pruning.c](src/pruning.c) |
+| Detection reports | [detection_reports.c](src/detection_reports.c) |
+| Doppler and elevation peak interpolation | [peak_interpolation.c](src/peak_interpolation.c) |
+| Plot extraction | [extractor.c](src/extractor.c) |
+| Tracking | [tracker.c](src/tracker.c), [EKF + GNN](src/tracker_ekf.c), [PMBM](src/tracker_pmbm.c), [TOMHT](src/tracker_tomht.c) |
+| Beam profiles and range-Doppler maps | [display_taps.c](src/display_taps.c) |
+| Raw DDC video | [video.c](src/video.c) |
+
+[processor.c](src/processor.c) manages receiver state, schedules the blocks
+for each PRI and CPI, records block timings and calls the output callbacks.
 
 The algorithms are the same as in the MATLAB simulator (`../src/*.m`, see
 `../README.md`). The C receiver reads every number that MATLAB derives
@@ -484,7 +508,7 @@ The SNR is power / noise - 1 with the noise floor of the beam (the median
 of its map, scaled to the mean) or, with `cfg.report.snrNoise = 'cfar'`,
 the CFAR noise estimate of the cell; the start of the console output says
 which (`SNR noise: ...`). **Peak interpolation** (a block of its own after
-the CFAR and the pruning, `peak_interpolation()` in `processor.c`, as
+the CFAR and the pruning, `peak_interpolation()` in `peak_interpolation.c`, as
 `peak_interpolation.m`): with `cfg.report.dopplerInterp` the radial velocity
 comes from a parabola through the powers [dB] of the Doppler bins d-1, d,
 d+1 of the peak (circular), with `cfg.report.elevationInterp` (default on,
@@ -764,7 +788,7 @@ DDC log keeps every channel.
 
 **Sidelobe canceller** (`cfg.slc`, configuration records `slcEnabled`,
 `chSlc`, `slcMethod`, ..., `<pulse>_slcTrainFirst` / `_slcTrainCount`;
-`processor.c`): after the DBF, every beam minus the auxiliary elements
+`sidelobe_canceller.c`): after the DBF, every beam minus the auxiliary elements
 `chSlc` (`cfg.rx.nChannelsUsedSlc`) with weights estimated in every PRI from
 the training samples of the sub-pulse: QRD-SMI (QR decomposition of the
 training samples with diagonal loading), QRD-RLS (Givens rotations carried

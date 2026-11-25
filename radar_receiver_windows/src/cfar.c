@@ -31,6 +31,7 @@
  * mean of the statistic for unit noise; 1 for CA).
  */
 #include "cfar.h"
+#include "processor_internal.h"
 
 #include <float.h>
 #include <math.h>
@@ -42,6 +43,17 @@ static void *xcalloc(size_t n, size_t size)
     void *p = calloc(n ? n : 1, size);
     if (!p) abort();
     return p;
+}
+
+void cfar_init_counts(const RadarConfig *cfg, PulseState *s)
+{
+    const int gR = cfg->guardRange, oR = gR + cfg->trainRange;
+    const int gD = cfg->guardDoppler, oD = gD + cfg->trainDoppler;
+    for (int r = 0; r < s->nR; r++) {          /* guard cells cut at the range edges */
+        const int g0 = r - gR > 0 ? r - gR : 0, g1 = r + gR < s->nR - 1 ? r + gR : s->nR - 1;
+        const int cnt = (2 * oR + 1) * (2 * oD + 1) - (g1 - g0 + 1) * (2 * gD + 1);
+        s->cntInv[r] = 1.0 / cnt;
+    }
 }
 
 void cfar_scratch_init(CfarScratch *w, const RadarConfig *cfg, int maxNR)
@@ -593,6 +605,43 @@ void cfar_chunk(const RadarConfig *cfg, const CfarMap *m, double alpha, int b, i
                 float *noise = m->noise + (size_t)d * nCells + (size_t)b * m->nR;
                 memset(noise + cf, 0, sizeof(float) * (size_t)(r1 - cf + 1));
             }
+        }
+    }
+}
+
+/* The work items are the beams, or, with fewer beams than threads (one
+ * element), chunks of tested range cells of at least CFAR_MIN_CHUNK cells:
+ * each chunk sums the range cells its windows need, so its sums and
+ * decisions are those of the whole beam. */
+#define CFAR_MIN_CHUNK 64
+
+void processor_cfar(const Processor *p, PulseState *s, const PulseConfig *pc)
+{
+    const RadarConfig *cfg = p->cfg;
+    const int nB = cfg->nBeams;
+    const int f = pc->testFirst, l = pc->testFirst + pc->testCount - 1, nTest = l - f + 1;
+
+    memset(s->det, 0, (size_t)cfg->nfft * s->nCells);
+    if (l < f) return;
+    for (int r = f; r <= l; r++) s->thrScale[r] = p->alpha * s->cntInv[r];
+    int notchLastCell = -1;
+    for (int r = 0; r < pc->nRange && pc->range_m[r] <= cfg->notchMaxRange_m; r++) notchLastCell = r;
+    const CfarMap map = { s->P, s->det, s->noise, s->cntInv, s->thrScale, s->nR, s->nCells, nB, cfg->nfft };
+    int nChunks = 1;
+    if (nB < p->nThreads) {
+        const int most = nTest / CFAR_MIN_CHUNK > 1 ? nTest / CFAR_MIN_CHUNK : 1;
+        nChunks = (p->nThreads + nB - 1) / nB;
+        if (nChunks > most) nChunks = most;
+    }
+    const int nItems = nB * nChunks;
+    #pragma omp parallel num_threads(team_size(p->nThreads, nItems)) if(nItems > 1)
+    {
+        Scratch *w = &p->scratch[thread_num()];
+        #pragma omp for schedule(dynamic)
+        for (int it = 0; it < nItems; it++) {
+            const int c = it % nChunks;
+            cfar_chunk(cfg, &map, p->alpha, it / nChunks, f + (int)((long long)nTest * c / nChunks),
+                       f + (int)((long long)nTest * (c + 1) / nChunks) - 1, notchLastCell, &w->cfar);
         }
     }
 }

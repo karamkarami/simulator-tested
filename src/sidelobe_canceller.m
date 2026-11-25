@@ -27,7 +27,7 @@ function [y, st] = sidelobe_canceller(st, main, aux, mainTrain, auxTrain, slc)
 %   processing then cannot cancel.
 %   st is the state of the sub-pulse ([] or struct() at the start): st.R, st.z (QRD-RLS), st.W,
 %   st.W1, st.Wa.
-%   The C receiver (processor.c) does the same in double precision.
+%   The C receiver (sidelobe_canceller.c) does the same in double precision.
 nAux = size(aux, 1);
 nB = size(main, 1);
 K = size(auxTrain, 2);

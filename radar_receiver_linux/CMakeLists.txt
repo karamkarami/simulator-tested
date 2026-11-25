@@ -53,7 +53,18 @@ add_library(radar_core STATIC
     src/config.c
     src/fft.c
     src/extractor.c
+    src/subpulse_input.c
+    src/dbf.c
+    src/sidelobe_canceller.c
+    src/range_processing.c
+    src/cpi_buffer.c
+    src/mti.c
+    src/doppler.c
     src/cfar.c
+    src/pruning.c
+    src/detection_reports.c
+    src/peak_interpolation.c
+    src/display_taps.c
     src/tracker.c
     src/tracker_ekf.c
     src/tracker_pmbm.c
@@ -270,17 +281,9 @@ if(RADAR_BUILD_TESTS)
     # one receive element (no DBF): four-step FFT matched filter, CFAR split into range chunks
     add_test(NAME core_1ch COMMAND test_core ${CMAKE_CURRENT_SOURCE_DIR}/config/radar_config_1ch.bin)
 
-    # the CFAR against direct sums (white-box: the test includes processor.c)
-    add_executable(test_cfar tests/test_cfar.c src/config.c src/fft.c src/cfar.c src/extractor.c src/tracker.c src/tracker_ekf.c
-                             src/tracker_pmbm.c src/tracker_tomht.c src/platform.c)
-    target_include_directories(test_cfar PRIVATE src)
-    target_link_libraries(test_cfar PRIVATE Threads::Threads)
-    if(OpenMP_C_FOUND)
-        target_link_libraries(test_cfar PRIVATE OpenMP::OpenMP_C)
-    endif()
-    if(NOT WIN32)
-        target_link_libraries(test_cfar PRIVATE m)
-    endif()
+    # Compare the production detector with direct sums over its training cells.
+    add_executable(test_cfar tests/test_cfar.c)
+    target_link_libraries(test_cfar PRIVATE radar_core)
     add_test(NAME cfar COMMAND test_cfar ${CMAKE_CURRENT_SOURCE_DIR}/config/radar_config.bin)
     add_test(NAME cfar_1ch COMMAND test_cfar ${CMAKE_CURRENT_SOURCE_DIR}/config/radar_config_1ch.bin)
 

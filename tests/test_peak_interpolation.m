@@ -5,7 +5,7 @@ function ok = test_peak_interpolation()
 %   (elevation) with cfg.report.dopplerInterp / elevationInterp; the Doppler
 %   bin wraps at the edge of the axis, the lowest beam keeps its centre,
 %   and without the options the centres of the bin and of the beam stay. The
-%   C receiver's test_cfar checks the same in processor.c.
+%   C receiver's test_cfar checks the same in peak_interpolation.c.
 
 root = fileparts(fileparts(mfilename('fullpath')));
 addpath(root, fullfile(root, 'src'));

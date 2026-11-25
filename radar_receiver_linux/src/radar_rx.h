@@ -355,7 +355,7 @@ uint64_t input_thread_dropped(InputThread *t);
 void     input_thread_stop(InputThread *t);        /* stops and joins the thread */
 
 /* ------------------------------------------------------------------------ */
-/* Detections and plots (processor.c, extractor.c)                           */
+/* Detections and plots (detection_reports.c, extractor.c)                   */
 /* ------------------------------------------------------------------------ */
 
 typedef struct {

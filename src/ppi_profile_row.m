@@ -7,7 +7,7 @@ function row = ppi_profile_row(V, kind, x)
 %   (pulse compression output, [1 x nRange]). Returns |x|^2 in the range bins
 %   of the PPI map (V, ppi_video_init.m): the short pulse up to the first
 %   long-pulse range cell, then the long pulse (the mean of the samples of a
-%   bin; 0 where there is none). The C receiver does the same (processor.c,
+%   bin; 0 where there is none). The C receiver does the same (display_taps.c,
 %   profile_add).
 if strcmp(kind, 'slc'), kind = 'dbf'; end              % (the same samples)
 L = V.(kind);

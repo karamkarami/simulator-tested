@@ -8,7 +8,7 @@ function rd = ppi_rd_map(V, sys, slices, dets, beam, t_s, az_deg)
 %   long-pulse cells. rd.P [nBins x nfft] (NaN = no cell), rd.vel_mps (the
 %   Doppler axis), rd.noise (the median of the cells: the noise floor),
 %   rd.dets (the reports of the beam: [range_m dopplerBin power]),
-%   rd.notchBins (MTI notch). The C receiver does the same (processor.c,
+%   rd.notchBins (MTI notch). The C receiver does the same (display_taps.c,
 %   rdmap_add).
 nfft = sys.dop.nfft;
 rd.P = NaN(V.nR, nfft);

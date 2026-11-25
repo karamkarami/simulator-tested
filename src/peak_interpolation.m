@@ -20,7 +20,7 @@ function rep = peak_interpolation(rep, P, sys)
 %   A peak is interpolated only when the parabola has a maximum (negative
 %   curvature) and all three powers are positive; otherwise the bin or beam
 %   centre is kept. The pruned detections are local peaks, so |delta| <= 0.5.
-%   The C receiver does the same (processor.c, peak_interpolation()).
+%   The C receiver does the same (peak_interpolation.c, peak_interpolation()).
 
 if isempty(rep), return; end
 doDop = isfield(sys, 'report') && isfield(sys.report, 'dopplerInterp') && sys.report.dopplerInterp;
